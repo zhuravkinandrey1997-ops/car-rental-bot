@@ -145,6 +145,8 @@ class ExpenseCancellationForm(StatesGroup):
 
 class FinancialReportForm(StatesGroup):
     month = State()
+    report_type = State()
+    cars = State()
 
 
 FINANCE_MANAGER_IDS = frozenset(
@@ -544,13 +546,21 @@ def expense_category_keyboard() -> InlineKeyboardMarkup:
 def expense_vehicle_keyboard(cars: list[dict]) -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     for index, car in enumerate(cars, start=1):
+        plate = _value(
+            car,
+            "Госномер",
+            "Номер авто",
+            "Номер",
+            "Plate",
+            default="",
+        )
         builder.add(
             KeyboardButton(
-                text=f"{index}. {_car_plate(car)} · {_car_name(car)}"
+                text=f"{index}. {_car_name(car)} ({plate or 'без госномера'})"
             )
         )
     builder.adjust(1)
-    builder.row(KeyboardButton(text="Общие расходы компании"))
+    builder.row(KeyboardButton(text="🏢 Общие расходы (весь автопарк)"))
     builder.row(KeyboardButton(text="Отмена"))
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
@@ -619,6 +629,53 @@ def financial_month_keyboard(months: list[str]) -> InlineKeyboardMarkup:
                 )
             ]
         )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def financial_report_type_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🏢 Общий по всей фирме",
+                    callback_data="financial_type:company",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚗 Выбрать машины",
+                    callback_data="financial_type:cars",
+                )
+            ],
+        ]
+    )
+
+
+def financial_car_selection_keyboard(
+    cars: list[dict],
+    selected_indexes: list[int] | set[int],
+) -> InlineKeyboardMarkup:
+    selected = set(selected_indexes)
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, car in enumerate(cars):
+        marker = "✅" if index in selected else "⬜"
+        label = f"{_car_name(car)} ({_car_plate(car) or 'без госномера'})"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{marker} {label}"[:64],
+                    callback_data=f"financial_car_toggle:{index}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="✅ Рассчитать по выбранным",
+                callback_data="financial_car_calculate",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1341,11 +1398,15 @@ def _format_financial_report(report: dict) -> str:
     lines = [
         f"📈 ФИНАНСОВЫЙ ОТЧЁТ ЗА {report['month']}",
         "",
-        f"Общий приход компании: {_format_number(report['gross_income'])} RUB",
-        f"Прямые расходы: {_format_number(report['direct_expenses'])} RUB",
-        f"ЗП Ксении (10%): {_format_number(report['ksenia_salary'])} RUB",
-        f"Итого расходы: {_format_number(report['total_expenses'])} RUB",
-        f"Чистая прибыль организации: {_format_number(report['company_profit'])} RUB",
+        f"🟢 Общий приход: {_format_number(report['gross_income'])} RUB",
+        f"🔴 Прямые расходы по машинам: "
+        f"{_format_number(report['direct_expenses'])} RUB",
+        f"🏢 Общие расходы компании: "
+        f"{_format_number(report['general_expenses'])} RUB",
+        f"👩‍💼 ЗП Ксении (10%): {_format_number(report['ksenia_salary'])} RUB",
+        f"🔻 Итого расходов: {_format_number(report['total_expenses'])} RUB",
+        f"💎 Чистая прибыль организации: "
+        f"{_format_number(report['company_profit'])} RUB",
         "",
         "🚗 ЧИСТАЯ ПРИБЫЛЬ ПО АВТО:",
     ]
@@ -1363,11 +1424,111 @@ def _format_financial_report(report: dict) -> str:
                     "",
                     label,
                     f"  Приход: {_format_number(car['Приход / Выручка (RUB)'])} RUB",
-                    f"  Прямые расходы: {_format_number(car['Затраты на авто (RUB)'])} RUB",
-                    f"  Чистая прибыль: {_format_number(car['Чистая прибыль авто (RUB)'])} RUB",
+                    f"  Прямые расходы: "
+                    f"{_format_number(car['Затраты на авто (RUB)'])} RUB",
+                    f"  Чистая прибыль: "
+                    f"{_format_number(car['Чистая прибыль авто (RUB)'])} RUB",
                 ]
             )
     return "\n".join(lines)
+
+
+def _car_report_label(car: dict) -> str:
+    name = car.get("Марка и Модель") or f"Авто {car.get('ID Авто', '—')}"
+    plate = car.get("Госномер") or "без госномера"
+    return f"{name} ({plate})"
+
+
+def _financial_car_key(car: dict) -> str:
+    car_id = _value(car, "ID Авто", "ID", "Car ID", default="")
+    if car_id:
+        return f"id:{car_id.casefold()}"
+    plate = _value(
+        car,
+        "Госномер",
+        "Номер авто",
+        "Номер",
+        "Plate",
+        default="",
+    )
+    return f"plate:{plate.casefold()}"
+
+
+def _format_selected_cars_report(
+    report: dict,
+    selected_car_keys: set[str],
+) -> str:
+    selected_cars = [
+        car
+        for car in report.get("cars", [])
+        if _financial_car_key(car) in selected_car_keys
+    ]
+    lines = [
+        f"🚗 ОТЧЁТ ПО ВЫБРАННЫМ АВТО ЗА {report['month']}",
+        "",
+    ]
+    group_income = 0
+    group_expenses = 0
+    group_profit = 0
+    for car in selected_cars:
+        income = car["Приход / Выручка (RUB)"]
+        expenses = car["Затраты на авто (RUB)"]
+        profit = car["Чистая прибыль авто (RUB)"]
+        group_income += income
+        group_expenses += expenses
+        group_profit += profit
+        lines.extend(
+            [
+                f"🚗 {_car_report_label(car)}",
+                f"  Выручка: {_format_number(income)} RUB",
+                "  Расходы на авто:",
+            ]
+        )
+        by_category = car.get("Расходы по статьям", {})
+        if by_category:
+            for category, amount in by_category.items():
+                lines.append(
+                    f"    • {category}: {_format_number(amount)} RUB"
+                )
+        else:
+            lines.append("    • Нет расходов")
+        lines.extend(
+            [
+                f"  Пробег за месяц: +"
+                f"{_format_number(car.get('Пробег за месяц (км)', 0))} км",
+                f"  Чистая прибыль машины: {_format_number(profit)} RUB",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "━━━━━━━━━━━━",
+            f"ИТОГ ПО ГРУППЕ:",
+            f"🟢 Суммарная выручка: {_format_number(group_income)} RUB",
+            f"🔴 Суммарные расходы группы: "
+            f"{_format_number(group_expenses)} RUB",
+            f"💎 Суммарная чистая прибыль группы: "
+            f"{_format_number(group_profit)} RUB",
+        ]
+    )
+    return "\n".join(lines)
+
+
+async def _answer_financial_report(
+    message: Message,
+    text: str,
+    user_id: int,
+) -> None:
+    chunks = split_telegram_message(text)
+    for index, chunk in enumerate(chunks):
+        await message.answer(
+            chunk,
+            reply_markup=(
+                main_keyboard(user_id)
+                if index == len(chunks) - 1
+                else None
+            ),
+        )
 
 
 async def start_expense(message: Message, state: FSMContext) -> None:
@@ -1432,11 +1593,7 @@ async def expense_category_callback(
     await callback.answer(f"Выбрано: {category}")
     await callback.message.edit_reply_markup(reply_markup=None)
     try:
-        cars = [
-            car
-            for car in get_all_cars()
-            if _car_plate(car) and _car_plate(car) != "—"
-        ]
+        cars = list(get_all_cars())
     except Exception:
         logger.exception("Could not load cars for expense")
         await state.clear()
@@ -1458,8 +1615,11 @@ async def expense_vehicle(message: Message, state: FSMContext) -> None:
         return
     value = (message.text or "").strip()
     data = await state.get_data()
-    if value == "Общие расходы компании":
-        vehicle = value
+    if value in {
+        "🏢 Общие расходы (весь автопарк)",
+        "Общие расходы компании",
+    }:
+        vehicle = "Общие"
     else:
         try:
             index = int(value.split(".", 1)[0])
@@ -1467,7 +1627,20 @@ async def expense_vehicle(message: Message, state: FSMContext) -> None:
         except (ValueError, IndexError):
             await message.answer("Выберите автомобиль кнопкой из списка.")
             return
-        vehicle = _car_plate(car)
+        vehicle = _value(
+            car,
+            "Госномер",
+            "Номер авто",
+            "Номер",
+            "Plate",
+            default="",
+        )
+        if not vehicle or vehicle == "—":
+            await message.answer(
+                "У выбранного автомобиля не указан госномер в листе Cars. "
+                "Заполните госномер или выберите общие расходы."
+            )
+            return
     await state.update_data(expense_vehicle=vehicle)
     await state.set_state(ExpenseForm.note)
     await message.answer(
@@ -1718,21 +1891,218 @@ async def financial_month_callback(
     if month_key not in data.get("financial_months", []):
         await callback.answer("Недоступный месяц.", show_alert=True)
         return
+    await callback.answer(f"Выбран месяц: {month_key}")
+    await state.update_data(financial_month=month_key)
+    await state.set_state(FinancialReportForm.report_type)
+    await callback.message.edit_text(
+        f"Месяц отчёта: {month_key}\n\nВыберите тип финансового отчёта:",
+        reply_markup=financial_report_type_keyboard(),
+    )
+    await state.update_data(
+        financial_type_message_id=callback.message.message_id,
+    )
+
+
+async def financial_report_type_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    if not _callback_has_finance_access(callback):
+        await callback.answer(
+            "У вас нет доступа к финансовым операциям.",
+            show_alert=True,
+        )
+        return
+    if await state.get_state() != FinancialReportForm.report_type.state:
+        await callback.answer(
+            "Этот выбор типа отчёта устарел. Откройте отчёт заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if callback.message.message_id != data.get("financial_type_message_id"):
+        await callback.answer(
+            "Используйте последний выбор типа отчёта.",
+            show_alert=True,
+        )
+        return
+    report_type = callback.data.split(":", 1)[1]
+    month_key = data.get("financial_month")
+    if report_type not in {"company", "cars"} or not month_key:
+        await callback.answer("Некорректный тип отчёта.", show_alert=True)
+        return
+
+    if report_type == "company":
+        await callback.answer(f"Формирую отчёт за {month_key}")
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await state.clear()
+        try:
+            report = await asyncio.to_thread(get_financial_report, month_key)
+        except Exception:
+            logger.exception("Could not build financial report for %s", month_key)
+            await callback.message.answer(
+                "Не удалось сформировать финансовый отчёт.",
+                reply_markup=main_keyboard(callback.from_user.id),
+            )
+            return
+        await _answer_financial_report(
+            callback.message,
+            _format_financial_report(report),
+            callback.from_user.id,
+        )
+        return
+
+    try:
+        cars = await asyncio.to_thread(get_all_cars)
+    except Exception:
+        logger.exception("Could not load cars for financial report")
+        await state.clear()
+        await callback.answer(
+            "Не удалось получить список автомобилей.",
+            show_alert=True,
+        )
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            "Не удалось получить список автомобилей.",
+            reply_markup=main_keyboard(callback.from_user.id),
+        )
+        return
+    if not cars:
+        await state.clear()
+        await callback.answer("В листе Cars нет автомобилей.", show_alert=True)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            "В листе Cars нет автомобилей.",
+            reply_markup=main_keyboard(callback.from_user.id),
+        )
+        return
+    await callback.answer("Отметьте нужные автомобили")
+    await state.update_data(
+        financial_cars=cars,
+        selected_car_indexes=[],
+        financial_car_message_id=callback.message.message_id,
+    )
+    await state.set_state(FinancialReportForm.cars)
+    await callback.message.edit_text(
+        f"Отчёт за {month_key}.\nОтметьте автомобили для расчёта:",
+        reply_markup=financial_car_selection_keyboard(cars, []),
+    )
+
+
+async def financial_car_toggle_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    if not _callback_has_finance_access(callback):
+        await callback.answer(
+            "У вас нет доступа к финансовым операциям.",
+            show_alert=True,
+        )
+        return
+    if await state.get_state() != FinancialReportForm.cars.state:
+        await callback.answer(
+            "Этот список автомобилей устарел. Откройте отчёт заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if callback.message.message_id != data.get("financial_car_message_id"):
+        await callback.answer(
+            "Используйте последний список автомобилей.",
+            show_alert=True,
+        )
+        return
+    try:
+        index = int(callback.data.split(":", 1)[1])
+        cars = data.get("financial_cars", [])
+        if index < 0 or index >= len(cars):
+            raise ValueError
+    except (ValueError, IndexError):
+        await callback.answer("Некорректный автомобиль.", show_alert=True)
+        return
+    selected = set(data.get("selected_car_indexes", []))
+    if index in selected:
+        selected.remove(index)
+        answer = "Автомобиль убран из отчёта"
+    else:
+        selected.add(index)
+        answer = "Автомобиль добавлен в отчёт"
+    selected_indexes = sorted(selected)
+    await state.update_data(selected_car_indexes=selected_indexes)
+    await callback.answer(answer)
+    await callback.message.edit_reply_markup(
+        reply_markup=financial_car_selection_keyboard(cars, selected_indexes),
+    )
+
+
+async def financial_car_calculate_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    if not _callback_has_finance_access(callback):
+        await callback.answer(
+            "У вас нет доступа к финансовым операциям.",
+            show_alert=True,
+        )
+        return
+    if await state.get_state() != FinancialReportForm.cars.state:
+        await callback.answer(
+            "Этот список автомобилей устарел. Откройте отчёт заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if callback.message.message_id != data.get("financial_car_message_id"):
+        await callback.answer(
+            "Используйте последний список автомобилей.",
+            show_alert=True,
+        )
+        return
+    selected_indexes = data.get("selected_car_indexes", [])
+    month_key = data.get("financial_month")
+    if not selected_indexes or not month_key:
+        await callback.answer(
+            "Выберите хотя бы один автомобиль.",
+            show_alert=True,
+        )
+        return
+    cars = data.get("financial_cars", [])
+    selected_car_keys = {
+        _financial_car_key(cars[index])
+        for index in selected_indexes
+        if 0 <= index < len(cars)
+    }
+    if not selected_car_keys:
+        await callback.answer(
+            "Выбранные автомобили больше недоступны.",
+            show_alert=True,
+        )
+        return
     await callback.answer(f"Формирую отчёт за {month_key}")
     await callback.message.edit_reply_markup(reply_markup=None)
     await state.clear()
     try:
         report = await asyncio.to_thread(get_financial_report, month_key)
     except Exception:
-        logger.exception("Could not build financial report for %s", month_key)
+        logger.exception("Could not build car financial report for %s", month_key)
         await callback.message.answer(
             "Не удалось сформировать финансовый отчёт.",
             reply_markup=main_keyboard(callback.from_user.id),
         )
         return
-    await callback.message.answer(
-        _format_financial_report(report),
-        reply_markup=main_keyboard(callback.from_user.id),
+    await _answer_financial_report(
+        callback.message,
+        _format_selected_cars_report(report, selected_car_keys),
+        callback.from_user.id,
     )
 
 
@@ -3353,6 +3723,18 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(
         financial_month_callback,
         F.data.startswith("financial_month:"),
+    )
+    dispatcher.callback_query.register(
+        financial_report_type_callback,
+        F.data.startswith("financial_type:"),
+    )
+    dispatcher.callback_query.register(
+        financial_car_toggle_callback,
+        F.data.startswith("financial_car_toggle:"),
+    )
+    dispatcher.callback_query.register(
+        financial_car_calculate_callback,
+        F.data == "financial_car_calculate",
     )
     dispatcher.callback_query.register(
         cancellation_booking_callback,

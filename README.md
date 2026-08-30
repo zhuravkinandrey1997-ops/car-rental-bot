@@ -13,10 +13,10 @@ and writes the rental, return, expense, and financial-summary worksheets through
 - Mark the booking as `Завершена` and update the car mileage after a return
 - Send every active manager a daily 20:00 summary of tomorrow's vehicle
   issuances and returns
-- Record categorized company or vehicle expenses
+- Record categorized expenses linked to a specific vehicle or to the whole fleet
 - Cancel recent expenses after an explicit confirmation; the matching row is
   deleted from `Expenses`
-- Build the current-month company and per-vehicle financial report
+- Build company-wide or selected-vehicle monthly financial reports
 
 ## Setup
 
@@ -68,14 +68,25 @@ does not exist, the bot creates it automatically with the act, booking, vehicle,
 client, mileage, penalty, deposit, payment, and note columns.
 The bot also creates `Expenses`, `Monthly_Summary`, and `Car_Profit_Summary`
 with their required headers when they are missing. Expense entry and financial
-reports are visible only to the configured finance-manager Telegram IDs.
+reports are visible only to the three configured finance-manager Telegram IDs.
+After the expense amount and category are selected, the manager must assign the
+expense either to one car from `Cars` or to `🏢 Общие расходы (весь автопарк)`.
+The stored value is the vehicle plate or `Общие`.
+
 Before building a report, the bot offers the current month, previous month, and
-all additional months found in `Returns_Cash` or `Expenses`. The selected-month
-report uses actual received income from `Итого приход (RUB)` in `Returns_Cash`,
-subtracts direct expenses from `Expenses`, adds Ksenia's salary at 10% of that
-income, and updates both summary worksheets. Vehicle profit subtracts only
-expenses assigned to that vehicle; general company expenses remain in the
-company-level summary.
+all additional months found in `Returns_Cash` or `Expenses`. It then offers a
+company-wide report or an inline multi-select list of vehicles. The company
+report separates vehicle expenses from general company expenses, adds Ksenia's
+salary at 10% of actual received income, and shows organization profit plus
+profit for every car. The selected-vehicle report shows revenue, categorized
+vehicle expenses, monthly mileage and profit for each checked car, followed by
+group totals. General expenses and Ksenia's salary are company-level values and
+are not allocated to a selected vehicle group.
+
+Report revenue uses actual received income from `Итого приход (RUB)` in
+`Returns_Cash`, falling back to the actual rental payment plus received penalty
+top-up for legacy rows. It does not replace a recorded zero payment with the
+accrued rental price. Each calculated report updates the summary worksheets.
 Cancelling an active booking changes its status to `Отменена`, records the
 cancellation reason and deposit outcome, and releases its dates for availability
 checks.

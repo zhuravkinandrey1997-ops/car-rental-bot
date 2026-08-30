@@ -57,6 +57,7 @@ MONTHLY_SUMMARY_HEADERS = [
     "Месяц (ГГГГ-ММ)",
     "Общий приход (RUB)",
     "Прямые расходы (RUB)",
+    "Общие расходы компании (RUB)",
     "ЗП Ксении (10%) (RUB)",
     "Итого расходы (RUB)",
     "Чистая прибыль компании (RUB)",
@@ -433,17 +434,49 @@ def get_financial_report(month_key: str) -> dict:
 
     def return_revenue(record: dict) -> int:
         canonical_income = record.get("Итого приход (RUB)")
-        if str(canonical_income or "").strip():
+        if str(canonical_income if canonical_income is not None else "").strip():
             return _number(canonical_income)
-        rental_paid = (
-            record.get("Фактически оплачено за аренду (RUB)")
-            or record.get("Сумма аренды получена (RUB)")
+        rental_keys = (
+            "Фактически оплачено за аренду (RUB)",
+            "Сумма аренды получена (RUB)",
         )
-        top_up = (
-            record.get("Полученная доплата (RUB)")
-            or record.get("Полученная доплата")
+        top_up_keys = (
+            "Полученная доплата (RUB)",
+            "Полученная доплата",
         )
-        if str(rental_paid or "").strip() or str(top_up or "").strip():
+        rental_paid = next(
+            (
+                record.get(key)
+                for key in rental_keys
+                if str(
+                    record.get(key)
+                    if record.get(key) is not None
+                    else ""
+                ).strip()
+            ),
+            0,
+        )
+        top_up = next(
+            (
+                record.get(key)
+                for key in top_up_keys
+                if str(
+                    record.get(key)
+                    if record.get(key) is not None
+                    else ""
+                ).strip()
+            ),
+            0,
+        )
+        has_actual_payment_fields = any(
+            str(
+                record.get(key)
+                if record.get(key) is not None
+                else ""
+            ).strip()
+            for key in (*rental_keys, *top_up_keys)
+        )
+        if has_actual_payment_fields:
             return _number(rental_paid) + _number(top_up)
         return _number(
             record.get("Стоимость аренды (RUB)")
@@ -478,6 +511,38 @@ def get_financial_report(month_key: str) -> dict:
             or ""
         ).strip()
 
+    def return_plate(record: dict) -> str:
+        return str(
+            record.get("Госномер")
+            or record.get("Номер авто")
+            or record.get("Номер")
+            or record.get("Plate")
+            or ""
+        ).strip().casefold()
+
+    def expense_vehicle(record: dict) -> str:
+        return str(
+            record.get("Автомобиль (Госномер / Общие)")
+            or record.get("Автомобиль")
+            or ""
+        ).strip().casefold()
+
+    def is_general_expense(record: dict) -> bool:
+        vehicle = expense_vehicle(record)
+        return not vehicle or vehicle in {
+            "общие",
+            "общие расходы компании",
+            "общие расходы (весь автопарк)",
+            "🏢 общие расходы (весь автопарк)",
+        }
+
+    def expense_category(record: dict) -> str:
+        return str(
+            record.get("Категория / На что")
+            or record.get("Категория")
+            or "Прочее"
+        ).strip() or "Прочее"
+
     month_returns = [
         record
         for record in returns
@@ -492,34 +557,40 @@ def get_financial_report(month_key: str) -> dict:
     direct_expenses = sum(
         _number(record.get("Сумма (RUB)"))
         for record in month_expenses
+        if not is_general_expense(record)
+    )
+    general_expenses = sum(
+        _number(record.get("Сумма (RUB)"))
+        for record in month_expenses
+        if is_general_expense(record)
     )
     ksenia_salary = round(gross_income * 0.10)
-    total_expenses = direct_expenses + ksenia_salary
+    total_expenses = direct_expenses + general_expenses + ksenia_salary
     company_profit = gross_income - total_expenses
 
     car_income: dict[str, int] = {}
+    car_mileage: dict[str, int] = {}
     for record in month_returns:
-        plate = str(
-            record.get("Госномер")
-            or record.get("Номер авто")
-            or record.get("Номер")
-            or record.get("Plate")
-            or ""
-        ).strip().casefold()
+        plate = return_plate(record)
         if plate:
             car_income[plate] = car_income.get(plate, 0) + return_revenue(record)
+            car_mileage[plate] = car_mileage.get(plate, 0) + _number(
+                record.get("Пробег за аренду (км)")
+                or record.get("Пройденный пробег (км)")
+                or record.get("Пробег за период (км)")
+            )
 
     car_expenses: dict[str, int] = {}
+    car_expenses_by_category: dict[str, dict[str, int]] = {}
     for record in month_expenses:
-        vehicle = str(
-            record.get("Автомобиль (Госномер / Общие)")
-            or ""
-        ).strip().casefold()
-        if vehicle and vehicle != "общие расходы компании":
-            car_expenses[vehicle] = (
-                car_expenses.get(vehicle, 0)
-                + _number(record.get("Сумма (RUB)"))
-            )
+        if is_general_expense(record):
+            continue
+        vehicle = expense_vehicle(record)
+        amount = _number(record.get("Сумма (RUB)"))
+        category = expense_category(record)
+        car_expenses[vehicle] = car_expenses.get(vehicle, 0) + amount
+        categories = car_expenses_by_category.setdefault(vehicle, {})
+        categories[category] = categories.get(category, 0) + amount
 
     car_rows = []
     for car in cars:
@@ -536,6 +607,10 @@ def get_financial_report(month_key: str) -> dict:
                 "Госномер": plate_display,
                 "Приход / Выручка (RUB)": income,
                 "Затраты на авто (RUB)": costs,
+                "Расходы по статьям": dict(
+                    sorted(car_expenses_by_category.get(plate_key, {}).items())
+                ),
+                "Пробег за месяц (км)": car_mileage.get(plate_key, 0),
                 "Чистая прибыль авто (RUB)": income - costs,
             }
         )
@@ -548,6 +623,7 @@ def get_financial_report(month_key: str) -> dict:
             "Месяц (ГГГГ-ММ)": month_key,
             "Общий приход (RUB)": gross_income,
             "Прямые расходы (RUB)": direct_expenses,
+            "Общие расходы компании (RUB)": general_expenses,
             "ЗП Ксении (10%) (RUB)": ksenia_salary,
             "Итого расходы (RUB)": total_expenses,
             "Чистая прибыль компании (RUB)": company_profit,
@@ -566,6 +642,7 @@ def get_financial_report(month_key: str) -> dict:
         "month": month_key,
         "gross_income": gross_income,
         "direct_expenses": direct_expenses,
+        "general_expenses": general_expenses,
         "ksenia_salary": ksenia_salary,
         "total_expenses": total_expenses,
         "company_profit": company_profit,
