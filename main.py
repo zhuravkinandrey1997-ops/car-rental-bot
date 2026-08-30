@@ -235,6 +235,41 @@ def confirmation_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+PAYMENT_METHODS = {
+    "cash": "Наличные",
+    "card": "Банковская карта",
+    "sbp": "Перевод (СБП)",
+    "legal": "Безнал (Юр. лицо)",
+}
+
+
+def payment_methods_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💵 Наличные",
+                    callback_data="payment:cash",
+                ),
+                InlineKeyboardButton(
+                    text="💳 Банковская карта",
+                    callback_data="payment:card",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📱 Перевод (СБП)",
+                    callback_data="payment:sbp",
+                ),
+                InlineKeyboardButton(
+                    text="🏦 Безнал (Юр. лицо)",
+                    callback_data="payment:legal",
+                ),
+            ],
+        ]
+    )
+
+
 def rental_choice_keyboard(items: list[dict]) -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     for index, item in enumerate(items, start=1):
@@ -987,18 +1022,43 @@ async def return_total_paid(message: Message, state: FSMContext) -> None:
         await message.answer(error)
         return
     await state.update_data(total_paid=total_paid)
+    if total_paid == 0:
+        await state.update_data(pay_type="Без оплаты")
+        await state.set_state(ReturnForm.notes)
+        await message.answer(
+            "Фактически получено: 0 RUB.\n"
+            "Способ оплаты автоматически установлен: Без оплаты.\n\n"
+            "Введите примечание или отправьте «нет»:"
+        )
+        return
     await state.set_state(ReturnForm.pay_type)
-    await message.answer("Введите способ оплаты (наличные, карта, перевод и т. п.):")
+    await message.answer(
+        "Выберите способ оплаты:",
+        reply_markup=payment_methods_keyboard(),
+    )
 
 
 async def return_pay_type(message: Message, state: FSMContext) -> None:
-    pay_type = (message.text or "").strip()
+    await message.answer(
+        "Выберите способ оплаты кнопкой ниже:",
+        reply_markup=payment_methods_keyboard(),
+    )
+
+
+async def payment_method_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.data or not callback.message:
+        await callback.answer()
+        return
+    payment_key = callback.data.removeprefix("payment:")
+    pay_type = PAYMENT_METHODS.get(payment_key)
     if not pay_type:
-        await message.answer("Укажите способ оплаты.")
+        await callback.answer("Этот вариант оплаты недоступен.", show_alert=True)
         return
     await state.update_data(pay_type=pay_type)
     await state.set_state(ReturnForm.notes)
-    await message.answer("Введите примечание или отправьте «нет»:")
+    await callback.answer(f"Выбрано: {pay_type}")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("Введите примечание или отправьте «нет»:")
 
 
 async def return_notes(message: Message, state: FSMContext) -> None:
@@ -1076,6 +1136,7 @@ async def error_handler(event: object) -> None:
 def create_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher()
     dispatcher.callback_query.register(calendar_callback, F.data.startswith("calendar:"))
+    dispatcher.callback_query.register(payment_method_callback, F.data.startswith("payment:"))
     dispatcher.message.register(start_handler, CommandStart())
     dispatcher.message.register(show_menu, Command("menu"))
     dispatcher.message.register(cancel_flow, F.text.casefold() == "отмена")
