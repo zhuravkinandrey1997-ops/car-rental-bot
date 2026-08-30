@@ -344,7 +344,7 @@ async def start_availability(message: Message, state: FSMContext) -> None:
     await state.set_state(AvailabilityForm.start_date)
     await message.answer(
         _calendar_prompt("availability", "start"),
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=calendar_keyboard("availability", "start"),
     )
 
 
@@ -415,7 +415,7 @@ async def start_booking(message: Message, state: FSMContext) -> None:
     await state.set_state(BookingForm.start_date)
     await message.answer(
         "Новая бронь.\n\n" + _calendar_prompt("booking", "start"),
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=calendar_keyboard("booking", "start"),
     )
 
 
