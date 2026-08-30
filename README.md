@@ -57,6 +57,9 @@ deposit; an extra damage-payment step is shown only when those penalties exceed
 the deposit. The return records the actual rental payment and method separately
 from any additional payment for damage or penalties, and rejects a repeated
 return if the booking is no longer in `В аренде`.
+Each completed return also creates one row in `Acceptance_Acts`. If the sheet
+does not exist, the bot creates it automatically with the act, booking, vehicle,
+client, mileage, penalty, deposit, payment, and note columns.
 Cancelling an active booking changes its status to `Отменена`, records the
 cancellation reason and deposit outcome, and releases its dates for availability
 checks.

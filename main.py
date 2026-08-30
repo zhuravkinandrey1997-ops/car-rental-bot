@@ -562,6 +562,10 @@ def _parse_int(value: str, field_name: str, minimum: int = 0) -> tuple[int | Non
     return parsed, None
 
 
+def _format_number(value: int | str) -> str:
+    return f"{int(value):,}".replace(",", " ")
+
+
 def _now_minsk() -> datetime.datetime:
     return datetime.datetime.now(MINSK_TZ).replace(second=0, microsecond=0)
 
@@ -948,6 +952,19 @@ def _deposit_settlement_text(calculation: dict[str, int | str]) -> str:
         "Доплата за повреждения/штрафы: "
         f"{abs(difference):,} RUB"
     ).replace(",", " ")
+
+
+def _deposit_outcome_text(calculation: dict[str, int | str]) -> str:
+    difference = int(calculation["deposit_balance"])
+    if difference >= 0:
+        return f"✅ Залог к возврату клиенту: {difference:,} RUB".replace(
+            ",",
+            " ",
+        )
+    return f"🚨 Требуется доплата с клиента: {abs(difference):,} RUB".replace(
+        ",",
+        " ",
+    )
 
 
 async def ensure_manager(message: Message) -> bool:
@@ -2342,57 +2359,78 @@ async def return_notes(message: Message, state: FSMContext) -> None:
     additional_payment_text = ""
     if deposit_balance < 0:
         additional_payment_text = (
-            f"\n• Требуемая доплата за повреждения/штрафы: {required_additional:,} RUB"
-            f"\n• Фактически получено доплаты: {received_additional:,} RUB"
+            "\n• Требуемая доплата за повреждения/штрафы: "
+            f"{_format_number(required_additional)} RUB"
+            "\n• Фактически получено доплаты: "
+            f"{_format_number(received_additional)} RUB"
             f"\n• Способ получения доплаты: {data.get('pay_type', 'Без оплаты')}"
-            f"\n• Осталось получить: {outstanding_additional:,} RUB"
+            "\n• Осталось получить: "
+            f"{_format_number(outstanding_additional)} RUB"
         )
     prepayment_overpayment_text = ""
     if prepayment_overpayment:
         prepayment_overpayment_text = (
-            f"\n• Переплата задатка к возврату: {prepayment_overpayment:,} RUB"
+            "\n• Переплата задатка к возврату: "
+            f"{_format_number(prepayment_overpayment)} RUB"
         )
-    deposit_result = (
-        f"К возврату клиенту: {deposit_balance:,} RUB"
-        if deposit_balance >= 0
-        else f"К доплате с клиента: {abs(deposit_balance):,} RUB"
+    manager = message.from_user
+    manager_name = (
+        getattr(manager, "full_name", "")
+        or getattr(manager, "username", "")
+        or str(getattr(manager, "id", "—"))
+    )
+    await state.update_data(manager_name=manager_name)
+    phone = _value(
+        data["booking"],
+        "Телефон",
+        "Телефон клиента",
+        default="—",
+    )
+    issued_at = _value(
+        data["booking"],
+        "Дата и время выдачи",
+        "Дата выдачи",
+        "Дата начала",
+        default="—",
     )
     act_text = (
-        "🏁 Акт приёма автомобиля\n\n"
+        "🏁 АКТ ПРИЁМА АВТОМОБИЛЯ\n"
+        f"• Бронь №: {_booking_id(data['booking'])}\n"
         f"• Автомобиль: {_car_name(data['car'])} ({_car_plate(data['car'])})\n"
-        f"• Период: {_value(data['booking'], 'Дата и время выдачи', 'Дата начала', 'Дата начала (ГГГГ-ММ-ДД)')} — "
-        f"{data.get('returned_at', _timestamp())}\n"
-        f"• Суммарный пробег: {delta:,} км "
-        f"(Лимит: {int(calculation['mileage_limit']):,} км, "
-        f"перепробег: {int(calculation['over_mileage']):,} км → "
-        f"штраф: {int(calculation['over_mileage_fee']):,} RUB)\n"
-        f"• Просрочка по времени: {int(calculation['late_hours'])} ч. → "
-        f"штраф: {int(calculation['late_fee']):,} RUB\n"
-        f"• Состояние: {calculation['cleanliness']}\n"
+        f"• Клиент: {_value(data['booking'], 'ФИО Клиента', 'Клиент', default='—')} / {phone}\n"
+        f"• Менеджер приёмки: {manager_name}\n"
+        f"• Фактический период: {issued_at} — "
+        f"{data.get('returned_at', _timestamp())}\n\n"
         "\n💰 РАСЧЕТ АРЕНДЫ:\n"
-        f"• Стоимость аренды: {rental_total:,} RUB "
-        f"({int(calculation['daily_rate']):,} × {int(calculation['rental_days'])} сут.)\n"
-        f"• Учтен задаток (предоплата): -{prepayment:,} RUB\n"
-        f"• Остаток к оплате за аренду: {rental_due:,} RUB\n"
-        f"• Фактически оплачено за аренду: {rental_paid:,} RUB\n"
+        f"• Полная стоимость аренды: {_format_number(rental_total)} RUB "
+        f"({_format_number(calculation['daily_rate'])} × "
+        f"{_format_number(calculation['rental_days'])} сут.)\n"
+        f"• Учтен задаток (предоплата): -{_format_number(prepayment)} RUB\n"
+        f"• Остаток к оплате за аренду: {_format_number(rental_due)} RUB\n"
+        f"• Фактически оплачено за аренду: {_format_number(rental_paid)} RUB\n"
         f"• Способ оплаты аренды: {data.get('rental_pay_type', 'Без оплаты')}\n"
-        f"• Осталось оплатить за аренду: {rental_outstanding:,} RUB"
+        f"• Осталось оплатить за аренду: {_format_number(rental_outstanding)} RUB"
         f"{prepayment_overpayment_text}\n\n"
-        "🛡 РАСЧЕТ СТРАХОВОГО ЗАЛОГА:\n"
-        f"• Внесенный залог: {int(data['deposit']):,} RUB\n"
-        f"• Способ оплаты страхового залога: "
-        f"{data.get('deposit_pay_type', 'Без оплаты')}\n"
-        f"• Удержания и штрафы: -{total_penalties:,} RUB "
-        f"(мойка: {int(calculation['wash_fee']):,}; "
-        f"перепробег: {int(calculation['over_mileage_fee']):,}; "
-        f"просрочка: {int(calculation['late_fee']):,}; "
-        f"доп. штрафы: {int(data['extra_fee']):,})\n"
-        f"• Итог по залогу: {deposit_result}\n\n"
-        f"{_deposit_settlement_text(calculation)}"
-        f"{additional_payment_text}\n\n"
+        "🛡 СТРАХОВОЙ ЗАЛОГ И УДЕРЖАНИЯ:\n"
+        f"• Внесённый страховой залог: {_format_number(data['deposit'])} RUB\n"
+        f"• Пробег: Выдача {_format_number(data['start_mileage'])} км / "
+        f"Возврат {_format_number(data['end_mileage'])} км "
+        f"(Итого: {_format_number(delta)} км, "
+        f"Лимит: {_format_number(calculation['mileage_limit'])} км)\n"
+        f"• Перепробег: {_format_number(calculation['over_mileage'])} км -> "
+        f"Штраф: {_format_number(calculation['over_mileage_fee'])} RUB\n"
+        f"• Просрочка по времени: {int(calculation['late_hours'])} ч. -> "
+        f"Штраф: {_format_number(calculation['late_fee'])} RUB\n"
+        f"• Чистота: {calculation['cleanliness']} -> "
+        f"Мойка: {_format_number(calculation['wash_fee'])} RUB\n"
+        f"• Доп. штрафы / удержания: {_format_number(data['extra_fee'])} RUB\n"
+        f"• Суммарно удержано из залога: {_format_number(total_penalties)} RUB\n\n"
+        "ИТОГ К ВЫПЛАТЕ/ДОПЛАТЕ:\n"
+        f"• {_deposit_outcome_text(calculation)}"
+        f"{additional_payment_text}\n"
         f"• Примечание: {notes or '—'}\n\n"
         "Сохранить приём автомобиля?"
-    ).replace(",", " ")
+    )
     await message.answer(
         act_text,
         reply_markup=confirmation_keyboard(),
@@ -2471,6 +2509,21 @@ async def return_confirmation(message: Message, state: FSMContext) -> None:
                 - int(data.get("rental_paid", 0)),
                 0,
             ),
+            manager_name=data.get("manager_name", ""),
+            phone=_value(
+                booking,
+                "Телефон",
+                "Телефон клиента",
+                default="—",
+            ),
+            issued_at=_value(
+                booking,
+                "Дата и время выдачи",
+                "Дата выдачи",
+                "Дата начала",
+                default="—",
+            ),
+            act_created_at=_timestamp(),
         )
     except ValueError:
         logger.warning(

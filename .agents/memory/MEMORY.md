@@ -3,3 +3,4 @@
 - [Booking status transitions](booking-status-transitions.md) — only confirmed reservations may be cancelled; issued rentals must stay in the return workflow.
 - [Evening notification delivery](evening-notification-delivery.md) — use one scheduler process, persisted per-recipient dates, and at-least-once delivery with evening retries.
 - [Rental financial separation](deposit-settlement.md) — booking prepayment reduces rent; insurance deposit covers only return penalties and must remain separate.
+- [Return act idempotency](return-act-idempotency.md) — multi-sheet return writes use booking ID as the retry key and set completion status last.

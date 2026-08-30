@@ -9,6 +9,35 @@ load_dotenv()
 SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME", "leon_rental_fleet_rub_v4")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
 SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+ACCEPTANCE_ACT_HEADERS = [
+    "ID Акта",
+    "ID Брони",
+    "Дата и время создания акта",
+    "Менеджер",
+    "Автомобиль (Марка, Модель, Госномер)",
+    "Клиент (Имя, Телефон)",
+    "Дата и время выдачи",
+    "Дата и время приёма (факт)",
+    "Начальный пробег",
+    "Конечный пробег",
+    "Пройденный пробег (км)",
+    "Лимит пробега (км)",
+    "Перепробег (км)",
+    "Штраф за перепробег (RUB)",
+    "Просрочка по времени (часов)",
+    "Штраф за просрочку (RUB)",
+    "Состояние чистоты (Чистая/Грязная)",
+    "Стоимость мойки (RUB)",
+    "Дополнительные штрафы (RUB)",
+    "Полная стоимость аренды (RUB)",
+    "Задаток / Предоплата (RUB)",
+    "Внесённый страховой залог (RUB)",
+    "Сумма удержаний из залога (RUB)",
+    "Итоговый статус залога (Сумма возврата или Сумма доплаты)",
+    "Фактически принятая доплата (RUB)",
+    "Способ доплаты",
+    "Примечание",
+]
 
 if SERVICE_ACCOUNT_JSON:
     gc = gspread.service_account_from_dict(json.loads(SERVICE_ACCOUNT_JSON))
@@ -26,6 +55,23 @@ ws_cars = sh.worksheet("Cars")
 ws_bookings = sh.worksheet("Bookings")
 ws_returns = sh.worksheet("Returns_Cash")
 ws_managers = sh.worksheet("Managers")
+try:
+    ws_acceptance_acts = sh.worksheet("Acceptance_Acts")
+except gspread.exceptions.WorksheetNotFound:
+    ws_acceptance_acts = sh.add_worksheet(
+        title="Acceptance_Acts",
+        rows=1000,
+        cols=30,
+    )
+acceptance_sheet_headers = ws_acceptance_acts.row_values(1)
+for acceptance_header in ACCEPTANCE_ACT_HEADERS:
+    if acceptance_header not in acceptance_sheet_headers:
+        acceptance_sheet_headers.append(acceptance_header)
+        ws_acceptance_acts.update_cell(
+            1,
+            len(acceptance_sheet_headers),
+            acceptance_header,
+        )
 
 
 def is_manager_authorized(tg_id: int) -> bool:
@@ -448,6 +494,10 @@ def save_actual_return(
     rental_paid: int = 0,
     rental_pay_type: str = "Без оплаты",
     rental_outstanding: int = 0,
+    manager_name: str = "",
+    phone: str = "",
+    issued_at: str = "",
+    act_created_at: str = "",
 ):
     returned_at = returned_at or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     total_penalties = over_mileage_fee + late_fee + wash_fee + extra_fee
@@ -469,12 +519,29 @@ def save_actual_return(
             break
     if booking_row is None:
         raise ValueError(f"Booking {booking_id} was not found")
-    if current_status != "В аренде":
+    returns_records = ws_returns.get_all_records()
+    return_already_saved = any(
+        str(record.get("ID Брони", "")).strip()
+        == str(booking_id).strip()
+        for record in returns_records
+    )
+    acceptance_records = ws_acceptance_acts.get_all_records()
+    acceptance_already_saved = any(
+        str(record.get("ID Брони", "")).strip()
+        == str(booking_id).strip()
+        for record in acceptance_records
+    )
+    if (
+        current_status == "Завершена"
+        and return_already_saved
+        and acceptance_already_saved
+    ):
+        raise ValueError(f"Booking {booking_id} was already returned")
+    if current_status not in {"В аренде", "Завершена"}:
         raise ValueError(
             f"Booking {booking_id} cannot be returned from status {current_status}"
         )
 
-    returns_records = ws_returns.get_all_records()
     new_id = len(returns_records) + 1
     values = {
         "ID Записи": new_id,
@@ -529,10 +596,11 @@ def save_actual_return(
         "Доплата за штрафы (RUB)": max(-deposit_balance, 0),
         "Итоговый расчёт (RUB)": deposit_balance,
     }
-    _append_record(
-        ws_returns,
-        values,
-        [
+    if not return_already_saved:
+        _append_record(
+            ws_returns,
+            values,
+            [
             "ID Записи",
             "ID Брони",
             "Автомобиль",
@@ -583,10 +651,9 @@ def save_actual_return(
             "Доплата по залогу (RUB)",
             "Доплата за штрафы (RUB)",
             "Итоговый расчёт (RUB)",
-        ],
-    )
+            ],
+        )
     booking_updates = {
-            "Статус": "Завершена",
             "Дата и время приёма": returned_at,
             "Пробег при возврате (км)": end_mileage,
             "Пробег за аренду (км)": delta_mileage,
@@ -622,13 +689,66 @@ def save_actual_return(
             "Итоговый расчёт (RUB)": deposit_balance,
             "Примечания / Состояние": notes,
     }
-    booking_headers = _ensure_headers(ws_bookings, list(booking_updates))
+    booking_headers = _ensure_headers(
+        ws_bookings,
+        [*booking_updates, "Статус"],
+    )
     for header, value in booking_updates.items():
         ws_bookings.update_cell(
             booking_row,
             booking_headers.index(header) + 1,
             value,
         )
+
+    acceptance_id = len(acceptance_records) + 1
+    acceptance_values = {
+        "ID Акта": acceptance_id,
+        "ID Брони": booking_id,
+        "Дата и время создания акта": act_created_at or returned_at,
+        "Менеджер": manager_name or str(manager_id),
+        "Автомобиль (Марка, Модель, Госномер)": (
+            f"{car_name} ({plate})"
+        ),
+        "Клиент (Имя, Телефон)": f"{client} / {phone}",
+        "Дата и время выдачи": issued_at,
+        "Дата и время приёма (факт)": returned_at,
+        "Начальный пробег": start_mileage,
+        "Конечный пробег": end_mileage,
+        "Пройденный пробег (км)": delta_mileage,
+        "Лимит пробега (км)": mileage_limit,
+        "Перепробег (км)": over_mileage,
+        "Штраф за перепробег (RUB)": over_mileage_fee,
+        "Просрочка по времени (часов)": late_hours,
+        "Штраф за просрочку (RUB)": late_fee,
+        "Состояние чистоты (Чистая/Грязная)": cleanliness,
+        "Стоимость мойки (RUB)": wash_fee,
+        "Дополнительные штрафы (RUB)": extra_fee,
+        "Полная стоимость аренды (RUB)": rental_total,
+        "Задаток / Предоплата (RUB)": prepayment,
+        "Внесённый страховой залог (RUB)": deposit,
+        "Сумма удержаний из залога (RUB)": total_penalties,
+        "Итоговый статус залога (Сумма возврата или Сумма доплаты)": (
+            f"Сумма возврата: {max(deposit_balance, 0)} RUB"
+            if deposit_balance >= 0
+            else f"Сумма доплаты: {abs(deposit_balance)} RUB"
+        ),
+        "Фактически принятая доплата (RUB)": total_paid,
+        "Способ доплаты": pay_type,
+        "Примечание": notes,
+    }
+    if not acceptance_already_saved:
+        _append_record(
+            ws_acceptance_acts,
+            acceptance_values,
+            ACCEPTANCE_ACT_HEADERS,
+        )
+
+    ws_bookings.update_cell(
+        booking_row,
+        booking_headers.index("Статус") + 1,
+        "Завершена",
+    )
+
     car_cell = ws_cars.find(plate)
     if car_cell:
         car_headers = ws_cars.row_values(1)
