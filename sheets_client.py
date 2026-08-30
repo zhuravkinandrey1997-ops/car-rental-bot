@@ -67,6 +67,34 @@ def get_active_rentals():
     return [b for b in all_bookings if b.get("Статус") in ["В аренде", "Подтверждена"]]
 
 
+def get_active_cars():
+    all_cars = ws_cars.get_all_records()
+    return [car for car in all_cars if car.get("Статус") == "Активен"]
+
+
+def get_active_bookings_for_car(car_id: str, plate: str = ""):
+    active_statuses = ["В аренде", "Подтверждена"]
+    bookings = [
+        booking
+        for booking in ws_bookings.get_all_records()
+        if booking.get("Статус") in active_statuses
+    ]
+    matching_bookings = []
+    for booking in bookings:
+        if str(booking.get("ID Авто", "")).strip() == str(car_id).strip():
+            matching_bookings.append(booking)
+            continue
+        booking_plate = str(
+            booking.get("Госномер")
+            or booking.get("Номер авто")
+            or booking.get("Номер")
+            or ""
+        ).strip()
+        if plate and booking_plate == str(plate).strip():
+            matching_bookings.append(booking)
+    return matching_bookings
+
+
 def get_car_by_id(car_id: str):
     all_cars = ws_cars.get_all_records()
     for car in all_cars:

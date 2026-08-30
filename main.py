@@ -29,6 +29,8 @@ from dotenv import load_dotenv
 from sheets_client import (
     add_new_booking,
     get_active_rentals,
+    get_active_bookings_for_car,
+    get_active_cars,
     get_available_cars,
     get_car_by_id,
     get_car_by_plate,
@@ -78,6 +80,11 @@ class BookingForm(StatesGroup):
     confirmation = State()
 
 
+class OccupancyForm(StatesGroup):
+    car = State()
+    calendar = State()
+
+
 class ReturnForm(StatesGroup):
     booking = State()
     end_mileage = State()
@@ -99,11 +106,16 @@ def calendar_keyboard(
     minimum_date: datetime.date | None = None,
     year: int | None = None,
     month: int | None = None,
+    occupied_dates: dict[str, list[str]] | None = None,
+    allow_past: bool = False,
 ) -> InlineKeyboardMarkup:
-    minimum_date = minimum_date or datetime.date.today()
-    year = year or minimum_date.year
-    month = month or minimum_date.month
-    minimum_month = (minimum_date.year, minimum_date.month)
+    if not allow_past:
+        minimum_date = minimum_date or datetime.date.today()
+    year = year or (minimum_date or datetime.date.today()).year
+    month = month or (minimum_date or datetime.date.today()).month
+    minimum_month = (
+        (minimum_date.year, minimum_date.month) if minimum_date else None
+    )
     previous_year, previous_month = _shift_month(year, month, -1)
     next_year, next_month = _shift_month(year, month, 1)
 
@@ -119,11 +131,18 @@ def calendar_keyboard(
                 text="‹",
                 callback_data=(
                     f"calendar:{flow}:{stage}:{previous_year}:{previous_month}"
-                    if (previous_year, previous_month) > minimum_month
+                    if minimum_month is None
+                    or (previous_year, previous_month) > minimum_month
                     else "calendar:noop"
                 ),
             ),
-            InlineKeyboardButton(text="Сегодня", callback_data=f"calendar:{flow}:{stage}:{minimum_date.year}:{minimum_date.month}"),
+            InlineKeyboardButton(
+                text="Сегодня",
+                callback_data=(
+                    f"calendar:{flow}:{stage}:{datetime.date.today().year}:"
+                    f"{datetime.date.today().month}"
+                ),
+            ),
             InlineKeyboardButton(
                 text="›",
                 callback_data=f"calendar:{flow}:{stage}:{next_year}:{next_month}",
@@ -142,7 +161,16 @@ def calendar_keyboard(
                 row.append(InlineKeyboardButton(text=" ", callback_data="calendar:noop"))
                 continue
             current_date = datetime.date(year, month, day)
-            if current_date < minimum_date:
+            if occupied_dates and current_date.isoformat() in occupied_dates:
+                row.append(
+                    InlineKeyboardButton(
+                        text=f"🔴 {day}",
+                        callback_data=(
+                            f"calendar:{flow}:{stage}:busy:{current_date.isoformat()}"
+                        ),
+                    )
+                )
+            elif minimum_date and current_date < minimum_date:
                 row.append(InlineKeyboardButton(text="·", callback_data="calendar:noop"))
             else:
                 row.append(
@@ -186,6 +214,7 @@ def main_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="Активные аренды"),
                 KeyboardButton(text="Оформить возврат"),
             ],
+            [KeyboardButton(text="🔍 Проверка броней")],
             [KeyboardButton(text="Отмена")],
         ],
         resize_keyboard=True,
@@ -306,6 +335,40 @@ def _booking_label(booking: dict) -> str:
         f"{_value(booking, 'Дата окончания (ГГГГ-ММ-ДД)', 'Дата окончания')}"
     )
     return f"{car} · {dates}"
+
+
+def _occupied_dates(bookings: list[dict]) -> dict[str, list[str]]:
+    occupied: dict[str, list[str]] = {}
+    for booking in bookings:
+        try:
+            start_date = datetime.date.fromisoformat(
+                _value(
+                    booking,
+                    "Дата начала (ГГГГ-ММ-ДД)",
+                    "Дата начала",
+                    default="",
+                )
+            )
+            end_date = datetime.date.fromisoformat(
+                _value(
+                    booking,
+                    "Дата окончания (ГГГГ-ММ-ДД)",
+                    "Дата окончания",
+                    default="",
+                )
+            )
+        except ValueError:
+            logger.warning("Skipping booking with invalid dates: %s", _booking_id(booking))
+            continue
+
+        if end_date < start_date:
+            continue
+        booking_id = _booking_id(booking)
+        current_date = start_date
+        while current_date <= end_date:
+            occupied.setdefault(current_date.isoformat(), []).append(booking_id)
+            current_date += datetime.timedelta(days=1)
+    return occupied
 
 
 def _parse_date(value: str) -> bool:
@@ -502,7 +565,82 @@ async def _finish_booking_dates(
     await message.answer("Выберите автомобиль:", reply_markup=car_choice_keyboard(cars))
 
 
-def _calendar_minimum_date(flow: str, stage: str, data: dict) -> datetime.date:
+async def start_occupancy(message: Message, state: FSMContext) -> None:
+    if not await ensure_manager(message):
+        return
+    await state.clear()
+    try:
+        cars = get_active_cars()
+    except Exception:
+        logger.exception("Could not load cars for occupancy calendar")
+        await message.answer(
+            "Не удалось получить список автомобилей.",
+            reply_markup=main_keyboard(),
+        )
+        return
+    if not cars:
+        await message.answer(
+            "В листе Cars нет активных автомобилей.",
+            reply_markup=main_keyboard(),
+        )
+        return
+    await state.update_data(cars=cars)
+    await state.set_state(OccupancyForm.car)
+    await message.answer(
+        "Выберите автомобиль для проверки занятости:",
+        reply_markup=car_choice_keyboard(cars),
+    )
+
+
+async def occupancy_car(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    cars = data.get("cars", [])
+    try:
+        choice = int((message.text or "").split(".", 1)[0])
+        car = cars[choice - 1]
+    except (ValueError, IndexError):
+        await message.answer("Выберите автомобиль кнопкой из списка.")
+        return
+
+    car_id = _car_id(car)
+    plate = _car_plate(car)
+    try:
+        bookings = get_active_bookings_for_car(car_id, plate)
+    except Exception:
+        logger.exception("Could not load bookings for occupancy calendar")
+        await state.clear()
+        await message.answer(
+            "Не удалось получить брони из Google Sheets.",
+            reply_markup=main_keyboard(),
+        )
+        return
+
+    await state.update_data(
+        selected_car=car,
+        occupancy_bookings=bookings,
+    )
+    await state.set_state(OccupancyForm.calendar)
+    await message.answer(
+        "📅 Занятость автомобиля\n"
+        f"{_car_name(car)} ({plate})\n\n"
+        "🔴 — дата занята. Нажмите на неё, чтобы увидеть номер брони.\n"
+        "Обычная дата — свободна.",
+        reply_markup=calendar_keyboard(
+            "occupancy",
+            "calendar",
+            allow_past=True,
+            occupied_dates=_occupied_dates(bookings),
+        ),
+    )
+
+
+def _calendar_minimum_date(
+    flow: str,
+    stage: str,
+    data: dict,
+) -> datetime.date | None:
+    if flow == "occupancy":
+        return None
     if stage == "end" and data.get("start_date"):
         return datetime.date.fromisoformat(data["start_date"])
     return datetime.date.today()
@@ -528,7 +666,7 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
     minimum_date = _calendar_minimum_date(flow, stage, data)
     message = callback.message
 
-    if len(parts) == 5 and parts[3] != "day":
+    if len(parts) == 5 and parts[3] not in ("day", "busy"):
         try:
             year = int(parts[3])
             month = int(parts[4])
@@ -543,8 +681,31 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
                 minimum_date=minimum_date,
                 year=year,
                 month=month,
+                allow_past=flow == "occupancy",
+                occupied_dates=(
+                    _occupied_dates(data.get("occupancy_bookings", []))
+                    if flow == "occupancy"
+                    else None
+                ),
             )
         )
+        return
+
+    if len(parts) == 5 and parts[3] == "busy":
+        try:
+            selected_date = datetime.date.fromisoformat(parts[4])
+        except ValueError:
+            await callback.answer("Некорректная дата.", show_alert=True)
+            return
+        occupied = _occupied_dates(data.get("occupancy_bookings", []))
+        booking_ids = occupied.get(selected_date.isoformat(), [])
+        if booking_ids:
+            await callback.answer(
+                "Дата занята: " + ", ".join(f"Бронь #{booking_id}" for booking_id in booking_ids),
+                show_alert=True,
+            )
+        else:
+            await callback.answer("Эта дата больше не занята.")
         return
 
     if len(parts) != 5 or parts[3] != "day":
@@ -556,11 +717,16 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
     except ValueError:
         await callback.answer("Некорректная дата.", show_alert=True)
         return
-    if selected_date < minimum_date:
+    if minimum_date and selected_date < minimum_date:
         await callback.answer("Эта дата недоступна для выбора.", show_alert=True)
         return
 
     selected_value = selected_date.isoformat()
+    if flow == "occupancy" and stage == "calendar":
+        await callback.answer(
+            f"Свободная дата: {selected_date.strftime('%d.%m.%Y')}"
+        )
+        return
     await callback.answer()
 
     if flow == "availability" and stage == "start":
@@ -918,6 +1084,7 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(start_booking, F.text == "Новая бронь")
     dispatcher.message.register(list_active_rentals, F.text == "Активные аренды")
     dispatcher.message.register(start_return, F.text == "Оформить возврат")
+    dispatcher.message.register(start_occupancy, F.text == "🔍 Проверка броней")
 
     dispatcher.message.register(availability_start_date, AvailabilityForm.start_date)
     dispatcher.message.register(availability_end_date, AvailabilityForm.end_date)
@@ -929,6 +1096,8 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(booking_phone, BookingForm.phone)
     dispatcher.message.register(booking_price, BookingForm.price)
     dispatcher.message.register(booking_confirmation, BookingForm.confirmation)
+
+    dispatcher.message.register(occupancy_car, OccupancyForm.car)
 
     dispatcher.message.register(return_booking, ReturnForm.booking)
     dispatcher.message.register(return_end_mileage, ReturnForm.end_mileage)
