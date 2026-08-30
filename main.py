@@ -31,6 +31,7 @@ from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
 from sheets_client import (
+    add_expense,
     add_new_booking,
     cancel_booking,
     get_active_rentals,
@@ -42,6 +43,7 @@ from sheets_client import (
     get_car_by_plate,
     get_cancellable_bookings_for_car,
     get_confirmed_bookings,
+    get_financial_report,
     get_pending_notification_manager_ids,
     get_returnable_rentals,
     get_tomorrow_bookings,
@@ -123,6 +125,32 @@ class ReturnForm(StatesGroup):
     pay_type = State()
     notes = State()
     confirmation = State()
+
+
+class ExpenseForm(StatesGroup):
+    amount = State()
+    category = State()
+    vehicle = State()
+    note = State()
+    confirmation = State()
+
+
+FINANCE_MANAGER_IDS = frozenset(
+    {
+        661842368,
+        946721277,
+        1574781782,
+        952125424,
+    }
+)
+EXPENSE_CATEGORIES = (
+    "Мойка / Детейлинг",
+    "ТО / Ремонт",
+    "Топливо",
+    "Страховка / Штрафы",
+    "Офис / Сервисы / Реклама",
+    "Прочее",
+)
 
 
 def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
@@ -233,9 +261,8 @@ def _calendar_prompt(flow: str, stage: str, minimum_date: datetime.date | None =
     )
 
 
-def main_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
+def main_keyboard(tg_id: int | None = None) -> ReplyKeyboardMarkup:
+    rows = [
             [
                 KeyboardButton(text="Доступные авто"),
                 KeyboardButton(text="Новая бронь"),
@@ -250,7 +277,17 @@ def main_keyboard() -> ReplyKeyboardMarkup:
             ],
             [KeyboardButton(text="🚫 Отмена брони")],
             [KeyboardButton(text="Отмена")],
-        ],
+        ]
+    if tg_id in FINANCE_MANAGER_IDS:
+        rows.insert(
+            3,
+            [
+                KeyboardButton(text="💸 Внести расход"),
+                KeyboardButton(text="📈 Фин. отчет"),
+            ],
+        )
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -403,6 +440,34 @@ def car_choice_keyboard(cars: list[dict]) -> ReplyKeyboardMarkup:
     for index, car in enumerate(cars, start=1):
         builder.add(KeyboardButton(text=f"{index}. {_car_label(car)}"))
     builder.adjust(1)
+    builder.row(KeyboardButton(text="Отмена"))
+    return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
+
+
+def expense_category_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=category,
+                    callback_data=f"expense_category:{index}",
+                )
+            ]
+            for index, category in enumerate(EXPENSE_CATEGORIES)
+        ]
+    )
+
+
+def expense_vehicle_keyboard(cars: list[dict]) -> ReplyKeyboardMarkup:
+    builder = ReplyKeyboardBuilder()
+    for index, car in enumerate(cars, start=1):
+        builder.add(
+            KeyboardButton(
+                text=f"{index}. {_car_plate(car)} · {_car_name(car)}"
+            )
+        )
+    builder.adjust(1)
+    builder.row(KeyboardButton(text="Общие расходы компании"))
     builder.row(KeyboardButton(text="Отмена"))
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
@@ -1080,7 +1145,12 @@ async def ensure_manager(message: Message) -> bool:
 
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Операция отменена.", reply_markup=main_keyboard())
+    await message.answer(
+        "Операция отменена.",
+        reply_markup=main_keyboard(
+            message.from_user.id if message.from_user else None
+        ),
+    )
 
 
 async def show_menu(message: Message, state: FSMContext) -> None:
@@ -1089,12 +1159,243 @@ async def show_menu(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "Панель управления автопрокатом готова. Выберите операцию:",
-        reply_markup=main_keyboard(),
+        reply_markup=main_keyboard(
+            message.from_user.id if message.from_user else None
+        ),
     )
 
 
 async def start_handler(message: Message, state: FSMContext) -> None:
     await show_menu(message, state)
+
+
+async def ensure_finance_access(message: Message) -> bool:
+    user = message.from_user
+    if user is None or user.id not in FINANCE_MANAGER_IDS:
+        await message.answer(
+            "Финансовые операции доступны только уполномоченным менеджерам."
+        )
+        return False
+    return True
+
+
+def _callback_has_finance_access(callback: CallbackQuery) -> bool:
+    return (
+        callback.from_user is not None
+        and callback.from_user.id in FINANCE_MANAGER_IDS
+    )
+
+
+def _format_financial_report(report: dict) -> str:
+    lines = [
+        f"📈 ФИНАНСОВЫЙ ОТЧЁТ ЗА {report['month']}",
+        "",
+        f"Общий приход компании: {_format_number(report['gross_income'])} RUB",
+        f"Прямые расходы: {_format_number(report['direct_expenses'])} RUB",
+        f"ЗП Ксении (10%): {_format_number(report['ksenia_salary'])} RUB",
+        f"Итого расходы: {_format_number(report['total_expenses'])} RUB",
+        f"Чистая прибыль организации: {_format_number(report['company_profit'])} RUB",
+        "",
+        "🚗 ЧИСТАЯ ПРИБЫЛЬ ПО АВТО:",
+    ]
+    if not report["cars"]:
+        lines.append("Нет автомобилей для детализации.")
+    else:
+        for car in report["cars"]:
+            label = (
+                f"{car['Марка и Модель']} ({car['Госномер']})"
+                if car["Марка и Модель"]
+                else f"Авто {car['ID Авто']} ({car['Госномер']})"
+            )
+            lines.extend(
+                [
+                    "",
+                    label,
+                    f"  Приход: {_format_number(car['Приход / Выручка (RUB)'])} RUB",
+                    f"  Прямые расходы: {_format_number(car['Затраты на авто (RUB)'])} RUB",
+                    f"  Чистая прибыль: {_format_number(car['Чистая прибыль авто (RUB)'])} RUB",
+                ]
+            )
+    return "\n".join(lines)
+
+
+async def start_expense(message: Message, state: FSMContext) -> None:
+    if not await ensure_finance_access(message):
+        return
+    await state.clear()
+    await state.set_state(ExpenseForm.amount)
+    await message.answer(
+        "Введите сумму расхода в RUB:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+async def expense_amount(message: Message, state: FSMContext) -> None:
+    if not await ensure_finance_access(message):
+        return
+    amount, error = _parse_int(message.text or "", "сумма расхода", minimum=1)
+    if error:
+        await message.answer(error)
+        return
+    await state.update_data(expense_amount=amount)
+    await state.set_state(ExpenseForm.category)
+    category_message = await message.answer(
+        "Выберите статью расхода:",
+        reply_markup=expense_category_keyboard(),
+    )
+    await state.update_data(category_message_id=category_message.message_id)
+
+
+async def expense_category_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    if not _callback_has_finance_access(callback):
+        await callback.answer(
+            "У вас нет доступа к финансовым операциям.",
+            show_alert=True,
+        )
+        return
+    if await state.get_state() != ExpenseForm.category.state:
+        await callback.answer(
+            "Этот выбор статьи устарел. Начните внесение расхода заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if callback.message.message_id != data.get("category_message_id"):
+        await callback.answer(
+            "Используйте последние кнопки выбора статьи.",
+            show_alert=True,
+        )
+        return
+    try:
+        category_index = int(callback.data.split(":", 1)[1])
+        category = EXPENSE_CATEGORIES[category_index]
+    except (ValueError, IndexError):
+        await callback.answer("Некорректная статья расхода.", show_alert=True)
+        return
+    await callback.answer(f"Выбрано: {category}")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    try:
+        cars = [
+            car
+            for car in get_all_cars()
+            if _car_plate(car) and _car_plate(car) != "—"
+        ]
+    except Exception:
+        logger.exception("Could not load cars for expense")
+        await state.clear()
+        await callback.message.answer(
+            "Не удалось получить список автомобилей.",
+            reply_markup=main_keyboard(callback.from_user.id),
+        )
+        return
+    await state.update_data(expense_category=category, expense_cars=cars)
+    await state.set_state(ExpenseForm.vehicle)
+    await callback.message.answer(
+        "Выберите автомобиль для расхода или общие расходы компании:",
+        reply_markup=expense_vehicle_keyboard(cars),
+    )
+
+
+async def expense_vehicle(message: Message, state: FSMContext) -> None:
+    if not await ensure_finance_access(message):
+        return
+    value = (message.text or "").strip()
+    data = await state.get_data()
+    if value == "Общие расходы компании":
+        vehicle = value
+    else:
+        try:
+            index = int(value.split(".", 1)[0])
+            car = data.get("expense_cars", [])[index - 1]
+        except (ValueError, IndexError):
+            await message.answer("Выберите автомобиль кнопкой из списка.")
+            return
+        vehicle = _car_plate(car)
+    await state.update_data(expense_vehicle=vehicle)
+    await state.set_state(ExpenseForm.note)
+    await message.answer(
+        "Введите комментарий/примечание к расходу или отправьте «нет»:"
+    )
+
+
+async def expense_note(message: Message, state: FSMContext) -> None:
+    if not await ensure_finance_access(message):
+        return
+    note = (message.text or "").strip()
+    if note.lower() == "нет":
+        note = ""
+    await state.update_data(expense_note=note)
+    data = await state.get_data()
+    await state.set_state(ExpenseForm.confirmation)
+    await message.answer(
+        "Проверьте расход:\n\n"
+        f"Сумма: {_format_number(data['expense_amount'])} RUB\n"
+        f"Статья: {data['expense_category']}\n"
+        f"Привязка: {data['expense_vehicle']}\n"
+        f"Примечание: {note or '—'}\n\n"
+        "Сохранить расход?",
+        reply_markup=confirmation_keyboard(),
+    )
+
+
+async def expense_confirmation(message: Message, state: FSMContext) -> None:
+    if not await ensure_finance_access(message):
+        return
+    if (message.text or "").strip() != "Подтвердить":
+        await cancel_flow(message, state)
+        return
+    data = await state.get_data()
+    user = message.from_user
+    try:
+        expense_id = await asyncio.to_thread(
+            add_expense,
+            int(data["expense_amount"]),
+            data["expense_category"],
+            data["expense_vehicle"],
+            user.id if user else 0,
+            _manager_display_name(user),
+            data.get("expense_note", ""),
+            _now_minsk().strftime("%Y-%m-%d"),
+        )
+    except Exception:
+        logger.exception("Could not save expense")
+        await state.clear()
+        await message.answer(
+            "Не удалось сохранить расход в Google Sheets.",
+            reply_markup=main_keyboard(user.id if user else None),
+        )
+        return
+    await state.clear()
+    await message.answer(
+        f"Расход №{expense_id} сохранён.",
+        reply_markup=main_keyboard(user.id if user else None),
+    )
+
+
+async def start_financial_report(message: Message, state: FSMContext) -> None:
+    if not await ensure_finance_access(message):
+        return
+    await state.clear()
+    month_key = _now_minsk().strftime("%Y-%m")
+    try:
+        report = await asyncio.to_thread(get_financial_report, month_key)
+    except Exception:
+        logger.exception("Could not build financial report")
+        await message.answer(
+            "Не удалось сформировать финансовый отчёт.",
+            reply_markup=main_keyboard(message.from_user.id),
+        )
+        return
+    await message.answer(
+        _format_financial_report(report),
+        reply_markup=main_keyboard(message.from_user.id),
+    )
 
 
 async def start_availability(message: Message, state: FSMContext) -> None:
@@ -2666,7 +2967,12 @@ async def return_confirmation(message: Message, state: FSMContext) -> None:
 
 async def unknown_message(message: Message) -> None:
     if await ensure_manager(message):
-        await message.answer("Выберите действие кнопками меню.", reply_markup=main_keyboard())
+        await message.answer(
+            "Выберите действие кнопками меню.",
+            reply_markup=main_keyboard(
+                message.from_user.id if message.from_user else None
+            ),
+        )
 
 
 async def error_handler(event: object) -> None:
@@ -2678,6 +2984,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(calendar_callback, F.data.startswith("calendar:"))
     dispatcher.callback_query.register(payment_method_callback, F.data.startswith("payment:"))
     dispatcher.callback_query.register(cleanliness_callback, F.data.startswith("cleanliness:"))
+    dispatcher.callback_query.register(
+        expense_category_callback,
+        F.data.startswith("expense_category:"),
+    )
     dispatcher.callback_query.register(
         cancellation_booking_callback,
         F.data.startswith("cancel_booking:"),
@@ -2698,6 +3008,11 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(start_return, F.text == "Оформить возврат")
     dispatcher.message.register(start_occupancy, F.text == "🔍 Проверка броней")
     dispatcher.message.register(start_cancellation, F.text == "🚫 Отмена брони")
+    dispatcher.message.register(start_expense, F.text == "💸 Внести расход")
+    dispatcher.message.register(
+        start_financial_report,
+        F.text == "📈 Фин. отчет",
+    )
 
     dispatcher.message.register(availability_start_date, AvailabilityForm.start_date)
     dispatcher.message.register(availability_end_date, AvailabilityForm.end_date)
@@ -2735,6 +3050,14 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(return_pay_type, ReturnForm.pay_type)
     dispatcher.message.register(return_notes, ReturnForm.notes)
     dispatcher.message.register(return_confirmation, ReturnForm.confirmation)
+
+    dispatcher.message.register(expense_amount, ExpenseForm.amount)
+    dispatcher.message.register(expense_vehicle, ExpenseForm.vehicle)
+    dispatcher.message.register(expense_note, ExpenseForm.note)
+    dispatcher.message.register(
+        expense_confirmation,
+        ExpenseForm.confirmation,
+    )
 
     dispatcher.message.register(unknown_message)
     dispatcher.errors.register(error_handler)

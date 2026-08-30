@@ -38,6 +38,32 @@ ACCEPTANCE_ACT_HEADERS = [
     "Способ доплаты",
     "Примечание",
 ]
+EXPENSE_HEADERS = [
+    "ID Записи",
+    "Дата",
+    "Сумма (RUB)",
+    "Категория / На что",
+    "Автомобиль (Госномер / Общие)",
+    "Telegram ID",
+    "Имя",
+    "Примечание",
+]
+MONTHLY_SUMMARY_HEADERS = [
+    "Месяц (ГГГГ-ММ)",
+    "Общий приход (RUB)",
+    "Прямые расходы (RUB)",
+    "ЗП Ксении (10%) (RUB)",
+    "Итого расходы (RUB)",
+    "Чистая прибыль компании (RUB)",
+]
+CAR_PROFIT_SUMMARY_HEADERS = [
+    "ID Авто",
+    "Марка и Модель",
+    "Госномер",
+    "Приход / Выручка (RUB)",
+    "Затраты на авто (RUB)",
+    "Чистая прибыль авто (RUB)",
+]
 
 if SERVICE_ACCOUNT_JSON:
     gc = gspread.service_account_from_dict(json.loads(SERVICE_ACCOUNT_JSON))
@@ -215,6 +241,253 @@ def _ensure_headers(ws, required_headers: list[str]) -> list[str]:
 def _append_record(ws, values: dict[str, object], required_headers: list[str]) -> None:
     headers = _ensure_headers(ws, required_headers)
     ws.append_row([values.get(header, "") for header in headers])
+
+
+def _get_or_create_sheet(title: str, headers: list[str]):
+    try:
+        worksheet = sh.worksheet(title)
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = sh.add_worksheet(
+            title=title,
+            rows=1000,
+            cols=max(30, len(headers)),
+        )
+    _ensure_headers(worksheet, headers)
+    return worksheet
+
+
+ws_expenses = _get_or_create_sheet("Expenses", EXPENSE_HEADERS)
+ws_monthly_summary = _get_or_create_sheet(
+    "Monthly_Summary",
+    MONTHLY_SUMMARY_HEADERS,
+)
+ws_car_profit_summary = _get_or_create_sheet(
+    "Car_Profit_Summary",
+    CAR_PROFIT_SUMMARY_HEADERS,
+)
+
+
+def _number(value: object) -> int:
+    raw = str(value or "").strip().replace(" ", "").replace(",", "")
+    if not raw:
+        return 0
+    try:
+        return int(float(raw))
+    except ValueError:
+        return 0
+
+
+def _month_from_record(record: dict, *keys: str) -> str:
+    for key in keys:
+        raw = str(record.get(key, "") or "").strip()
+        if len(raw) >= 7 and raw[4] == "-" and raw[:7].replace("-", "").isdigit():
+            return raw[:7]
+        for date_format in ("%d.%m.%Y", "%d.%m.%Y %H:%M"):
+            try:
+                return datetime.datetime.strptime(raw, date_format).strftime("%Y-%m")
+            except ValueError:
+                continue
+    return ""
+
+
+def _upsert_record(
+    ws,
+    key_header: str,
+    key_value: object,
+    values: dict[str, object],
+    required_headers: list[str],
+) -> None:
+    records = ws.get_all_records()
+    headers = _ensure_headers(ws, required_headers)
+    target_row = None
+    for row_number, record in enumerate(records, start=2):
+        if str(record.get(key_header, "")).strip() == str(key_value).strip():
+            target_row = row_number
+            break
+    if target_row is None:
+        ws.append_row([values.get(header, "") for header in headers])
+        return
+    for header, value in values.items():
+        ws.update_cell(target_row, headers.index(header) + 1, value)
+
+
+def add_expense(
+    amount: int,
+    category: str,
+    vehicle: str,
+    telegram_id: int,
+    name: str,
+    note: str,
+    expense_date: str,
+) -> int:
+    records = ws_expenses.get_all_records()
+    existing_ids = [_number(record.get("ID Записи")) for record in records]
+    expense_id = max(existing_ids, default=0) + 1
+    _append_record(
+        ws_expenses,
+        {
+            "ID Записи": expense_id,
+            "Дата": expense_date,
+            "Сумма (RUB)": amount,
+            "Категория / На что": category,
+            "Автомобиль (Госномер / Общие)": vehicle,
+            "Telegram ID": telegram_id,
+            "Имя": name,
+            "Примечание": note,
+        },
+        EXPENSE_HEADERS,
+    )
+    return expense_id
+
+
+def get_financial_report(month_key: str) -> dict:
+    returns = ws_returns.get_all_records()
+    expenses = ws_expenses.get_all_records()
+    cars = ws_cars.get_all_records()
+
+    def in_month(record: dict, *keys: str) -> bool:
+        return _month_from_record(record, *keys) == month_key
+
+    def return_revenue(record: dict) -> int:
+        canonical_income = record.get("Итого приход (RUB)")
+        if str(canonical_income or "").strip():
+            return _number(canonical_income)
+        rental_paid = (
+            record.get("Фактически оплачено за аренду (RUB)")
+            or record.get("Сумма аренды получена (RUB)")
+        )
+        top_up = (
+            record.get("Полученная доплата (RUB)")
+            or record.get("Полученная доплата")
+        )
+        if str(rental_paid or "").strip() or str(top_up or "").strip():
+            return _number(rental_paid) + _number(top_up)
+        return _number(
+            record.get("Стоимость аренды (RUB)")
+            or record.get("Сумма аренды (RUB)")
+        )
+
+    def car_id(car: dict) -> str:
+        return str(
+            car.get("ID Авто")
+            or car.get("ID")
+            or car.get("Car ID")
+            or ""
+        ).strip()
+
+    def car_plate(car: dict) -> str:
+        return str(
+            car.get("Госномер")
+            or car.get("Номер авто")
+            or car.get("Номер")
+            or car.get("Plate")
+            or ""
+        ).strip()
+
+    def car_name(car: dict) -> str:
+        return str(
+            car.get("Марка и Модель")
+            or car.get("Марка и модель")
+            or car.get("Марка Модель")
+            or car.get("Название")
+            or car.get("Авто")
+            or car.get("Модель")
+            or ""
+        ).strip()
+
+    month_returns = [
+        record
+        for record in returns
+        if in_month(record, "Дата возврата", "Дата и время приёма")
+    ]
+    month_expenses = [
+        record
+        for record in expenses
+        if in_month(record, "Дата")
+    ]
+    gross_income = sum(return_revenue(record) for record in month_returns)
+    direct_expenses = sum(
+        _number(record.get("Сумма (RUB)"))
+        for record in month_expenses
+    )
+    ksenia_salary = round(gross_income * 0.10)
+    total_expenses = direct_expenses + ksenia_salary
+    company_profit = gross_income - total_expenses
+
+    car_income: dict[str, int] = {}
+    for record in month_returns:
+        plate = str(
+            record.get("Госномер")
+            or record.get("Номер авто")
+            or record.get("Номер")
+            or record.get("Plate")
+            or ""
+        ).strip().casefold()
+        if plate:
+            car_income[plate] = car_income.get(plate, 0) + return_revenue(record)
+
+    car_expenses: dict[str, int] = {}
+    for record in month_expenses:
+        vehicle = str(
+            record.get("Автомобиль (Госномер / Общие)")
+            or ""
+        ).strip().casefold()
+        if vehicle and vehicle != "общие расходы компании":
+            car_expenses[vehicle] = (
+                car_expenses.get(vehicle, 0)
+                + _number(record.get("Сумма (RUB)"))
+            )
+
+    car_rows = []
+    for car in cars:
+        plate_display = car_plate(car)
+        plate_key = plate_display.casefold()
+        stable_car_id = car_id(car) or plate_display
+        display_name = car_name(car)
+        income = car_income.get(plate_key, 0)
+        costs = car_expenses.get(plate_key, 0)
+        car_rows.append(
+            {
+                "ID Авто": stable_car_id,
+                "Марка и Модель": display_name,
+                "Госномер": plate_display,
+                "Приход / Выручка (RUB)": income,
+                "Затраты на авто (RUB)": costs,
+                "Чистая прибыль авто (RUB)": income - costs,
+            }
+        )
+
+    _upsert_record(
+        ws_monthly_summary,
+        "Месяц (ГГГГ-ММ)",
+        month_key,
+        {
+            "Месяц (ГГГГ-ММ)": month_key,
+            "Общий приход (RUB)": gross_income,
+            "Прямые расходы (RUB)": direct_expenses,
+            "ЗП Ксении (10%) (RUB)": ksenia_salary,
+            "Итого расходы (RUB)": total_expenses,
+            "Чистая прибыль компании (RUB)": company_profit,
+        },
+        MONTHLY_SUMMARY_HEADERS,
+    )
+    for row in car_rows:
+        _upsert_record(
+            ws_car_profit_summary,
+            "ID Авто",
+            row["ID Авто"],
+            row,
+            CAR_PROFIT_SUMMARY_HEADERS,
+        )
+    return {
+        "month": month_key,
+        "gross_income": gross_income,
+        "direct_expenses": direct_expenses,
+        "ksenia_salary": ksenia_salary,
+        "total_expenses": total_expenses,
+        "company_profit": company_profit,
+        "cars": car_rows,
+    }
 
 
 def add_new_booking(

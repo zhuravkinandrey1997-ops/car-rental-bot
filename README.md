@@ -1,6 +1,8 @@
 # Telegram bot for car rental management
 
-This project contains a manager-only Telegram bot built with aiogram 3. It reads and writes the `Cars`, `Bookings`, `Returns_Cash`, and `Managers` worksheets through `gspread`.
+This project contains a manager-only Telegram bot built with aiogram 3. It reads
+and writes the rental, return, expense, and financial-summary worksheets through
+`gspread`.
 
 ## Included workflows
 
@@ -11,6 +13,8 @@ This project contains a manager-only Telegram bot built with aiogram 3. It reads
 - Mark the booking as `Завершена` and update the car mileage after a return
 - Send every active manager a daily 20:00 summary of tomorrow's vehicle
   issuances and returns
+- Record categorized company or vehicle expenses
+- Build the current-month company and per-vehicle financial report
 
 ## Setup
 
@@ -60,6 +64,14 @@ return if the booking is no longer in `В аренде`.
 Each completed return also creates one row in `Acceptance_Acts`. If the sheet
 does not exist, the bot creates it automatically with the act, booking, vehicle,
 client, mileage, penalty, deposit, payment, and note columns.
+The bot also creates `Expenses`, `Monthly_Summary`, and `Car_Profit_Summary`
+with their required headers when they are missing. Expense entry and financial
+reports are visible only to the configured finance-manager Telegram IDs.
+The monthly report uses actual received income from `Итого приход (RUB)` in
+`Returns_Cash`, subtracts direct expenses from `Expenses`, adds Ksenia's salary
+at 10% of that income, and updates both summary worksheets. Vehicle profit
+subtracts only expenses assigned to that vehicle; general company expenses
+remain in the company-level summary.
 Cancelling an active booking changes its status to `Отменена`, records the
 cancellation reason and deposit outcome, and releases its dates for availability
 checks.
