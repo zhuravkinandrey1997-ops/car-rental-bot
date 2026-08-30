@@ -6,8 +6,10 @@ import asyncio
 import calendar
 import datetime
 import logging
+import math
 import os
 from contextlib import suppress
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramAPIError
@@ -77,6 +79,9 @@ class BookingForm(StatesGroup):
     client_name = State()
     phone = State()
     price = State()
+    start_mileage = State()
+    deposit = State()
+    pay_type = State()
     confirmation = State()
 
 
@@ -88,6 +93,8 @@ class OccupancyForm(StatesGroup):
 class ReturnForm(StatesGroup):
     booking = State()
     end_mileage = State()
+    cleanliness = State()
+    wash_fee = State()
     extra_fee = State()
     total_paid = State()
     pay_type = State()
@@ -208,11 +215,11 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [
                 KeyboardButton(text="Доступные авто"),
-                KeyboardButton(text="Новая бронь"),
+                KeyboardButton(text="🚗 Выдача авто"),
             ],
             [
                 KeyboardButton(text="Активные аренды"),
-                KeyboardButton(text="Оформить возврат"),
+                KeyboardButton(text="🏁 Приём авто"),
             ],
             [KeyboardButton(text="🔍 Проверка броней")],
             [KeyboardButton(text="Отмена")],
@@ -243,29 +250,50 @@ PAYMENT_METHODS = {
 }
 
 
-def payment_methods_keyboard() -> InlineKeyboardMarkup:
+DEFAULT_WASH_FEE = 1000
+MINSK_TZ = ZoneInfo("Europe/Minsk")
+
+
+def payment_methods_keyboard(flow: str = "return") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="💵 Наличные",
-                    callback_data="payment:cash",
+                    callback_data=f"payment:{flow}:cash",
                 ),
                 InlineKeyboardButton(
                     text="💳 Банковская карта",
-                    callback_data="payment:card",
+                    callback_data=f"payment:{flow}:card",
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text="📱 Перевод (СБП)",
-                    callback_data="payment:sbp",
+                    callback_data=f"payment:{flow}:sbp",
                 ),
                 InlineKeyboardButton(
                     text="🏦 Безнал (Юр. лицо)",
-                    callback_data="payment:legal",
+                    callback_data=f"payment:{flow}:legal",
                 ),
             ],
+        ]
+    )
+
+
+def cleanliness_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✨ Чистая",
+                    callback_data="cleanliness:clean",
+                ),
+                InlineKeyboardButton(
+                    text="🧼 Грязная",
+                    callback_data="cleanliness:dirty",
+                ),
+            ]
         ]
     )
 
@@ -426,6 +454,101 @@ def _parse_int(value: str, field_name: str, minimum: int = 0) -> tuple[int | Non
     return parsed, None
 
 
+def _now_minsk() -> datetime.datetime:
+    return datetime.datetime.now(MINSK_TZ).replace(second=0, microsecond=0)
+
+
+def _timestamp(value: datetime.datetime | None = None) -> str:
+    return (value or _now_minsk()).strftime("%Y-%m-%d %H:%M")
+
+
+def _record_date(record: dict, *keys: str) -> datetime.date | None:
+    raw = _value(record, *keys, default="")
+    for date_format in ("%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M"):
+        try:
+            return datetime.datetime.strptime(raw, date_format).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _record_datetime(
+    record: dict,
+    *keys: str,
+    default: datetime.datetime | None = None,
+) -> datetime.datetime:
+    raw = _value(record, *keys, default="")
+    for date_format in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            parsed = datetime.datetime.strptime(raw, date_format)
+            return parsed.replace(tzinfo=MINSK_TZ)
+        except ValueError:
+            continue
+    return default or _now_minsk()
+
+
+def _return_calculation(data: dict) -> dict[str, int | str]:
+    booking = data["booking"]
+    car = data["car"]
+    start_date = _record_date(
+        booking,
+        "Дата начала (ГГГГ-ММ-ДД)",
+        "Дата начала",
+    ) or _now_minsk().date()
+    end_date = _record_date(
+        booking,
+        "Дата окончания (ГГГГ-ММ-ДД)",
+        "Дата окончания",
+    ) or start_date
+    planned_end = _record_datetime(
+        booking,
+        "Плановое окончание",
+        "Плановая дата и время окончания",
+        default=datetime.datetime.combine(end_date, datetime.time(23, 59), MINSK_TZ),
+    )
+    returned_at = _record_datetime(
+        {"Дата и время приёма": data.get("returned_at", "")},
+        "Дата и время приёма",
+        default=_now_minsk(),
+    )
+    late_seconds = max(0, int((returned_at - planned_end).total_seconds()))
+    late_hours = math.ceil(late_seconds / 3600) if late_seconds else 0
+
+    daily_rate, _ = _parse_int(
+        _car_daily_rate(car),
+        "суточный тариф",
+        minimum=0,
+    )
+    daily_rate = daily_rate or 0
+    late_fee = round(daily_rate * 0.10 * late_hours)
+
+    rental_days = max(1, (end_date - start_date).days + 1)
+    mileage_limit = rental_days * 250
+    delta_mileage = int(data["end_mileage"]) - int(data["start_mileage"])
+    over_mileage = max(0, delta_mileage - mileage_limit)
+    over_mileage_fee = over_mileage * 50
+    wash_fee = int(data.get("wash_fee", 0))
+    extra_fee = int(data.get("extra_fee", 0))
+    deposit = int(data.get("deposit", 0))
+    deposit_balance = deposit - late_fee - over_mileage_fee - wash_fee - extra_fee
+
+    return {
+        "daily_rate": daily_rate,
+        "rental_days": rental_days,
+        "mileage_limit": mileage_limit,
+        "delta_mileage": delta_mileage,
+        "over_mileage": over_mileage,
+        "over_mileage_fee": over_mileage_fee,
+        "late_hours": late_hours,
+        "late_fee": late_fee,
+        "wash_fee": wash_fee,
+        "extra_fee": extra_fee,
+        "deposit": deposit,
+        "deposit_balance": deposit_balance,
+        "cleanliness": data.get("cleanliness", "—"),
+    }
+
+
 async def ensure_manager(message: Message) -> bool:
     user = message.from_user
     if user is None:
@@ -540,7 +663,7 @@ async def start_booking(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(BookingForm.start_date)
     await message.answer(
-        "Новая бронь.\n\n" + _calendar_prompt("booking", "start"),
+        "Выдача авто.\n\n" + _calendar_prompt("booking", "start"),
         reply_markup=calendar_keyboard("booking", "start"),
     )
 
@@ -788,7 +911,7 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
         await state.update_data(start_date=selected_value)
         await state.set_state(BookingForm.end_date)
         await message.edit_text(
-            "Новая бронь.\n\n" + _calendar_prompt("booking", "end", selected_date),
+            "Выдача авто.\n\n" + _calendar_prompt("booking", "end", selected_date),
             reply_markup=calendar_keyboard(
                 "booking",
                 "end",
@@ -841,25 +964,70 @@ async def booking_phone(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(phone=value)
     await state.set_state(BookingForm.price)
-    await message.answer("Введите итоговую стоимость аренды в RUB:")
+    await message.answer("Введите принятую сумму аренды в RUB:")
 
 
 async def booking_price(message: Message, state: FSMContext) -> None:
-    price, error = _parse_int(message.text or "", "стоимость", minimum=0)
+    price, error = _parse_int(
+        message.text or "",
+        "принятая сумма аренды",
+        minimum=0,
+    )
     if error:
         await message.answer(error)
         return
     await state.update_data(price=price)
+    await state.set_state(BookingForm.start_mileage)
+    await message.answer("Введите начальный пробег автомобиля в км:")
+
+
+async def booking_start_mileage(message: Message, state: FSMContext) -> None:
+    start_mileage, error = _parse_int(
+        message.text or "",
+        "начальный пробег",
+        minimum=0,
+    )
+    if error:
+        await message.answer(error)
+        return
+    await state.update_data(start_mileage=start_mileage)
+    await state.set_state(BookingForm.deposit)
+    await message.answer("Введите сумму залога в RUB (0, если нет):")
+
+
+async def booking_deposit(message: Message, state: FSMContext) -> None:
+    deposit, error = _parse_int(
+        message.text or "",
+        "залог",
+        minimum=0,
+    )
+    if error:
+        await message.answer(error)
+        return
+    await state.update_data(deposit=deposit)
+    await state.set_state(BookingForm.pay_type)
+    await message.answer(
+        "Выберите форму оплаты принятой суммы аренды:",
+        reply_markup=payment_methods_keyboard("booking"),
+    )
+
+
+async def _send_booking_confirmation(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
+    issued_at = data.get("issued_at") or _timestamp()
     await state.set_state(BookingForm.confirmation)
     await message.answer(
-        "Проверьте данные брони:\n\n"
+        "Проверьте акт выдачи авто:\n\n"
         f"Авто: {data['car_name']}\n"
         f"Период: {data['start_date']} — {data['end_date']}\n"
         f"Клиент: {data['client_name']}\n"
         f"Телефон: {data['phone']}\n"
-        f"Стоимость: {price:,} RUB".replace(",", " ")
-        + "\n\nСохранить бронь?",
+        f"Принятая сумма аренды: {int(data['price']):,} RUB\n"
+        f"Начальный пробег: {int(data['start_mileage']):,} км\n"
+        f"Залог: {int(data['deposit']):,} RUB\n"
+        f"Форма оплаты: {data['pay_type']}\n"
+        f"Дата и время выдачи: {issued_at}".replace(",", " ")
+        + "\n\nСохранить выдачу авто?",
         reply_markup=confirmation_keyboard(),
     )
 
@@ -880,6 +1048,11 @@ async def booking_confirmation(message: Message, state: FSMContext) -> None:
             phone=data["phone"],
             price=int(data["price"]),
             manager_id=manager_id,
+            issued_at=_timestamp(),
+            start_mileage=int(data["start_mileage"]),
+            deposit=int(data["deposit"]),
+            pay_type=data["pay_type"],
+            status="В аренде",
         )
     except Exception:
         logger.exception("Could not save booking")
@@ -888,7 +1061,8 @@ async def booking_confirmation(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await message.answer(
-        f"Бронь №{booking_id} подтверждена и сохранена.",
+        f"Акт выдачи авто по брони №{booking_id} сохранён. "
+        "Автомобиль отмечен как выданный.",
         reply_markup=main_keyboard(),
     )
 
@@ -934,7 +1108,7 @@ async def start_return(message: Message, state: FSMContext) -> None:
     await state.update_data(rentals=rentals)
     await state.set_state(ReturnForm.booking)
     await message.answer(
-        "Выберите аренду для оформления возврата:",
+        "🏁 Приём авто.\n\nВыберите аренду для оформления:",
         reply_markup=rental_choice_keyboard(rentals),
     )
 
@@ -970,18 +1144,34 @@ async def return_booking(message: Message, state: FSMContext) -> None:
     if start_mileage is None:
         start_mileage = 0
     base_price, _ = _parse_int(
-        _value(booking, "Цена", "Стоимость", "Итоговая стоимость", default="0"),
+        _value(
+            booking,
+            "Сумма брони (RUB)",
+            "Принятая сумма аренды (RUB)",
+            "Цена",
+            "Стоимость",
+            "Итоговая стоимость",
+            default="0",
+        ),
         "базовая стоимость",
         minimum=0,
     )
     if base_price is None:
         base_price = 0
+    deposit, _ = _parse_int(
+        _value(booking, "Залог (RUB)", "Залог", default="0"),
+        "залог",
+        minimum=0,
+    )
 
     await state.update_data(
         booking=booking,
         car=car,
         start_mileage=start_mileage,
         base_price=base_price,
+        deposit=deposit or 0,
+        returned_at=_timestamp(),
+        wash_fee=0,
     )
     await state.set_state(ReturnForm.end_mileage)
     await message.answer(
@@ -1002,8 +1192,57 @@ async def return_end_mileage(message: Message, state: FSMContext) -> None:
         await message.answer("Конечный пробег не может быть меньше начального.")
         return
     await state.update_data(end_mileage=end_mileage)
+    await state.set_state(ReturnForm.cleanliness)
+    await message.answer(
+        "Укажите состояние чистоты автомобиля:",
+        reply_markup=cleanliness_keyboard(),
+    )
+
+
+async def cleanliness_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.data or not callback.message:
+        await callback.answer()
+        return
+    cleanliness = {
+        "clean": "Чистая",
+        "dirty": "Грязная",
+    }.get(callback.data.removeprefix("cleanliness:"))
+    if not cleanliness:
+        await callback.answer("Этот вариант недоступен.", show_alert=True)
+        return
+    await state.update_data(cleanliness=cleanliness)
+    await callback.answer(f"Выбрано: {cleanliness}")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    if cleanliness == "Чистая":
+        await state.update_data(wash_fee=0)
+        await state.set_state(ReturnForm.extra_fee)
+        await callback.message.answer(
+            "Введите сумму дополнительных штрафов/удержаний в RUB (0, если нет):"
+        )
+        return
+    await state.set_state(ReturnForm.wash_fee)
+    await callback.message.answer(
+        f"Введите стоимость мойки в RUB "
+        f"(0 — применить стандартную сумму {DEFAULT_WASH_FEE:,} RUB):".replace(",", " ")
+    )
+
+
+async def return_wash_fee(message: Message, state: FSMContext) -> None:
+    wash_fee, error = _parse_int(
+        message.text or "",
+        "стоимость мойки",
+        minimum=0,
+    )
+    if error:
+        await message.answer(error)
+        return
+    if wash_fee == 0:
+        wash_fee = DEFAULT_WASH_FEE
+    await state.update_data(wash_fee=wash_fee)
     await state.set_state(ReturnForm.extra_fee)
-    await message.answer("Введите сумму дополнительных начислений в RUB (0, если нет):")
+    await message.answer(
+        "Введите сумму дополнительных штрафов/удержаний в RUB (0, если нет):"
+    )
 
 
 async def return_extra_fee(message: Message, state: FSMContext) -> None:
@@ -1049,15 +1288,27 @@ async def payment_method_callback(callback: CallbackQuery, state: FSMContext) ->
     if not callback.data or not callback.message:
         await callback.answer()
         return
-    payment_key = callback.data.removeprefix("payment:")
+    payment_parts = callback.data.split(":")
+    if len(payment_parts) == 2:
+        flow = "return"
+        payment_key = payment_parts[1]
+    elif len(payment_parts) == 3:
+        flow = payment_parts[1]
+        payment_key = payment_parts[2]
+    else:
+        await callback.answer("Некорректный вариант оплаты.", show_alert=True)
+        return
     pay_type = PAYMENT_METHODS.get(payment_key)
     if not pay_type:
         await callback.answer("Этот вариант оплаты недоступен.", show_alert=True)
         return
     await state.update_data(pay_type=pay_type)
-    await state.set_state(ReturnForm.notes)
     await callback.answer(f"Выбрано: {pay_type}")
     await callback.message.edit_reply_markup(reply_markup=None)
+    if flow == "booking":
+        await _send_booking_confirmation(callback.message, state)
+        return
+    await state.set_state(ReturnForm.notes)
     await callback.message.answer("Введите примечание или отправьте «нет»:")
 
 
@@ -1069,20 +1320,41 @@ async def return_notes(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     await state.set_state(ReturnForm.confirmation)
     delta = int(data["end_mileage"]) - int(data["start_mileage"])
-    total = int(data["base_price"]) + int(data["extra_fee"])
+    calculation = _return_calculation(data)
+    total = (
+        int(data["base_price"])
+        + int(calculation["late_fee"])
+        + int(calculation["over_mileage_fee"])
+        + int(calculation["wash_fee"])
+        + int(data["extra_fee"])
+    )
+    deposit_balance = int(calculation["deposit_balance"])
+    deposit_result = (
+        f"к возврату: {deposit_balance:,} RUB"
+        if deposit_balance >= 0
+        else f"доплата: {abs(deposit_balance):,} RUB"
+    )
     await message.answer(
-        "Проверьте возврат:\n\n"
-        f"Бронь: №{_booking_id(data['booking'])}\n"
-        f"Авто: {_value(data['booking'], 'Авто', 'Название авто', 'Модель')}\n"
-        f"Пробег: {data['start_mileage']} → {data['end_mileage']} км "
-        f"(+{delta} км)\n"
-        f"Базовая стоимость: {int(data['base_price']):,} RUB\n"
-        f"Доп. начисления: {int(data['extra_fee']):,} RUB\n"
-        f"Итого к оплате: {total:,} RUB\n"
-        f"Получено: {int(data['total_paid']):,} RUB\n"
-        f"Оплата: {data['pay_type']}\n"
-        f"Примечание: {notes or '—'}\n\n"
-        "Сохранить возврат?".replace(",", " "),
+        "🏁 Акт приёма автомобиля\n\n"
+        f"• Автомобиль: {_car_name(data['car'])} ({_car_plate(data['car'])})\n"
+        f"• Период: {_value(data['booking'], 'Дата и время выдачи', 'Дата начала', 'Дата начала (ГГГГ-ММ-ДД)')} — "
+        f"{data.get('returned_at', _timestamp())}\n"
+        f"• Суммарный пробег: {delta:,} км "
+        f"(Лимит: {int(calculation['mileage_limit']):,} км, "
+        f"перепробег: {int(calculation['over_mileage']):,} км → "
+        f"штраф: {int(calculation['over_mileage_fee']):,} RUB)\n"
+        f"• Просрочка по времени: {int(calculation['late_hours'])} ч. → "
+        f"штраф: {int(calculation['late_fee']):,} RUB\n"
+        f"• Состояние: {calculation['cleanliness']}\n"
+        f"• Сумма аренды: {int(data['base_price']):,} RUB\n"
+        f"• Мойка: {int(calculation['wash_fee']):,} RUB\n"
+        f"• Доп. штрафы/удержания: {int(data['extra_fee']):,} RUB\n"
+        f"• Залог: {int(data['deposit']):,} RUB, {deposit_result}\n"
+        f"• Итого к оплате: {total:,} RUB\n"
+        f"• Получено дополнительно: {int(data['total_paid']):,} RUB\n"
+        f"• Оплата: {data['pay_type']}\n"
+        f"• Примечание: {notes or '—'}\n\n"
+        "Сохранить приём автомобиля?".replace(",", " "),
         reply_markup=confirmation_keyboard(),
     )
 
@@ -1095,6 +1367,7 @@ async def return_confirmation(message: Message, state: FSMContext) -> None:
     booking = data["booking"]
     car = data["car"]
     manager_id = message.from_user.id if message.from_user else 0
+    calculation = _return_calculation(data)
     try:
         save_actual_return(
             booking_id=int(_booking_id(booking)),
@@ -1110,6 +1383,18 @@ async def return_confirmation(message: Message, state: FSMContext) -> None:
             pay_type=data["pay_type"],
             manager_id=manager_id,
             notes=data.get("notes", ""),
+            returned_at=data.get("returned_at", _timestamp()),
+            daily_rate=int(calculation["daily_rate"]),
+            rental_days=int(calculation["rental_days"]),
+            mileage_limit=int(calculation["mileage_limit"]),
+            over_mileage=int(calculation["over_mileage"]),
+            over_mileage_fee=int(calculation["over_mileage_fee"]),
+            late_hours=int(calculation["late_hours"]),
+            late_fee=int(calculation["late_fee"]),
+            cleanliness=str(calculation["cleanliness"]),
+            wash_fee=int(calculation["wash_fee"]),
+            deposit=int(calculation["deposit"]),
+            deposit_balance=int(calculation["deposit_balance"]),
         )
     except Exception:
         logger.exception("Could not save return")
@@ -1137,13 +1422,16 @@ def create_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher()
     dispatcher.callback_query.register(calendar_callback, F.data.startswith("calendar:"))
     dispatcher.callback_query.register(payment_method_callback, F.data.startswith("payment:"))
+    dispatcher.callback_query.register(cleanliness_callback, F.data.startswith("cleanliness:"))
     dispatcher.message.register(start_handler, CommandStart())
     dispatcher.message.register(show_menu, Command("menu"))
     dispatcher.message.register(cancel_flow, F.text.casefold() == "отмена")
 
     dispatcher.message.register(start_availability, F.text == "Доступные авто")
+    dispatcher.message.register(start_booking, F.text == "🚗 Выдача авто")
     dispatcher.message.register(start_booking, F.text == "Новая бронь")
     dispatcher.message.register(list_active_rentals, F.text == "Активные аренды")
+    dispatcher.message.register(start_return, F.text == "🏁 Приём авто")
     dispatcher.message.register(start_return, F.text == "Оформить возврат")
     dispatcher.message.register(start_occupancy, F.text == "🔍 Проверка броней")
 
@@ -1156,12 +1444,15 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(booking_client_name, BookingForm.client_name)
     dispatcher.message.register(booking_phone, BookingForm.phone)
     dispatcher.message.register(booking_price, BookingForm.price)
+    dispatcher.message.register(booking_start_mileage, BookingForm.start_mileage)
+    dispatcher.message.register(booking_deposit, BookingForm.deposit)
     dispatcher.message.register(booking_confirmation, BookingForm.confirmation)
 
     dispatcher.message.register(occupancy_car, OccupancyForm.car)
 
     dispatcher.message.register(return_booking, ReturnForm.booking)
     dispatcher.message.register(return_end_mileage, ReturnForm.end_mileage)
+    dispatcher.message.register(return_wash_fee, ReturnForm.wash_fee)
     dispatcher.message.register(return_extra_fee, ReturnForm.extra_fee)
     dispatcher.message.register(return_total_paid, ReturnForm.total_paid)
     dispatcher.message.register(return_pay_type, ReturnForm.pay_type)

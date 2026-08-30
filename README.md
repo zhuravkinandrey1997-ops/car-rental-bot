@@ -27,8 +27,18 @@ This project contains a manager-only Telegram bot built with aiogram 3. It reads
 
 ## Expected sheet structure
 
-The bot expects the headers used by the supplied Google Sheets client. The booking rows are written in this order:
+The bot expects the headers used by the supplied Google Sheets client. When a new
+field is first saved, the bot adds any missing headers to the relevant sheet.
+Booking rows include the following data:
 
-`ID`, `ID Авто`, `Авто`, `Дата начала (ГГГГ-ММ-ДД)`, `Дата окончания (ГГГГ-ММ-ДД)`, `Клиент`, `Телефон`, `Цена`, `Telegram ID менеджера`, `Статус`
+`ID Брони`, `ID Авто`, `Автомобиль`, `Дата начала (ГГГГ-ММ-ДД)`,
+`Дата окончания (ГГГГ-ММ-ДД)`, `ФИО Клиента`, `Телефон`, `Сумма брони (RUB)`,
+`Telegram ID Менеджера`, `Статус`, `Дата и время выдачи`,
+`Пробег при выдаче (км)`, `Принятая сумма аренды (RUB)`, `Залог (RUB)`,
+`Способ оплаты`, `Плановое окончание`.
 
-The car sheet should include `ID`, `Статус`, a vehicle name, a plate column such as `Госномер`, and a mileage column such as `Пробег`. The returns sheet receives the 15 values written by `save_actual_return`.
+The car sheet should include `ID`, `Статус`, a vehicle name, a plate column such as
+`Госномер`, and a mileage column such as `Пробег`. `Returns_Cash` receives the
+return timestamp, mileage limit and overage, late fees, cleanliness, wash fee,
+additional deductions, deposit settlement, payment method, and notes. The bot
+updates the booking status to `Завершена` and the car mileage after confirmation.

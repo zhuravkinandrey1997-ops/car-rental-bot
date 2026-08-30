@@ -54,11 +54,82 @@ def get_available_cars(start_date_str: str, end_date_str: str):
     return [c for c in all_cars if c.get("ID") not in busy_car_ids and c.get("Статус") == "Активен"]
 
 
-def add_new_booking(car_id: int, car_name: str, start_date: str, end_date: str, client_name: str, phone: str, price: int, manager_id: int):
+def _ensure_headers(ws, required_headers: list[str]) -> list[str]:
+    headers = ws.row_values(1)
+    for header in required_headers:
+        if header not in headers:
+            headers.append(header)
+            ws.update_cell(1, len(headers), header)
+    return headers
+
+
+def _append_record(ws, values: dict[str, object], required_headers: list[str]) -> None:
+    headers = _ensure_headers(ws, required_headers)
+    ws.append_row([values.get(header, "") for header in headers])
+
+
+def add_new_booking(
+    car_id: int,
+    car_name: str,
+    start_date: str,
+    end_date: str,
+    client_name: str,
+    phone: str,
+    price: int,
+    manager_id: int,
+    issued_at: str = "",
+    start_mileage: int = 0,
+    deposit: int = 0,
+    pay_type: str = "Без оплаты",
+    status: str = "В аренде",
+):
     records = ws_bookings.get_all_records()
     new_id = len(records) + 101
-    row = [new_id, car_id, car_name, start_date, end_date, client_name, phone, price, manager_id, "Подтверждена"]
-    ws_bookings.append_row(row)
+    values = {
+        "ID Брони": new_id,
+        "ID": new_id,
+        "ID Авто": car_id,
+        "Автомобиль": car_name,
+        "Авто": car_name,
+        "Дата начала (ГГГГ-ММ-ДД)": start_date,
+        "Дата окончания (ГГГГ-ММ-ДД)": end_date,
+        "ФИО Клиента": client_name,
+        "Клиент": client_name,
+        "Телефон": phone,
+        "Сумма брони (RUB)": price,
+        "Цена": price,
+        "Telegram ID Менеджера": manager_id,
+        "Статус": status,
+        "Дата и время выдачи": issued_at,
+        "Пробег при выдаче (км)": start_mileage,
+        "Принятая сумма аренды (RUB)": price,
+        "Сумма аренды получена (RUB)": price,
+        "Залог (RUB)": deposit,
+        "Способ оплаты": pay_type,
+        "Плановое окончание": f"{end_date} 23:59",
+    }
+    _append_record(
+        ws_bookings,
+        values,
+        [
+            "ID Брони",
+            "ID Авто",
+            "Автомобиль",
+            "Дата начала (ГГГГ-ММ-ДД)",
+            "Дата окончания (ГГГГ-ММ-ДД)",
+            "ФИО Клиента",
+            "Телефон",
+            "Сумма брони (RUB)",
+            "Telegram ID Менеджера",
+            "Статус",
+            "Дата и время выдачи",
+            "Пробег при выдаче (км)",
+            "Принятая сумма аренды (RUB)",
+            "Залог (RUB)",
+            "Способ оплаты",
+            "Плановое окончание",
+        ],
+    )
     return new_id
 
 
@@ -111,15 +182,138 @@ def get_car_by_plate(plate: str):
     return {}
 
 
-def save_actual_return(booking_id: int, car_name: str, plate: str, client: str, start_mileage: int, end_mileage: int, delta_mileage: int, base_price: int, extra_fee: int, total_paid: int, pay_type: str, manager_id: int, notes: str):
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
+def save_actual_return(
+    booking_id: int,
+    car_name: str,
+    plate: str,
+    client: str,
+    start_mileage: int,
+    end_mileage: int,
+    delta_mileage: int,
+    base_price: int,
+    extra_fee: int,
+    total_paid: int,
+    pay_type: str,
+    manager_id: int,
+    notes: str,
+    returned_at: str = "",
+    daily_rate: int = 0,
+    rental_days: int = 0,
+    mileage_limit: int = 0,
+    over_mileage: int = 0,
+    over_mileage_fee: int = 0,
+    late_hours: int = 0,
+    late_fee: int = 0,
+    cleanliness: str = "",
+    wash_fee: int = 0,
+    deposit: int = 0,
+    deposit_balance: int = 0,
+):
+    returned_at = returned_at or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    total_penalties = over_mileage_fee + late_fee + wash_fee + extra_fee
     returns_records = ws_returns.get_all_records()
     new_id = len(returns_records) + 1
-    row = [new_id, booking_id, car_name, plate, client, today_str, start_mileage, end_mileage, delta_mileage, base_price, extra_fee, total_paid, pay_type, manager_id, notes]
-    ws_returns.append_row(row)
+    values = {
+        "ID Записи": new_id,
+        "ID": new_id,
+        "ID Брони": booking_id,
+        "Автомобиль": car_name,
+        "Госномер": plate,
+        "Клиент": client,
+        "Дата возврата": returned_at,
+        "Дата и время приёма": returned_at,
+        "Пробег до (км)": start_mileage,
+        "Пробег после (км)": end_mileage,
+        "Пробег за аренду (км)": delta_mileage,
+        "Сумма аренды (RUB)": base_price,
+        "Перепробег / Доплаты (RUB)": total_penalties,
+        "Итого приход (RUB)": total_paid,
+        "Способ оплаты": pay_type,
+        "Менеджер (TG ID)": manager_id,
+        "Примечания / Состояние": notes,
+        "Суточный тариф (RUB)": daily_rate,
+        "Количество суток": rental_days,
+        "Лимит пробега (км)": mileage_limit,
+        "Перепробег (км)": over_mileage,
+        "Штраф за перепробег (RUB)": over_mileage_fee,
+        "Просрочка (ч)": late_hours,
+        "Штраф за просрочку (RUB)": late_fee,
+        "Состояние чистоты": cleanliness,
+        "Мойка (RUB)": wash_fee,
+        "Доп. штрафы/удержания (RUB)": extra_fee,
+        "Залог (RUB)": deposit,
+        "Залог к возврату (RUB)": max(deposit_balance, 0),
+        "Доплата по залогу (RUB)": max(-deposit_balance, 0),
+        "Итоговый расчёт (RUB)": deposit_balance,
+    }
+    _append_record(
+        ws_returns,
+        values,
+        [
+            "ID Записи",
+            "ID Брони",
+            "Автомобиль",
+            "Госномер",
+            "Клиент",
+            "Дата возврата",
+            "Пробег до (км)",
+            "Пробег после (км)",
+            "Пробег за аренду (км)",
+            "Сумма аренды (RUB)",
+            "Перепробег / Доплаты (RUB)",
+            "Итого приход (RUB)",
+            "Способ оплаты",
+            "Менеджер (TG ID)",
+            "Примечания / Состояние",
+            "Дата и время приёма",
+            "Суточный тариф (RUB)",
+            "Количество суток",
+            "Лимит пробега (км)",
+            "Перепробег (км)",
+            "Штраф за перепробег (RUB)",
+            "Просрочка (ч)",
+            "Штраф за просрочку (RUB)",
+            "Состояние чистоты",
+            "Мойка (RUB)",
+            "Доп. штрафы/удержания (RUB)",
+            "Залог (RUB)",
+            "Залог к возврату (RUB)",
+            "Доплата по залогу (RUB)",
+            "Итоговый расчёт (RUB)",
+        ],
+    )
     cell = ws_bookings.find(str(booking_id))
     if cell:
-        ws_bookings.update_cell(cell.row, 10, "Завершена")
+        booking_updates = {
+            "Статус": "Завершена",
+            "Дата и время приёма": returned_at,
+            "Пробег при возврате (км)": end_mileage,
+            "Пробег за аренду (км)": delta_mileage,
+            "Лимит пробега (км)": mileage_limit,
+            "Перепробег (км)": over_mileage,
+            "Штраф за перепробег (RUB)": over_mileage_fee,
+            "Просрочка (ч)": late_hours,
+            "Штраф за просрочку (RUB)": late_fee,
+            "Состояние чистоты": cleanliness,
+            "Мойка (RUB)": wash_fee,
+            "Доп. штрафы/удержания (RUB)": extra_fee,
+            "Залог к возврату (RUB)": max(deposit_balance, 0),
+            "Доплата по залогу (RUB)": max(-deposit_balance, 0),
+            "Итоговый расчёт (RUB)": deposit_balance,
+            "Примечания / Состояние": notes,
+        }
+        booking_headers = _ensure_headers(ws_bookings, list(booking_updates))
+        for header, value in booking_updates.items():
+            ws_bookings.update_cell(cell.row, booking_headers.index(header) + 1, value)
     car_cell = ws_cars.find(plate)
     if car_cell:
-        ws_cars.update_cell(car_cell.row, 11, end_mileage)
+        car_headers = ws_cars.row_values(1)
+        mileage_headers = (
+            "Текущий пробег (км)",
+            "Пробег",
+            "Текущий пробег",
+            "Пробег (км)",
+        )
+        mileage_header = next((header for header in mileage_headers if header in car_headers), None)
+        if mileage_header:
+            ws_cars.update_cell(car_cell.row, car_headers.index(mileage_header) + 1, end_mileage)
