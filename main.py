@@ -91,6 +91,7 @@ class BookingForm(StatesGroup):
     prepayment = State()
     start_mileage = State()
     deposit = State()
+    deposit_pay_type = State()
     pay_type = State()
     confirmation = State()
 
@@ -442,6 +443,23 @@ def _car_daily_rate(car: dict) -> str:
         "Цена",
         "Стоимость",
     )
+
+
+def _car_base_deposit(car: dict) -> int | None:
+    raw = _value(
+        car,
+        "Базовый залог (RUB)",
+        "Базовый залог",
+        "Залог (RUB)",
+        "Залог",
+        "Депозит (RUB)",
+        "Депозит",
+        default="",
+    )
+    if not raw:
+        return None
+    parsed, _ = _parse_int(raw, "базовый залог", minimum=0)
+    return parsed
 
 
 def _car_label(car: dict) -> str:
@@ -862,7 +880,8 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
     wash_fee = int(data.get("wash_fee", 0))
     extra_fee = int(data.get("extra_fee", 0))
     deposit = int(data.get("deposit", 0))
-    deposit_balance = deposit - late_fee - over_mileage_fee - wash_fee - extra_fee
+    total_penalties = late_fee + over_mileage_fee + wash_fee + extra_fee
+    deposit_balance = deposit - total_penalties
 
     return {
         "daily_rate": daily_rate,
@@ -875,10 +894,33 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
         "late_fee": late_fee,
         "wash_fee": wash_fee,
         "extra_fee": extra_fee,
+        "total_penalties": total_penalties,
         "deposit": deposit,
         "deposit_balance": deposit_balance,
         "cleanliness": data.get("cleanliness", "—"),
     }
+
+
+def _deposit_settlement_text(calculation: dict[str, int | str]) -> str:
+    deposit = int(calculation["deposit"])
+    total_penalties = int(calculation["total_penalties"])
+    difference = int(calculation["deposit_balance"])
+    if total_penalties == 0:
+        return (
+            "✅ Нарушений нет. Вернуть залог клиенту в полном объеме: "
+            f"{deposit:,} RUB"
+        ).replace(",", " ")
+    if difference > 0:
+        return (
+            f"⚠️ Удержано из залога: {total_penalties:,} RUB. "
+            f"Вернуть остаток залога клиенту: {difference:,} RUB"
+        ).replace(",", " ")
+    if difference == 0:
+        return "⚠️ Залог полностью удержан в счет штрафов (0 RUB к возврату)."
+    return (
+        "🚨 Залог удержан полностью! Требуется ДОПЛАТА с клиента: "
+        f"{abs(difference):,} RUB"
+    ).replace(",", " ")
 
 
 async def ensure_manager(message: Message) -> bool:
@@ -1512,6 +1554,7 @@ async def booking_car(message: Message, state: FSMContext) -> None:
     await state.update_data(
         car_id=_car_id(car),
         car_name=_car_name(car),
+        car=car,
     )
     await state.set_state(BookingForm.client_name)
     await message.answer("Введите ФИО клиента:")
@@ -1596,7 +1639,18 @@ async def booking_start_mileage(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(start_mileage=start_mileage)
     await state.set_state(BookingForm.deposit)
-    await message.answer("Введите сумму залога в RUB (0, если нет):")
+    data = await state.get_data()
+    base_deposit = _car_base_deposit(data.get("car", {}))
+    hint = (
+        f"Базовый залог из Cars: {base_deposit:,} RUB.\n".replace(",", " ")
+        if base_deposit is not None
+        else "Базовый залог в Cars не указан.\n"
+    )
+    await message.answer(
+        hint
+        + "Обязательно введите фактически внесённую сумму залога в RUB "
+        "(0, если залог не внесён):"
+    )
 
 
 async def booking_deposit(message: Message, state: FSMContext) -> None:
@@ -1609,9 +1663,25 @@ async def booking_deposit(message: Message, state: FSMContext) -> None:
         await message.answer(error)
         return
     await state.update_data(deposit=deposit)
+    if deposit == 0:
+        await state.update_data(deposit_pay_type="Без оплаты")
+        await _ask_issuance_rental_payment(message, state)
+        return
+    await state.set_state(BookingForm.deposit_pay_type)
+    payment_message = await message.answer(
+        "Выберите способ оплаты внесённого залога:",
+        reply_markup=payment_methods_keyboard("issuance_deposit"),
+    )
+    await state.update_data(payment_message_id=payment_message.message_id)
+
+
+async def _ask_issuance_rental_payment(
+    message: Message,
+    state: FSMContext,
+) -> None:
     await state.set_state(BookingForm.pay_type)
     payment_message = await message.answer(
-        "Выберите форму оплаты принятой суммы аренды:",
+        "Выберите способ оплаты принятой суммы аренды:",
         reply_markup=payment_methods_keyboard("issuance"),
     )
     await state.update_data(payment_message_id=payment_message.message_id)
@@ -1628,9 +1698,10 @@ async def _send_booking_confirmation(message: Message, state: FSMContext) -> Non
         f"Клиент: {data['client_name']}\n"
         f"Телефон: {data['phone']}\n"
         f"Принятая сумма аренды: {int(data['price']):,} RUB\n"
+        f"Оплата аренды: {data['pay_type']}\n"
         f"Начальный пробег: {int(data['start_mileage']):,} км\n"
-        f"Залог: {int(data['deposit']):,} RUB\n"
-        f"Форма оплаты: {data['pay_type']}\n"
+        f"Внесённый залог: {int(data['deposit']):,} RUB\n"
+        f"Оплата залога: {data['deposit_pay_type']}\n"
         f"Дата и время выдачи: {issued_at}".replace(",", " ")
         + "\n\nСохранить выдачу авто?",
         reply_markup=confirmation_keyboard(),
@@ -1678,6 +1749,11 @@ async def booking_confirmation(message: Message, state: FSMContext) -> None:
             start_mileage=0 if is_reservation else int(data["start_mileage"]),
             deposit=0 if is_reservation else int(data["deposit"]),
             pay_type="Без оплаты" if is_reservation else data["pay_type"],
+            deposit_pay_type=(
+                "Без оплаты"
+                if is_reservation
+                else data["deposit_pay_type"]
+            ),
             status="Подтверждена" if is_reservation else "В аренде",
             prepayment=int(data.get("prepayment", 0)),
             prepayment_pay_type=data.get("prepayment_pay_type", "Без оплаты"),
@@ -1791,9 +1867,22 @@ async def return_booking(message: Message, state: FSMContext) -> None:
     if base_price is None:
         base_price = 0
     deposit, _ = _parse_int(
-        _value(booking, "Залог (RUB)", "Залог", default="0"),
+        _value(
+            booking,
+            "Внесенный залог",
+            "Залог (RUB)",
+            "Залог",
+            default="0",
+        ),
         "залог",
         minimum=0,
+    )
+    deposit_pay_type = _value(
+        booking,
+        "Способ оплаты залога",
+        "Тип оплаты залога",
+        "Способ оплаты",
+        default="Без оплаты",
     )
 
     await state.update_data(
@@ -1802,6 +1891,7 @@ async def return_booking(message: Message, state: FSMContext) -> None:
         start_mileage=start_mileage,
         base_price=base_price,
         deposit=deposit or 0,
+        deposit_pay_type=deposit_pay_type,
         returned_at=_timestamp(),
         wash_fee=0,
     )
@@ -1901,28 +1991,52 @@ async def return_extra_fee(message: Message, state: FSMContext) -> None:
         await message.answer(error)
         return
     await state.update_data(extra_fee=extra_fee)
-    await state.set_state(ReturnForm.total_paid)
-    await message.answer("Введите фактически полученную сумму в RUB:")
+    data = await state.get_data()
+    calculation = _return_calculation(data)
+    difference = int(calculation["deposit_balance"])
+    if difference < 0:
+        required_payment = abs(difference)
+        await state.update_data(required_additional_payment=required_payment)
+        await state.set_state(ReturnForm.total_paid)
+        await message.answer(
+            _deposit_settlement_text(calculation)
+            + "\n\nВведите фактически полученную ДОПЛАТУ с клиента в RUB "
+            f"(требуется {required_payment:,} RUB):".replace(",", " ")
+        )
+        return
+    await state.update_data(total_paid=0, pay_type="Без оплаты")
+    await state.set_state(ReturnForm.notes)
+    await message.answer(
+        _deposit_settlement_text(calculation)
+        + "\n\nВведите примечание или отправьте «нет»:"
+    )
 
 
 async def return_total_paid(message: Message, state: FSMContext) -> None:
-    total_paid, error = _parse_int(message.text or "", "фактически полученная сумма", minimum=0)
+    total_paid, error = _parse_int(
+        message.text or "",
+        "фактически полученная доплата",
+        minimum=0,
+    )
     if error:
         await message.answer(error)
         return
     await state.update_data(total_paid=total_paid)
+    data = await state.get_data()
     if total_paid == 0:
         await state.update_data(pay_type="Без оплаты")
         await state.set_state(ReturnForm.notes)
+        required_payment = int(data.get("required_additional_payment", 0))
         await message.answer(
-            "Фактически получено: 0 RUB.\n"
-            "Способ оплаты автоматически установлен: Без оплаты.\n\n"
+            "Фактически получено доплаты: 0 RUB.\n"
+            + f"Осталось получить с клиента: {required_payment:,} RUB.\n".replace(",", " ")
+            + "Способ оплаты автоматически установлен: Без оплаты.\n\n"
             "Введите примечание или отправьте «нет»:"
         )
         return
     await state.set_state(ReturnForm.pay_type)
     payment_message = await message.answer(
-        "Выберите способ оплаты:",
+        "Выберите способ получения доплаты:",
         reply_markup=payment_methods_keyboard(),
     )
     await state.update_data(payment_message_id=payment_message.message_id)
@@ -1930,7 +2044,7 @@ async def return_total_paid(message: Message, state: FSMContext) -> None:
 
 async def return_pay_type(message: Message, state: FSMContext) -> None:
     payment_message = await message.answer(
-        "Выберите способ оплаты кнопкой ниже:",
+        "Выберите способ получения доплаты кнопкой ниже:",
         reply_markup=payment_methods_keyboard(),
     )
     await state.update_data(payment_message_id=payment_message.message_id)
@@ -1963,6 +2077,10 @@ async def payment_method_callback(callback: CallbackQuery, state: FSMContext) ->
         and current_state == BookingForm.pay_type.state
         and data.get("booking_mode") == "reservation"
     ) or (
+        flow == "issuance_deposit"
+        and current_state == BookingForm.deposit_pay_type.state
+        and data.get("booking_mode") == "issuance"
+    ) or (
         flow in ("issuance", "booking")
         and current_state == BookingForm.pay_type.state
         and data.get("booking_mode") == "issuance"
@@ -1990,6 +2108,10 @@ async def payment_method_callback(callback: CallbackQuery, state: FSMContext) ->
         await state.update_data(prepayment_pay_type=pay_type)
         await _send_reservation_confirmation(callback.message, state)
         return
+    if flow == "issuance_deposit":
+        await state.update_data(deposit_pay_type=pay_type)
+        await _ask_issuance_rental_payment(callback.message, state)
+        return
     if flow in ("issuance", "booking"):
         await state.update_data(pay_type=pay_type)
         await _send_booking_confirmation(callback.message, state)
@@ -2011,20 +2133,23 @@ async def return_notes(message: Message, state: FSMContext) -> None:
     await state.set_state(ReturnForm.confirmation)
     delta = int(data["end_mileage"]) - int(data["start_mileage"])
     calculation = _return_calculation(data)
-    total = (
-        int(data["base_price"])
-        + int(calculation["late_fee"])
-        + int(calculation["over_mileage_fee"])
-        + int(calculation["wash_fee"])
-        + int(data["extra_fee"])
-    )
     deposit_balance = int(calculation["deposit_balance"])
-    deposit_result = (
-        f"к возврату: {deposit_balance:,} RUB"
-        if deposit_balance >= 0
-        else f"доплата: {abs(deposit_balance):,} RUB"
+    total_penalties = int(calculation["total_penalties"])
+    received_additional = int(data.get("total_paid", 0))
+    required_additional = max(-deposit_balance, 0)
+    outstanding_additional = max(
+        required_additional - received_additional,
+        0,
     )
-    await message.answer(
+    additional_payment_text = ""
+    if deposit_balance < 0:
+        additional_payment_text = (
+            f"\n• Требуемая доплата: {required_additional:,} RUB"
+            f"\n• Фактически получено доплаты: {received_additional:,} RUB"
+            f"\n• Способ получения доплаты: {data.get('pay_type', 'Без оплаты')}"
+            f"\n• Осталось получить: {outstanding_additional:,} RUB"
+        )
+    act_text = (
         "🏁 Акт приёма автомобиля\n\n"
         f"• Автомобиль: {_car_name(data['car'])} ({_car_plate(data['car'])})\n"
         f"• Период: {_value(data['booking'], 'Дата и время выдачи', 'Дата начала', 'Дата начала (ГГГГ-ММ-ДД)')} — "
@@ -2039,12 +2164,16 @@ async def return_notes(message: Message, state: FSMContext) -> None:
         f"• Сумма аренды: {int(data['base_price']):,} RUB\n"
         f"• Мойка: {int(calculation['wash_fee']):,} RUB\n"
         f"• Доп. штрафы/удержания: {int(data['extra_fee']):,} RUB\n"
-        f"• Залог: {int(data['deposit']):,} RUB, {deposit_result}\n"
-        f"• Итого к оплате: {total:,} RUB\n"
-        f"• Получено дополнительно: {int(data['total_paid']):,} RUB\n"
-        f"• Оплата: {data['pay_type']}\n"
+        f"• Итого удержаний: {total_penalties:,} RUB\n"
+        f"• Внесённый залог: {int(data['deposit']):,} RUB\n"
+        f"• Способ оплаты залога: {data.get('deposit_pay_type', 'Без оплаты')}\n\n"
+        f"{_deposit_settlement_text(calculation)}"
+        f"{additional_payment_text}\n\n"
         f"• Примечание: {notes or '—'}\n\n"
-        "Сохранить приём автомобиля?".replace(",", " "),
+        "Сохранить приём автомобиля?"
+    ).replace(",", " ")
+    await message.answer(
+        act_text,
         reply_markup=confirmation_keyboard(),
     )
 
@@ -2061,9 +2190,21 @@ async def return_confirmation(message: Message, state: FSMContext) -> None:
     try:
         save_actual_return(
             booking_id=int(_booking_id(booking)),
-            car_name=_value(booking, "Авто", "Название авто", "Модель"),
+            car_name=_value(
+                booking,
+                "Автомобиль",
+                "Авто",
+                "Название авто",
+                "Модель",
+            ),
             plate=_car_plate(car),
-            client=_value(booking, "Клиент", "Клиент ФИО", "Имя клиента"),
+            client=_value(
+                booking,
+                "ФИО Клиента",
+                "Клиент",
+                "Клиент ФИО",
+                "Имя клиента",
+            ),
             start_mileage=int(data["start_mileage"]),
             end_mileage=int(data["end_mileage"]),
             delta_mileage=int(data["end_mileage"]) - int(data["start_mileage"]),

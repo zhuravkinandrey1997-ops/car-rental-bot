@@ -39,7 +39,8 @@ Booking rows include the following data:
 `Дата окончания (ГГГГ-ММ-ДД)`, `ФИО Клиента`, `Телефон`, `Сумма брони (RUB)`,
 `Telegram ID Менеджера`, `Статус`, `Дата и время выдачи`,
 `Пробег при выдаче (км)`, `Принятая сумма аренды (RUB)`, `Залог (RUB)`,
-`Способ оплаты`, `Залог/Предоплата`, `Тип оплаты залога`,
+`Внесенный залог`, `Способ оплаты`, `Способ оплаты залога`,
+`Залог/Предоплата`, `Тип оплаты залога`,
 `Плановое окончание`, `Причина отмены`, `Статус залога при отмене`.
 
 The car sheet should include `ID`, `Статус`, a vehicle name, a plate column such as
@@ -47,6 +48,10 @@ The car sheet should include `ID`, `Статус`, a vehicle name, a plate colum
 return timestamp, mileage limit and overage, late fees, cleanliness, wash fee,
 additional deductions, deposit settlement, payment method, and notes. The bot
 updates the booking status to `Завершена` and the car mileage after confirmation.
+At issuance, the bot uses the base deposit from `Cars` as a hint and stores the
+actual amount in `Внесенный залог`. At return, it offsets mileage, lateness,
+washing, and additional penalties against that amount; an extra-payment step is
+shown only when the penalties exceed the deposited amount.
 Cancelling an active booking changes its status to `Отменена`, records the
 cancellation reason and deposit outcome, and releases its dates for availability
 checks.
