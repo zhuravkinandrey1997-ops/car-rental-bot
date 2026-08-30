@@ -14,6 +14,8 @@ and writes the rental, return, expense, and financial-summary worksheets through
 - Send every active manager a daily 20:00 summary of tomorrow's vehicle
   issuances and returns
 - Record categorized company or vehicle expenses
+- Cancel recent expenses after an explicit confirmation; the matching row is
+  deleted from `Expenses`
 - Build the current-month company and per-vehicle financial report
 
 ## Setup
@@ -67,11 +69,13 @@ client, mileage, penalty, deposit, payment, and note columns.
 The bot also creates `Expenses`, `Monthly_Summary`, and `Car_Profit_Summary`
 with their required headers when they are missing. Expense entry and financial
 reports are visible only to the configured finance-manager Telegram IDs.
-The monthly report uses actual received income from `Итого приход (RUB)` in
-`Returns_Cash`, subtracts direct expenses from `Expenses`, adds Ksenia's salary
-at 10% of that income, and updates both summary worksheets. Vehicle profit
-subtracts only expenses assigned to that vehicle; general company expenses
-remain in the company-level summary.
+Before building a report, the bot offers the current month, previous month, and
+all additional months found in `Returns_Cash` or `Expenses`. The selected-month
+report uses actual received income from `Итого приход (RUB)` in `Returns_Cash`,
+subtracts direct expenses from `Expenses`, adds Ksenia's salary at 10% of that
+income, and updates both summary worksheets. Vehicle profit subtracts only
+expenses assigned to that vehicle; general company expenses remain in the
+company-level summary.
 Cancelling an active booking changes its status to `Отменена`, records the
 cancellation reason and deposit outcome, and releases its dates for availability
 checks.

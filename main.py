@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 from sheets_client import (
     add_expense,
     add_new_booking,
+    delete_expense,
     cancel_booking,
     get_active_rentals,
     get_active_bookings_for_car,
@@ -43,7 +44,9 @@ from sheets_client import (
     get_car_by_plate,
     get_cancellable_bookings_for_car,
     get_confirmed_bookings,
+    get_available_financial_months,
     get_financial_report,
+    get_recent_expenses,
     get_pending_notification_manager_ids,
     get_returnable_rentals,
     get_tomorrow_bookings,
@@ -135,12 +138,20 @@ class ExpenseForm(StatesGroup):
     confirmation = State()
 
 
+class ExpenseCancellationForm(StatesGroup):
+    selection = State()
+    confirmation = State()
+
+
+class FinancialReportForm(StatesGroup):
+    month = State()
+
+
 FINANCE_MANAGER_IDS = frozenset(
     {
         661842368,
         946721277,
         1574781782,
-        952125424,
     }
 )
 EXPENSE_CATEGORIES = (
@@ -285,6 +296,10 @@ def main_keyboard(tg_id: int | None = None) -> ReplyKeyboardMarkup:
                 KeyboardButton(text="💸 Внести расход"),
                 KeyboardButton(text="📈 Фин. отчет"),
             ],
+        )
+        rows.insert(
+            4,
+            [KeyboardButton(text="❌ Отменить расход")],
         )
     return ReplyKeyboardMarkup(
         keyboard=rows,
@@ -470,6 +485,73 @@ def expense_vehicle_keyboard(cars: list[dict]) -> ReplyKeyboardMarkup:
     builder.row(KeyboardButton(text="Общие расходы компании"))
     builder.row(KeyboardButton(text="Отмена"))
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
+
+
+def expense_cancellation_keyboard(
+    expenses: list[dict],
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, expense in enumerate(expenses):
+        raw_amount = str(expense.get("Сумма (RUB)") or "0")
+        amount = _format_number(raw_amount.replace(" ", "").replace(",", ""))
+        date = _value(expense, "Дата", default="—")
+        category = _value(expense, "Категория / На что", default="—")
+        vehicle = _value(
+            expense,
+            "Автомобиль (Госномер / Общие)",
+            default="—",
+        )
+        callback_data = f"expense_cancel_select:{index}"
+        rows.extend(
+            [
+                [
+                    InlineKeyboardButton(
+                        text=(
+                            f"❌ ID: {expense.get('ID Записи', '—')} · "
+                            f"{date} · {amount} RUB"
+                        )[:64],
+                        callback_data=callback_data,
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=f"Статья: {category}"[:64],
+                        callback_data=callback_data,
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=f"Авто: {vehicle}"[:64],
+                        callback_data=callback_data,
+                    )
+                ],
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def financial_month_keyboard(months: list[str]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    current_month = _now_minsk().strftime("%Y-%m")
+    previous_month = (
+        _now_minsk().date().replace(day=1) - datetime.timedelta(days=1)
+    ).strftime("%Y-%m")
+    for month in months:
+        label = ""
+        if month == current_month:
+            label = "Текущий месяц"
+        elif month == previous_month:
+            label = "Предыдущий месяц"
+        text = f"{label} ({month})" if label else month
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"financial_month:{month}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _value(record: dict, *keys: str, default: str = "—") -> str:
@@ -1173,7 +1255,8 @@ async def ensure_finance_access(message: Message) -> bool:
     user = message.from_user
     if user is None or user.id not in FINANCE_MANAGER_IDS:
         await message.answer(
-            "Финансовые операции доступны только уполномоченным менеджерам."
+            "Финансовые операции доступны только уполномоченным менеджерам.",
+            reply_markup=main_keyboard(user.id if user else None),
         )
         return False
     return True
@@ -1378,23 +1461,210 @@ async def expense_confirmation(message: Message, state: FSMContext) -> None:
     )
 
 
-async def start_financial_report(message: Message, state: FSMContext) -> None:
+async def start_expense_cancellation(
+    message: Message,
+    state: FSMContext,
+) -> None:
     if not await ensure_finance_access(message):
         return
     await state.clear()
-    month_key = _now_minsk().strftime("%Y-%m")
     try:
-        report = await asyncio.to_thread(get_financial_report, month_key)
+        expenses = await asyncio.to_thread(get_recent_expenses, 10)
     except Exception:
-        logger.exception("Could not build financial report")
+        logger.exception("Could not load recent expenses")
         await message.answer(
-            "Не удалось сформировать финансовый отчёт.",
+            "Не удалось получить список расходов.",
+            reply_markup=main_keyboard(message.from_user.id),
+        )
+        return
+    if not expenses:
+        await message.answer(
+            "В листе Expenses пока нет расходов для отмены.",
+            reply_markup=main_keyboard(message.from_user.id),
+        )
+        return
+    await state.set_state(ExpenseCancellationForm.selection)
+    selection_message = await message.answer(
+        "Выберите расход, который нужно отменить:",
+        reply_markup=expense_cancellation_keyboard(expenses),
+    )
+    await state.update_data(
+        cancellation_expenses=expenses,
+        cancellation_message_id=selection_message.message_id,
+    )
+
+
+async def expense_cancel_select_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    if not _callback_has_finance_access(callback):
+        await callback.answer(
+            "У вас нет доступа к финансовым операциям.",
+            show_alert=True,
+        )
+        return
+    if await state.get_state() != ExpenseCancellationForm.selection.state:
+        await callback.answer(
+            "Этот список расходов устарел. Откройте его заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if callback.message.message_id != data.get("cancellation_message_id"):
+        await callback.answer(
+            "Используйте последний открытый список расходов.",
+            show_alert=True,
+        )
+        return
+    try:
+        index = int(callback.data.split(":", 1)[1])
+        expense = data.get("cancellation_expenses", [])[index]
+        expense_id = str(expense.get("ID Записи", "")).strip()
+        if not expense_id:
+            raise ValueError
+    except (ValueError, IndexError):
+        await callback.answer("Некорректный расход.", show_alert=True)
+        return
+    await callback.answer(f"Выбран расход #{expense_id}")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.update_data(selected_expense=expense)
+    await state.set_state(ExpenseCancellationForm.confirmation)
+    expense_amount = str(expense.get("Сумма (RUB)") or "0")
+    await callback.message.answer(
+        "Подтвердите отмену расхода:\n\n"
+        f"ID: {expense_id}\n"
+        f"Дата: {_value(expense, 'Дата', default='—')}\n"
+        f"Сумма: {_format_number(expense_amount.replace(' ', '').replace(',', ''))} RUB\n"
+        f"Статья: {_value(expense, 'Категория / На что', default='—')}\n"
+        "Авто: "
+        f"{_value(expense, 'Автомобиль (Госномер / Общие)', default='—')}\n\n"
+        "Удалить эту строку из листа Expenses?",
+        reply_markup=confirmation_keyboard(),
+    )
+
+
+async def expense_cancel_confirmation(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if not await ensure_finance_access(message):
+        return
+    if (message.text or "").strip() != "Подтвердить":
+        await cancel_flow(message, state)
+        return
+    data = await state.get_data()
+    expense = data.get("selected_expense", {})
+    expense_id = str(expense.get("ID Записи", "")).strip()
+    if not expense_id:
+        await state.clear()
+        await message.answer(
+            "Не удалось определить ID расхода. Откройте список заново.",
+            reply_markup=main_keyboard(message.from_user.id),
+        )
+        return
+    try:
+        deleted = await asyncio.to_thread(
+            delete_expense,
+            expense_id,
+            expense,
+        )
+    except Exception:
+        logger.exception("Could not delete expense %s", expense_id)
+        await state.clear()
+        await message.answer(
+            "Не удалось удалить расход из Google Sheets.",
+            reply_markup=main_keyboard(message.from_user.id),
+        )
+        return
+    await state.clear()
+    if not deleted:
+        await message.answer(
+            f"Расход #{expense_id} уже удалён, изменён или не найден.",
             reply_markup=main_keyboard(message.from_user.id),
         )
         return
     await message.answer(
-        _format_financial_report(report),
+        f"Расход #{expense_id} успешно отменён и удалён из Expenses.",
         reply_markup=main_keyboard(message.from_user.id),
+    )
+
+
+async def start_financial_report(message: Message, state: FSMContext) -> None:
+    if not await ensure_finance_access(message):
+        return
+    await state.clear()
+    try:
+        months = await asyncio.to_thread(
+            get_available_financial_months,
+            _now_minsk().date(),
+        )
+    except Exception:
+        logger.exception("Could not load financial report months")
+        await message.answer(
+            "Не удалось получить список доступных месяцев.",
+            reply_markup=main_keyboard(message.from_user.id),
+        )
+        return
+    await state.set_state(FinancialReportForm.month)
+    selection_message = await message.answer(
+        "Выберите месяц для финансового отчёта:",
+        reply_markup=financial_month_keyboard(months),
+    )
+    await state.update_data(
+        financial_months=months,
+        financial_month_message_id=selection_message.message_id,
+    )
+
+
+async def financial_month_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    if not _callback_has_finance_access(callback):
+        await callback.answer(
+            "У вас нет доступа к финансовым операциям.",
+            show_alert=True,
+        )
+        return
+    if await state.get_state() != FinancialReportForm.month.state:
+        await callback.answer(
+            "Этот выбор месяца устарел. Откройте отчёт заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if callback.message.message_id != data.get("financial_month_message_id"):
+        await callback.answer(
+            "Используйте последний список месяцев.",
+            show_alert=True,
+        )
+        return
+    month_key = callback.data.split(":", 1)[1]
+    if month_key not in data.get("financial_months", []):
+        await callback.answer("Недоступный месяц.", show_alert=True)
+        return
+    await callback.answer(f"Формирую отчёт за {month_key}")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.clear()
+    try:
+        report = await asyncio.to_thread(get_financial_report, month_key)
+    except Exception:
+        logger.exception("Could not build financial report for %s", month_key)
+        await callback.message.answer(
+            "Не удалось сформировать финансовый отчёт.",
+            reply_markup=main_keyboard(callback.from_user.id),
+        )
+        return
+    await callback.message.answer(
+        _format_financial_report(report),
+        reply_markup=main_keyboard(callback.from_user.id),
     )
 
 
@@ -2989,6 +3259,14 @@ def create_dispatcher() -> Dispatcher:
         F.data.startswith("expense_category:"),
     )
     dispatcher.callback_query.register(
+        expense_cancel_select_callback,
+        F.data.startswith("expense_cancel_select:"),
+    )
+    dispatcher.callback_query.register(
+        financial_month_callback,
+        F.data.startswith("financial_month:"),
+    )
+    dispatcher.callback_query.register(
         cancellation_booking_callback,
         F.data.startswith("cancel_booking:"),
     )
@@ -3009,6 +3287,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(start_occupancy, F.text == "🔍 Проверка броней")
     dispatcher.message.register(start_cancellation, F.text == "🚫 Отмена брони")
     dispatcher.message.register(start_expense, F.text == "💸 Внести расход")
+    dispatcher.message.register(
+        start_expense_cancellation,
+        F.text == "❌ Отменить расход",
+    )
     dispatcher.message.register(
         start_financial_report,
         F.text == "📈 Фин. отчет",
@@ -3057,6 +3339,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(
         expense_confirmation,
         ExpenseForm.confirmation,
+    )
+    dispatcher.message.register(
+        expense_cancel_confirmation,
+        ExpenseCancellationForm.confirmation,
     )
 
     dispatcher.message.register(unknown_message)

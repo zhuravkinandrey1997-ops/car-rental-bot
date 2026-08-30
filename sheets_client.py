@@ -1,6 +1,8 @@
 import os
 import datetime
 import json
+import threading
+import uuid
 import gspread
 from dotenv import load_dotenv
 
@@ -64,6 +66,7 @@ CAR_PROFIT_SUMMARY_HEADERS = [
     "Затраты на авто (RUB)",
     "Чистая прибыль авто (RUB)",
 ]
+EXPENSES_LOCK = threading.Lock()
 
 if SERVICE_ACCOUNT_JSON:
     gc = gspread.service_account_from_dict(json.loads(SERVICE_ACCOUNT_JSON))
@@ -319,25 +322,102 @@ def add_expense(
     name: str,
     note: str,
     expense_date: str,
-) -> int:
-    records = ws_expenses.get_all_records()
-    existing_ids = [_number(record.get("ID Записи")) for record in records]
-    expense_id = max(existing_ids, default=0) + 1
-    _append_record(
-        ws_expenses,
-        {
-            "ID Записи": expense_id,
-            "Дата": expense_date,
-            "Сумма (RUB)": amount,
-            "Категория / На что": category,
-            "Автомобиль (Госномер / Общие)": vehicle,
-            "Telegram ID": telegram_id,
-            "Имя": name,
-            "Примечание": note,
-        },
-        EXPENSE_HEADERS,
-    )
+) -> str:
+    expense_id = f"EXP-{uuid.uuid4().hex[:16].upper()}"
+    with EXPENSES_LOCK:
+        _append_record(
+            ws_expenses,
+            {
+                "ID Записи": expense_id,
+                "Дата": expense_date,
+                "Сумма (RUB)": amount,
+                "Категория / На что": category,
+                "Автомобиль (Госномер / Общие)": vehicle,
+                "Telegram ID": telegram_id,
+                "Имя": name,
+                "Примечание": note,
+            },
+            EXPENSE_HEADERS,
+        )
     return expense_id
+
+
+def get_recent_expenses(limit: int = 10) -> list[dict]:
+    with EXPENSES_LOCK:
+        records = ws_expenses.get_all_records()
+    recent: list[dict] = []
+    start_row = max(2, len(records) + 2 - max(limit, 0))
+    for row_number, record in enumerate(records[start_row - 2 :], start=start_row):
+        item = dict(record)
+        item["_row_number"] = row_number
+        recent.append(item)
+    recent.reverse()
+    return recent
+
+
+def _expense_fingerprint(record: dict) -> tuple[str, ...]:
+    return tuple(
+        str(record.get(header, "") or "").strip()
+        for header in EXPENSE_HEADERS
+    )
+
+
+def delete_expense(
+    expense_id: object,
+    expected_record: dict | None = None,
+) -> bool:
+    expected_fingerprint = (
+        _expense_fingerprint(expected_record)
+        if expected_record is not None
+        else None
+    )
+    with EXPENSES_LOCK:
+        records = ws_expenses.get_all_records()
+        headers = _ensure_headers(ws_expenses, EXPENSE_HEADERS)
+        for row_number, record in enumerate(records, start=2):
+            if str(record.get("ID Записи", "")).strip() != str(expense_id).strip():
+                continue
+            if (
+                expected_fingerprint is not None
+                and _expense_fingerprint(record) != expected_fingerprint
+            ):
+                return False
+            current_values = ws_expenses.row_values(row_number)
+            current_record = dict(zip(headers, current_values))
+            if str(current_record.get("ID Записи", "")).strip() != str(
+                expense_id
+            ).strip():
+                return False
+            if (
+                expected_fingerprint is not None
+                and _expense_fingerprint(current_record) != expected_fingerprint
+            ):
+                return False
+            ws_expenses.delete_rows(row_number)
+            return True
+    return False
+
+
+def get_available_financial_months(
+    reference_date: datetime.date | None = None,
+) -> list[str]:
+    reference_date = reference_date or datetime.date.today()
+    current_month = reference_date.strftime("%Y-%m")
+    previous_month_date = reference_date.replace(day=1) - datetime.timedelta(days=1)
+    months = {current_month, previous_month_date.strftime("%Y-%m")}
+    for record in ws_returns.get_all_records():
+        month = _month_from_record(
+            record,
+            "Дата возврата",
+            "Дата и время приёма",
+        )
+        if month:
+            months.add(month)
+    for record in ws_expenses.get_all_records():
+        month = _month_from_record(record, "Дата")
+        if month:
+            months.add(month)
+    return sorted(months, reverse=True)
 
 
 def get_financial_report(month_key: str) -> dict:
