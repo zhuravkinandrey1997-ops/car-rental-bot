@@ -5,6 +5,7 @@ description = "Telegram bot for manager-led car rental operations backed by Goog
 requires-python = ">=3.11"
 dependencies = [
     "aiogram>=3.31.0",
+    "apscheduler>=3.11.3",
     "gspread>=6.2.1",
     "python-dotenv>=1.2.3",
 ]

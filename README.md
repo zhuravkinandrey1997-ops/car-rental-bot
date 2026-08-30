@@ -9,6 +9,8 @@ This project contains a manager-only Telegram bot built with aiogram 3. It reads
 - View active rentals
 - Register an actual vehicle return, cash payment, extra fees, and notes
 - Mark the booking as `Завершена` and update the car mileage after a return
+- Send every active manager a daily 20:00 summary of tomorrow's vehicle
+  issuances and returns
 
 ## Setup
 
@@ -19,7 +21,9 @@ This project contains a manager-only Telegram bot built with aiogram 3. It reads
 3. Set the spreadsheet name in `SPREADSHEET_NAME` if it differs from the default. Copy `.env.example` to `.env` for local settings.
 4. Add each manager to the `Managers` worksheet with a `Telegram ID` column and set `Доступ активен` to `да`, `yes`, or `true`.
 5. Keep `TELEGRAM_BOT_TOKEN` in Replit Secrets. It is intentionally not placed in `.env`.
-6. Start the bot with:
+6. Set `RENTAL_TIMEZONE` to the rental company's IANA timezone if it differs
+   from the default `Europe/Moscow`.
+7. Start the bot with:
 
    ```bash
    uv run python main.py
@@ -46,3 +50,16 @@ updates the booking status to `Завершена` and the car mileage after con
 Cancelling an active booking changes its status to `Отменена`, records the
 cancellation reason and deposit outcome, and releases its dates for availability
 checks.
+
+## Daily notifications
+
+The bot runs an APScheduler cron job every day at `20:00` in
+`RENTAL_TIMEZONE` (default: `Europe/Moscow`). It scans `Bookings` for tomorrow's
+confirmed issuances and in-progress rental returns, formats one summary, and
+sends it to every `Managers` row where `Доступ активен` is `да`, `yes`, or
+`true`. A no-events message is sent when tomorrow has no issuances or returns.
+After a successful send, the bot stores the target date in the automatically
+created `Последний план на дату` column. This prevents normal restarts from
+duplicating the same evening summary and lets a bot restarted after 20:00 send
+the missed plan. Failed recipients are retried during the evening, and summaries
+larger than Telegram's single-message limit are split into safe chunks.

@@ -9,7 +9,7 @@ import logging
 import math
 import os
 from contextlib import suppress
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramAPIError
@@ -26,6 +26,8 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
 from sheets_client import (
@@ -34,12 +36,16 @@ from sheets_client import (
     get_active_rentals,
     get_active_bookings_for_car,
     get_active_cars,
+    get_all_cars,
     get_available_cars,
     get_car_by_id,
     get_car_by_plate,
     get_cancellable_bookings_for_car,
+    get_pending_notification_manager_ids,
     get_returnable_rentals,
+    get_tomorrow_bookings,
     is_manager_authorized,
+    mark_notification_sent,
     save_actual_return,
 )
 
@@ -267,6 +273,14 @@ PAYMENT_METHODS = {
 
 DEFAULT_WASH_FEE = 1000
 MINSK_TZ = ZoneInfo("Europe/Minsk")
+NOTIFICATION_TIMEZONE_NAME = os.getenv("RENTAL_TIMEZONE", "Europe/Moscow")
+try:
+    NOTIFICATION_TZ = ZoneInfo(NOTIFICATION_TIMEZONE_NAME)
+except ZoneInfoNotFoundError as exc:
+    raise RuntimeError(
+        f"Unknown RENTAL_TIMEZONE: {NOTIFICATION_TIMEZONE_NAME}"
+    ) from exc
+NOTIFICATION_SEND_LOCK = asyncio.Lock()
 
 
 def payment_methods_keyboard(flow: str = "return") -> InlineKeyboardMarkup:
@@ -556,6 +570,253 @@ def _record_datetime(
         except ValueError:
             continue
     return default or _now_minsk()
+
+
+def _notification_time(
+    booking: dict,
+    *keys: str,
+    default: str = "весь день",
+) -> str:
+    raw = _value(booking, *keys, default="")
+    if not raw:
+        return default
+    for date_format in (
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%Y-%m-%d",
+        "%d.%m.%Y",
+    ):
+        try:
+            parsed = datetime.datetime.strptime(raw, date_format)
+        except ValueError:
+            continue
+        if "H" in date_format:
+            return parsed.strftime("%H:%M")
+        return default
+    return raw
+
+
+def _notification_car_lookup(cars: list[dict]) -> dict[str, dict]:
+    lookup = {}
+    for car in cars:
+        car_id = _value(car, "ID", "ID Авто", "Car ID", default="")
+        plate = _value(car, "Госномер", "Номер авто", "Номер", default="")
+        if car_id:
+            lookup[f"id:{car_id}"] = car
+        if plate:
+            lookup[f"plate:{plate}"] = car
+    return lookup
+
+
+def _notification_car_label(
+    booking: dict,
+    car_lookup: dict[str, dict],
+) -> str:
+    car_id = _value(booking, "ID Авто", "Car ID", default="")
+    plate = _value(
+        booking,
+        "Госномер",
+        "Номер авто",
+        "Номер",
+        "Plate",
+        default="",
+    )
+    car_record = car_lookup.get(f"id:{car_id}") or car_lookup.get(
+        f"plate:{plate}"
+    )
+    if car_record:
+        return f"{_car_name(car_record)} ({_car_plate(car_record)})"
+    return (
+        f"{_value(booking, 'Автомобиль', 'Авто', 'Название авто', default='Авто')} "
+        f"({_value(booking, 'Госномер', 'Номер авто', 'Номер', default='—')})"
+    )
+
+
+def _notification_booking_line(
+    booking: dict,
+    car_lookup: dict[str, dict],
+    *time_keys: str,
+) -> str:
+    client = _value(
+        booking,
+        "ФИО Клиента",
+        "Клиент",
+        "Клиент ФИО",
+        "Имя клиента",
+        default="не указан",
+    )
+    phone = _value(booking, "Телефон", "Телефон клиента", default="не указан")
+    scheduled_time = _notification_time(booking, *time_keys)
+    return (
+        f"• {_notification_car_label(booking, car_lookup)} — "
+        f"Клиент: {client}/{phone} — Время: {scheduled_time}"
+    )
+
+
+def build_tomorrow_summary(
+    target_date: datetime.date,
+    events: dict[str, list[dict]],
+    cars: list[dict] | None = None,
+) -> str:
+    date_label = target_date.strftime("%d.%m.%Y")
+    issuances = events.get("issuances", [])
+    returns = events.get("returns", [])
+    if not issuances and not returns:
+        return f"📅 На завтра ({date_label}) запланированных выдач и возвратов нет."
+
+    car_lookup = _notification_car_lookup(cars or [])
+    sections = [f"📅 План на завтра ({date_label}):"]
+    if issuances:
+        sections.append(
+            "🚗 ВЫДАЧИ АВТО:\n"
+            + "\n".join(
+                _notification_booking_line(
+                    booking,
+                    car_lookup,
+                    "Дата и время выдачи",
+                    "Время выдачи",
+                    "Дата начала (ГГГГ-ММ-ДД)",
+                    "Дата начала",
+                )
+                for booking in issuances
+            )
+        )
+    if returns:
+        sections.append(
+            "🏁 ПРИЁМЫ АВТО:\n"
+            + "\n".join(
+                _notification_booking_line(
+                    booking,
+                    car_lookup,
+                    "Плановое окончание",
+                    "Плановая дата и время окончания",
+                    "Дата окончания (ГГГГ-ММ-ДД)",
+                    "Дата окончания",
+                )
+                for booking in returns
+            )
+        )
+    return "\n\n".join(sections)
+
+
+def split_telegram_message(text: str, limit: int = 4000) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    current = ""
+    for line in text.splitlines():
+        candidate = f"{current}\n{line}".strip() if current else line
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        while len(line) > limit:
+            chunks.append(line[:limit])
+            line = line[limit:]
+        current = line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def _send_notification_chunks(
+    bot: Bot,
+    manager_id: int,
+    chunks: list[str],
+) -> None:
+    for chunk in chunks:
+        last_error = None
+        for attempt in range(3):
+            try:
+                await bot.send_message(chat_id=manager_id, text=chunk)
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(5 * (attempt + 1))
+        if last_error is not None:
+            raise last_error
+
+
+async def send_tomorrow_notifications(
+    bot: Bot,
+    now: datetime.datetime | None = None,
+) -> None:
+    current = now or datetime.datetime.now(NOTIFICATION_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=NOTIFICATION_TZ)
+    else:
+        current = current.astimezone(NOTIFICATION_TZ)
+    target_date = current.date() + datetime.timedelta(days=1)
+    async with NOTIFICATION_SEND_LOCK:
+        try:
+            events, manager_ids, cars = await asyncio.to_thread(
+                lambda: (
+                    get_tomorrow_bookings(target_date),
+                    get_pending_notification_manager_ids(target_date),
+                    get_all_cars(),
+                )
+            )
+        except Exception:
+            logger.exception("Could not collect tomorrow's rental plan")
+            return
+
+        summary = build_tomorrow_summary(target_date, events, cars)
+        chunks = split_telegram_message(summary)
+        if not manager_ids:
+            logger.info(
+                "Tomorrow's rental plan for %s has no pending recipients",
+                target_date,
+            )
+            return
+        for manager_id in manager_ids:
+            try:
+                await _send_notification_chunks(bot, manager_id, chunks)
+                await asyncio.to_thread(
+                    mark_notification_sent,
+                    manager_id,
+                    target_date,
+                )
+            except TelegramAPIError:
+                logger.exception(
+                    "Could not send tomorrow's rental plan to manager %s",
+                    manager_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Unexpected error sending tomorrow's rental plan to manager %s",
+                    manager_id,
+                )
+
+
+async def send_missed_tomorrow_notifications(bot: Bot) -> None:
+    now = datetime.datetime.now(NOTIFICATION_TZ)
+    if now.time() >= datetime.time(20, 0):
+        await send_tomorrow_notifications(bot, now)
+
+
+def create_notification_scheduler(bot: Bot) -> AsyncIOScheduler:
+    scheduler = AsyncIOScheduler(timezone=NOTIFICATION_TZ)
+    scheduler.add_job(
+        send_tomorrow_notifications,
+        CronTrigger(
+            hour="20-23",
+            minute="0,15,30,45",
+            timezone=NOTIFICATION_TZ,
+        ),
+        args=[bot],
+        id="daily_tomorrow_rental_plan",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+    return scheduler
 
 
 def _return_calculation(data: dict) -> dict[str, int | str]:
@@ -1911,14 +2172,31 @@ async def run_bot() -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured.")
     bot = Bot(token=TOKEN)
     dispatcher = create_dispatcher()
+    scheduler = create_notification_scheduler(bot)
+    catchup_task: asyncio.Task | None = None
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        scheduler.start()
+        catchup_task = asyncio.create_task(
+            send_missed_tomorrow_notifications(bot)
+        )
+        logger.info(
+            "Daily tomorrow plan scheduled for 20:00 (%s)",
+            NOTIFICATION_TIMEZONE_NAME,
+        )
         logger.info("Car rental bot started")
         await dispatcher.start_polling(bot)
     except TelegramAPIError:
         logger.exception("Telegram API error")
         raise
     finally:
+        if scheduler.running:
+            with suppress(Exception):
+                scheduler.shutdown(wait=False)
+        if catchup_task and not catchup_task.done():
+            catchup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await catchup_task
         with suppress(Exception):
             await bot.session.close()
 

@@ -36,6 +36,109 @@ def is_manager_authorized(tg_id: int) -> bool:
     return False
 
 
+def get_active_manager_ids() -> list[int]:
+    manager_ids = []
+    seen_ids = set()
+    for manager in ws_managers.get_all_records():
+        access = str(manager.get("Доступ активен", "")).strip().lower()
+        if access not in {"да", "yes", "true"}:
+            continue
+        raw_id = str(manager.get("Telegram ID", "")).strip()
+        try:
+            manager_id = int(raw_id)
+        except ValueError:
+            continue
+        if manager_id not in seen_ids:
+            seen_ids.add(manager_id)
+            manager_ids.append(manager_id)
+    return manager_ids
+
+
+def get_pending_notification_manager_ids(
+    target_date: datetime.date,
+) -> list[int]:
+    sent_date = target_date.isoformat()
+    recipients: dict[int, bool] = {}
+    for manager in ws_managers.get_all_records():
+        access = str(manager.get("Доступ активен", "")).strip().lower()
+        if access not in {"да", "yes", "true"}:
+            continue
+        try:
+            manager_id = int(str(manager.get("Telegram ID", "")).strip())
+        except ValueError:
+            continue
+        already_sent = (
+            str(manager.get("Последний план на дату", "")).strip() == sent_date
+        )
+        recipients[manager_id] = recipients.get(manager_id, False) or already_sent
+    return [
+        manager_id
+        for manager_id, already_sent in recipients.items()
+        if not already_sent
+    ]
+
+
+def mark_notification_sent(
+    manager_id: int,
+    target_date: datetime.date,
+) -> None:
+    records = ws_managers.get_all_records()
+    headers = _ensure_headers(ws_managers, ["Последний план на дату"])
+    column = headers.index("Последний план на дату") + 1
+    for row_number, manager in enumerate(records, start=2):
+        if str(manager.get("Telegram ID", "")).strip() == str(manager_id):
+            ws_managers.update_cell(
+                row_number,
+                column,
+                target_date.isoformat(),
+            )
+
+
+def _booking_date(value: object) -> datetime.date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    for date_format in (
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+        "%d.%m.%Y",
+        "%d.%m.%Y %H:%M",
+    ):
+        try:
+            return datetime.datetime.strptime(raw, date_format).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _first_booking_date(booking: dict, *keys: str) -> datetime.date | None:
+    for key in keys:
+        parsed = _booking_date(booking.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def get_tomorrow_bookings(target_date: datetime.date) -> dict[str, list[dict]]:
+    events = {"issuances": [], "returns": []}
+    for booking in ws_bookings.get_all_records():
+        status = str(booking.get("Статус", "")).strip()
+        if status == "Подтверждена" and _first_booking_date(
+            booking,
+            "Дата начала (ГГГГ-ММ-ДД)",
+            "Дата начала",
+        ) == target_date:
+            events["issuances"].append(booking)
+        elif status == "В аренде" and _first_booking_date(
+            booking,
+            "Дата окончания (ГГГГ-ММ-ДД)",
+            "Дата окончания",
+        ) == target_date:
+            events["returns"].append(booking)
+    return events
+
+
 def get_available_cars(start_date_str: str, end_date_str: str):
     req_start = datetime.datetime.strptime(start_date_str, "%Y-%m-%d").date()
     req_end = datetime.datetime.strptime(end_date_str, "%Y-%m-%d").date()
@@ -152,6 +255,10 @@ def get_returnable_rentals():
 def get_active_cars():
     all_cars = ws_cars.get_all_records()
     return [car for car in all_cars if car.get("Статус") == "Активен"]
+
+
+def get_all_cars():
+    return ws_cars.get_all_records()
 
 
 def get_active_bookings_for_car(car_id: str, plate: str = ""):
