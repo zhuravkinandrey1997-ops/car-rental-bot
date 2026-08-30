@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
+import datetime
 import logging
 import os
 from contextlib import suppress
@@ -12,7 +14,15 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from dotenv import load_dotenv
 
@@ -34,6 +44,22 @@ logging.basicConfig(
 logger = logging.getLogger("car-rental-bot")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+MONTH_NAMES = (
+    "Январь",
+    "Февраль",
+    "Март",
+    "Апрель",
+    "Май",
+    "Июнь",
+    "Июль",
+    "Август",
+    "Сентябрь",
+    "Октябрь",
+    "Ноябрь",
+    "Декабрь",
+)
+WEEKDAY_NAMES = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
 
 class AvailabilityForm(StatesGroup):
@@ -59,6 +85,93 @@ class ReturnForm(StatesGroup):
     pay_type = State()
     notes = State()
     confirmation = State()
+
+
+def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    month_index = year * 12 + month - 1 + delta
+    return month_index // 12, month_index % 12 + 1
+
+
+def calendar_keyboard(
+    flow: str,
+    stage: str,
+    minimum_date: datetime.date | None = None,
+    year: int | None = None,
+    month: int | None = None,
+) -> InlineKeyboardMarkup:
+    minimum_date = minimum_date or datetime.date.today()
+    year = year or minimum_date.year
+    month = month or minimum_date.month
+    minimum_month = (minimum_date.year, minimum_date.month)
+    previous_year, previous_month = _shift_month(year, month, -1)
+    next_year, next_month = _shift_month(year, month, 1)
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=f"{MONTH_NAMES[month - 1]} {year}",
+                callback_data="calendar:noop",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="‹",
+                callback_data=(
+                    f"calendar:{flow}:{stage}:{previous_year}:{previous_month}"
+                    if (previous_year, previous_month) > minimum_month
+                    else "calendar:noop"
+                ),
+            ),
+            InlineKeyboardButton(text="Сегодня", callback_data=f"calendar:{flow}:{stage}:{minimum_date.year}:{minimum_date.month}"),
+            InlineKeyboardButton(
+                text="›",
+                callback_data=f"calendar:{flow}:{stage}:{next_year}:{next_month}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(text=weekday, callback_data="calendar:noop")
+            for weekday in WEEKDAY_NAMES
+        ],
+    ]
+
+    for week in calendar.monthcalendar(year, month):
+        row: list[InlineKeyboardButton] = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(text=" ", callback_data="calendar:noop"))
+                continue
+            current_date = datetime.date(year, month, day)
+            if current_date < minimum_date:
+                row.append(InlineKeyboardButton(text="·", callback_data="calendar:noop"))
+            else:
+                row.append(
+                    InlineKeyboardButton(
+                        text=str(day),
+                        callback_data=(
+                            f"calendar:{flow}:{stage}:day:{current_date.isoformat()}"
+                        ),
+                    )
+                )
+        rows.append(row)
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _calendar_prompt(flow: str, stage: str, minimum_date: datetime.date | None = None) -> str:
+    minimum_text = ""
+    if minimum_date:
+        minimum_text = f"\nМинимальная дата: {minimum_date.strftime('%d.%m.%Y')}."
+    if stage == "start":
+        return (
+            "Выберите дату начала аренды в календаре."
+            "\nМожно также ввести дату текстом в формате ГГГГ-ММ-ДД."
+            + minimum_text
+        )
+    return (
+        "Выберите дату окончания аренды в календаре."
+        "\nМожно также ввести дату текстом в формате ГГГГ-ММ-ДД."
+        + minimum_text
+    )
 
 
 def main_keyboard() -> ReplyKeyboardMarkup:
@@ -230,7 +343,7 @@ async def start_availability(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(AvailabilityForm.start_date)
     await message.answer(
-        "Введите дату начала аренды в формате ГГГГ-ММ-ДД:",
+        _calendar_prompt("availability", "start"),
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -240,9 +353,20 @@ async def availability_start_date(message: Message, state: FSMContext) -> None:
     if not _parse_date(value):
         await message.answer("Неверный формат. Пример: 2026-09-15.")
         return
+    selected_date = datetime.date.fromisoformat(value)
+    if selected_date < datetime.date.today():
+        await message.answer("Дата начала не может быть в прошлом.")
+        return
     await state.update_data(start_date=value)
     await state.set_state(AvailabilityForm.end_date)
-    await message.answer("Введите дату окончания аренды в формате ГГГГ-ММ-ДД:")
+    await message.answer(
+        _calendar_prompt("availability", "end", selected_date),
+        reply_markup=calendar_keyboard(
+            "availability",
+            "end",
+            minimum_date=selected_date,
+        ),
+    )
 
 
 async def availability_end_date(message: Message, state: FSMContext) -> None:
@@ -254,8 +378,17 @@ async def availability_end_date(message: Message, state: FSMContext) -> None:
     if value < data["start_date"]:
         await message.answer("Дата окончания не может быть раньше даты начала.")
         return
+    await _finish_availability(message, state, data["start_date"], value)
+
+
+async def _finish_availability(
+    message: Message,
+    state: FSMContext,
+    start_date: str,
+    end_date: str,
+) -> None:
     try:
-        cars = get_available_cars(data["start_date"], value)
+        cars = get_available_cars(start_date, end_date)
     except Exception:
         logger.exception("Could not load available cars")
         await state.clear()
@@ -281,7 +414,7 @@ async def start_booking(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(BookingForm.start_date)
     await message.answer(
-        "Новая бронь. Введите дату начала в формате ГГГГ-ММ-ДД:",
+        "Новая бронь.\n\n" + _calendar_prompt("booking", "start"),
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -291,9 +424,20 @@ async def booking_start_date(message: Message, state: FSMContext) -> None:
     if not _parse_date(value):
         await message.answer("Неверный формат. Пример: 2026-09-15.")
         return
+    selected_date = datetime.date.fromisoformat(value)
+    if selected_date < datetime.date.today():
+        await message.answer("Дата начала не может быть в прошлом.")
+        return
     await state.update_data(start_date=value)
     await state.set_state(BookingForm.end_date)
-    await message.answer("Введите дату окончания в формате ГГГГ-ММ-ДД:")
+    await message.answer(
+        _calendar_prompt("booking", "end", selected_date),
+        reply_markup=calendar_keyboard(
+            "booking",
+            "end",
+            minimum_date=selected_date,
+        ),
+    )
 
 
 async def booking_end_date(message: Message, state: FSMContext) -> None:
@@ -305,8 +449,17 @@ async def booking_end_date(message: Message, state: FSMContext) -> None:
     if value < data["start_date"]:
         await message.answer("Дата окончания не может быть раньше даты начала.")
         return
+    await _finish_booking_dates(message, state, data["start_date"], value)
+
+
+async def _finish_booking_dates(
+    message: Message,
+    state: FSMContext,
+    start_date: str,
+    end_date: str,
+) -> None:
     try:
-        cars = get_available_cars(data["start_date"], value)
+        cars = get_available_cars(start_date, end_date)
     except Exception:
         logger.exception("Could not load cars for booking")
         await state.clear()
@@ -316,9 +469,113 @@ async def booking_end_date(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer("На выбранный период свободных авто нет.", reply_markup=main_keyboard())
         return
-    await state.update_data(end_date=value, cars=cars)
+    await state.update_data(end_date=end_date, cars=cars)
     await state.set_state(BookingForm.car)
     await message.answer("Выберите автомобиль:", reply_markup=car_choice_keyboard(cars))
+
+
+def _calendar_minimum_date(flow: str, stage: str, data: dict) -> datetime.date:
+    if stage == "end" and data.get("start_date"):
+        return datetime.date.fromisoformat(data["start_date"])
+    return datetime.date.today()
+
+
+async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if not callback.data or not callback.message:
+        await callback.answer()
+        return
+
+    parts = callback.data.split(":")
+    if parts[1] == "noop":
+        await callback.answer()
+        return
+
+    if len(parts) < 5:
+        await callback.answer("Календарь устарел. Откройте операцию заново.", show_alert=True)
+        return
+
+    flow = parts[1]
+    stage = parts[2]
+    data = await state.get_data()
+    minimum_date = _calendar_minimum_date(flow, stage, data)
+    message = callback.message
+
+    if len(parts) == 5 and parts[3] != "day":
+        try:
+            year = int(parts[3])
+            month = int(parts[4])
+        except ValueError:
+            await callback.answer("Не удалось открыть этот месяц.", show_alert=True)
+            return
+        await callback.answer()
+        await message.edit_reply_markup(
+            reply_markup=calendar_keyboard(
+                flow,
+                stage,
+                minimum_date=minimum_date,
+                year=year,
+                month=month,
+            )
+        )
+        return
+
+    if len(parts) != 5 or parts[3] != "day":
+        await callback.answer("Календарь устарел. Откройте операцию заново.", show_alert=True)
+        return
+
+    try:
+        selected_date = datetime.date.fromisoformat(parts[4])
+    except ValueError:
+        await callback.answer("Некорректная дата.", show_alert=True)
+        return
+    if selected_date < minimum_date:
+        await callback.answer("Эта дата недоступна для выбора.", show_alert=True)
+        return
+
+    selected_value = selected_date.isoformat()
+    await callback.answer()
+
+    if flow == "availability" and stage == "start":
+        await state.update_data(start_date=selected_value)
+        await state.set_state(AvailabilityForm.end_date)
+        await message.edit_text(
+            _calendar_prompt("availability", "end", selected_date),
+            reply_markup=calendar_keyboard(
+                "availability",
+                "end",
+                minimum_date=selected_date,
+            ),
+        )
+        return
+
+    if flow == "availability" and stage == "end":
+        await message.edit_text(
+            f"Период выбран: {data['start_date']} — {selected_value}"
+        )
+        await _finish_availability(message, state, data["start_date"], selected_value)
+        return
+
+    if flow == "booking" and stage == "start":
+        await state.update_data(start_date=selected_value)
+        await state.set_state(BookingForm.end_date)
+        await message.edit_text(
+            "Новая бронь.\n\n" + _calendar_prompt("booking", "end", selected_date),
+            reply_markup=calendar_keyboard(
+                "booking",
+                "end",
+                minimum_date=selected_date,
+            ),
+        )
+        return
+
+    if flow == "booking" and stage == "end":
+        await message.edit_text(
+            f"Период брони выбран: {data['start_date']} — {selected_value}"
+        )
+        await _finish_booking_dates(message, state, data["start_date"], selected_value)
+        return
+
+    await callback.answer("Календарь устарел. Откройте операцию заново.", show_alert=True)
 
 
 async def booking_car(message: Message, state: FSMContext) -> None:
@@ -624,6 +881,7 @@ async def error_handler(event: object) -> None:
 
 def create_dispatcher() -> Dispatcher:
     dispatcher = Dispatcher()
+    dispatcher.callback_query.register(calendar_callback, F.data.startswith("calendar:"))
     dispatcher.message.register(start_handler, CommandStart())
     dispatcher.message.register(show_menu, Command("menu"))
     dispatcher.message.register(cancel_flow, F.text.casefold() == "отмена")
