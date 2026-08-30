@@ -1,10 +1,10 @@
 ---
-name: Deposit settlement
-description: Business rule for recording an issuance deposit and settling return deductions against it.
+name: Rental financial separation
+description: Business rule separating booking prepayment, rental settlement, and the insurance deposit.
 ---
 
-Record the actual deposited amount and its payment method at vehicle issuance. At return, subtract mileage, lateness, wash, and additional penalties from that recorded amount; request and record an additional payment only when the result is negative.
+Record booking prepayment and its method separately from the insurance deposit collected at issuance. At return, calculate rent as daily rate times rental days, reduce rent by the prepayment, and settle that balance independently. Offset only mileage, lateness, wash, and additional penalties against the insurance deposit.
 
-**Why:** The deposit is held money, not a new return-time payment. Deductions must be offset against it before the manager asks the client for more money or returns the remainder.
+**Why:** Booking prepayment is part of rental revenue, while the insurance deposit is held security money. Mixing them distorts both the client balance and cash reporting.
 
-**How to apply:** Preserve the original deposit audit fields, show the full-refund, partial-refund, fully-retained, or additional-payment result in the return act, and keep legacy deposit fields as read fallbacks.
+**How to apply:** Keep separate amounts and payment methods for prepayment, rental settlement, insurance deposit, and penalty top-ups. Show distinct rental and insurance blocks in the return act and retain legacy fields only as read/write compatibility aliases.

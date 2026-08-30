@@ -212,10 +212,14 @@ def add_new_booking(
         "Сумма аренды получена (RUB)": price,
         "Залог (RUB)": deposit,
         "Внесенный залог": deposit,
+        "Страховой залог": deposit,
         "Способ оплаты": pay_type,
         "Способ оплаты залога": deposit_pay_type,
+        "Способ оплаты страхового залога": deposit_pay_type,
         "Залог/Предоплата": prepayment,
+        "Задаток/Предоплата": prepayment,
         "Тип оплаты залога": prepayment_pay_type,
+        "Способ оплаты задатка": prepayment_pay_type,
         "Плановое окончание": f"{end_date} 23:59",
     }
     _append_record(
@@ -237,10 +241,14 @@ def add_new_booking(
             "Принятая сумма аренды (RUB)",
             "Залог (RUB)",
             "Внесенный залог",
+            "Страховой залог",
             "Способ оплаты",
             "Способ оплаты залога",
+            "Способ оплаты страхового залога",
             "Залог/Предоплата",
+            "Задаток/Предоплата",
             "Тип оплаты залога",
+            "Способ оплаты задатка",
             "Плановое окончание",
         ],
     )
@@ -255,6 +263,62 @@ def get_active_rentals():
 def get_returnable_rentals():
     all_bookings = ws_bookings.get_all_records()
     return [b for b in all_bookings if b.get("Статус") == "В аренде"]
+
+
+def get_confirmed_bookings():
+    all_bookings = ws_bookings.get_all_records()
+    return [b for b in all_bookings if b.get("Статус") == "Подтверждена"]
+
+
+def issue_booking(
+    booking_id: int,
+    start_mileage: int,
+    insurance_deposit: int,
+    insurance_deposit_pay_type: str,
+    manager_id: int,
+    issued_at: str,
+) -> None:
+    records = ws_bookings.get_all_records()
+    booking_row = None
+    current_status = ""
+    for row_number, booking in enumerate(records, start=2):
+        current_id = (
+            booking.get("ID Брони")
+            or booking.get("ID")
+            or booking.get("Booking ID")
+            or ""
+        )
+        if str(current_id).strip() == str(booking_id).strip():
+            booking_row = row_number
+            current_status = str(booking.get("Статус", "")).strip()
+            break
+    if booking_row is None:
+        raise ValueError(f"Booking {booking_id} was not found")
+    if current_status != "Подтверждена":
+        raise ValueError(
+            f"Booking {booking_id} cannot be issued from status {current_status}"
+        )
+
+    updates = {
+        "Статус": "В аренде",
+        "Дата и время выдачи": issued_at,
+        "Пробег при выдаче (км)": start_mileage,
+        "Telegram ID Менеджера выдачи": manager_id,
+        "Страховой залог": insurance_deposit,
+        "Страховой залог (RUB)": insurance_deposit,
+        "Внесенный страховой залог (RUB)": insurance_deposit,
+        "Способ оплаты страхового залога": insurance_deposit_pay_type,
+        "Залог (RUB)": insurance_deposit,
+        "Внесенный залог": insurance_deposit,
+        "Способ оплаты залога": insurance_deposit_pay_type,
+    }
+    headers = _ensure_headers(ws_bookings, list(updates))
+    for header, value in updates.items():
+        ws_bookings.update_cell(
+            booking_row,
+            headers.index(header) + 1,
+            value,
+        )
 
 
 def get_active_cars():
@@ -326,6 +390,7 @@ def cancel_booking(
         "Статус": "Отменена",
         "Причина отмены": reason,
         "Статус залога при отмене": deposit_status,
+        "Статус задатка при отмене": deposit_status,
     }
     headers = _ensure_headers(ws_bookings, list(updates))
     for header, value in updates.items():
@@ -374,9 +439,41 @@ def save_actual_return(
     wash_fee: int = 0,
     deposit: int = 0,
     deposit_balance: int = 0,
+    rental_total: int = 0,
+    prepayment: int = 0,
+    rental_balance: int = 0,
+    prepayment_overpayment: int = 0,
+    deposit_pay_type: str = "Без оплаты",
+    prepayment_pay_type: str = "Без оплаты",
+    rental_paid: int = 0,
+    rental_pay_type: str = "Без оплаты",
+    rental_outstanding: int = 0,
 ):
     returned_at = returned_at or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     total_penalties = over_mileage_fee + late_fee + wash_fee + extra_fee
+    booking_row = None
+    current_status = ""
+    for row_number, booking in enumerate(
+        ws_bookings.get_all_records(),
+        start=2,
+    ):
+        current_id = (
+            booking.get("ID Брони")
+            or booking.get("ID")
+            or booking.get("Booking ID")
+            or ""
+        )
+        if str(current_id).strip() == str(booking_id).strip():
+            booking_row = row_number
+            current_status = str(booking.get("Статус", "")).strip()
+            break
+    if booking_row is None:
+        raise ValueError(f"Booking {booking_id} was not found")
+    if current_status != "В аренде":
+        raise ValueError(
+            f"Booking {booking_id} cannot be returned from status {current_status}"
+        )
+
     returns_records = ws_returns.get_all_records()
     new_id = len(returns_records) + 1
     values = {
@@ -392,9 +489,19 @@ def save_actual_return(
         "Пробег после (км)": end_mileage,
         "Пробег за аренду (км)": delta_mileage,
         "Сумма аренды (RUB)": base_price,
+        "Стоимость аренды (RUB)": rental_total,
+        "Задаток/Предоплата": prepayment,
+        "Способ оплаты задатка": prepayment_pay_type,
+        "Остаток к оплате аренды (RUB)": rental_balance,
+        "Сумма аренды к доплате (RUB)": rental_balance,
+        "Фактически оплачено за аренду (RUB)": rental_paid,
+        "Способ оплаты аренды": rental_pay_type,
+        "Осталось оплатить за аренду (RUB)": rental_outstanding,
+        "Переплата задатка к возврату (RUB)": prepayment_overpayment,
         "Перепробег / Доплаты (RUB)": total_penalties,
         "Итого удержаний (RUB)": total_penalties,
-        "Итого приход (RUB)": total_paid,
+        "Итого штрафов (RUB)": total_penalties,
+        "Итого приход (RUB)": rental_paid + total_paid,
         "Полученная доплата (RUB)": total_paid,
         "Способ оплаты": pay_type,
         "Способ оплаты доплаты": pay_type,
@@ -412,8 +519,14 @@ def save_actual_return(
         "Доп. штрафы/удержания (RUB)": extra_fee,
         "Залог (RUB)": deposit,
         "Внесенный залог": deposit,
+        "Страховой залог (RUB)": deposit,
+        "Страховой залог": deposit,
+        "Внесенный страховой залог (RUB)": deposit,
+        "Способ оплаты страхового залога": deposit_pay_type,
         "Залог к возврату (RUB)": max(deposit_balance, 0),
+        "Страховой залог к возврату (RUB)": max(deposit_balance, 0),
         "Доплата по залогу (RUB)": max(-deposit_balance, 0),
+        "Доплата за штрафы (RUB)": max(-deposit_balance, 0),
         "Итоговый расчёт (RUB)": deposit_balance,
     }
     _append_record(
@@ -430,8 +543,18 @@ def save_actual_return(
             "Пробег после (км)",
             "Пробег за аренду (км)",
             "Сумма аренды (RUB)",
+            "Стоимость аренды (RUB)",
+            "Задаток/Предоплата",
+            "Способ оплаты задатка",
+            "Остаток к оплате аренды (RUB)",
+            "Сумма аренды к доплате (RUB)",
+            "Фактически оплачено за аренду (RUB)",
+            "Способ оплаты аренды",
+            "Осталось оплатить за аренду (RUB)",
+            "Переплата задатка к возврату (RUB)",
             "Перепробег / Доплаты (RUB)",
             "Итого удержаний (RUB)",
+            "Итого штрафов (RUB)",
             "Итого приход (RUB)",
             "Полученная доплата (RUB)",
             "Способ оплаты",
@@ -451,18 +574,31 @@ def save_actual_return(
             "Доп. штрафы/удержания (RUB)",
             "Залог (RUB)",
             "Внесенный залог",
+            "Страховой залог (RUB)",
+            "Страховой залог",
+            "Внесенный страховой залог (RUB)",
+            "Способ оплаты страхового залога",
             "Залог к возврату (RUB)",
+            "Страховой залог к возврату (RUB)",
             "Доплата по залогу (RUB)",
+            "Доплата за штрафы (RUB)",
             "Итоговый расчёт (RUB)",
         ],
     )
-    cell = ws_bookings.find(str(booking_id))
-    if cell:
-        booking_updates = {
+    booking_updates = {
             "Статус": "Завершена",
             "Дата и время приёма": returned_at,
             "Пробег при возврате (км)": end_mileage,
             "Пробег за аренду (км)": delta_mileage,
+            "Стоимость аренды (RUB)": rental_total,
+            "Задаток/Предоплата": prepayment,
+            "Способ оплаты задатка": prepayment_pay_type,
+            "Остаток к оплате аренды (RUB)": rental_balance,
+            "Сумма аренды к доплате (RUB)": rental_balance,
+            "Фактически оплачено за аренду (RUB)": rental_paid,
+            "Способ оплаты аренды": rental_pay_type,
+            "Осталось оплатить за аренду (RUB)": rental_outstanding,
+            "Переплата задатка к возврату (RUB)": prepayment_overpayment,
             "Лимит пробега (км)": mileage_limit,
             "Перепробег (км)": over_mileage,
             "Штраф за перепробег (RUB)": over_mileage_fee,
@@ -472,17 +608,27 @@ def save_actual_return(
             "Мойка (RUB)": wash_fee,
             "Доп. штрафы/удержания (RUB)": extra_fee,
             "Итого удержаний (RUB)": total_penalties,
+            "Итого штрафов (RUB)": total_penalties,
             "Внесенный залог": deposit,
+            "Страховой залог": deposit,
+            "Внесенный страховой залог (RUB)": deposit,
+            "Способ оплаты страхового залога": deposit_pay_type,
             "Залог к возврату (RUB)": max(deposit_balance, 0),
+            "Страховой залог к возврату (RUB)": max(deposit_balance, 0),
             "Доплата по залогу (RUB)": max(-deposit_balance, 0),
+            "Доплата за штрафы (RUB)": max(-deposit_balance, 0),
             "Полученная доплата (RUB)": total_paid,
             "Способ оплаты доплаты": pay_type,
             "Итоговый расчёт (RUB)": deposit_balance,
             "Примечания / Состояние": notes,
-        }
-        booking_headers = _ensure_headers(ws_bookings, list(booking_updates))
-        for header, value in booking_updates.items():
-            ws_bookings.update_cell(cell.row, booking_headers.index(header) + 1, value)
+    }
+    booking_headers = _ensure_headers(ws_bookings, list(booking_updates))
+    for header, value in booking_updates.items():
+        ws_bookings.update_cell(
+            booking_row,
+            booking_headers.index(header) + 1,
+            value,
+        )
     car_cell = ws_cars.find(plate)
     if car_cell:
         car_headers = ws_cars.row_values(1)

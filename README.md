@@ -38,20 +38,25 @@ Booking rows include the following data:
 `ID Брони`, `ID Авто`, `Автомобиль`, `Дата начала (ГГГГ-ММ-ДД)`,
 `Дата окончания (ГГГГ-ММ-ДД)`, `ФИО Клиента`, `Телефон`, `Сумма брони (RUB)`,
 `Telegram ID Менеджера`, `Статус`, `Дата и время выдачи`,
-`Пробег при выдаче (км)`, `Принятая сумма аренды (RUB)`, `Залог (RUB)`,
-`Внесенный залог`, `Способ оплаты`, `Способ оплаты залога`,
-`Залог/Предоплата`, `Тип оплаты залога`,
-`Плановое окончание`, `Причина отмены`, `Статус залога при отмене`.
+`Пробег при выдаче (км)`, `Задаток/Предоплата`, `Способ оплаты задатка`,
+`Страховой залог`, `Способ оплаты страхового залога`,
+`Плановое окончание`, `Причина отмены`, `Статус задатка при отмене`.
 
 The car sheet should include `ID`, `Статус`, a vehicle name, a plate column such as
 `Госномер`, and a mileage column such as `Пробег`. `Returns_Cash` receives the
 return timestamp, mileage limit and overage, late fees, cleanliness, wash fee,
 additional deductions, deposit settlement, payment method, and notes. The bot
 updates the booking status to `Завершена` and the car mileage after confirmation.
-At issuance, the bot uses the base deposit from `Cars` as a hint and stores the
-actual amount in `Внесенный залог`. At return, it offsets mileage, lateness,
-washing, and additional penalties against that amount; an extra-payment step is
-shown only when the penalties exceed the deposited amount.
+At booking, the bot records the reservation prepayment separately as
+`Задаток/Предоплата`. Issuance selects that confirmed booking, changes its status
+to `В аренде`, uses the base insurance deposit from `Cars` as a hint, and stores
+the actual amount in `Страховой залог`. At return, rental cost is calculated as
+the daily rate multiplied by rental days and reduced by the prepayment. Mileage,
+lateness, washing, and additional penalties are offset only against the insurance
+deposit; an extra damage-payment step is shown only when those penalties exceed
+the deposit. The return records the actual rental payment and method separately
+from any additional payment for damage or penalties, and rejects a repeated
+return if the booking is no longer in `В аренде`.
 Cancelling an active booking changes its status to `Отменена`, records the
 cancellation reason and deposit outcome, and releases its dates for availability
 checks.
