@@ -10,7 +10,7 @@ A manager-only Telegram bot for car rental bookings, active rentals, and vehicle
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required secret: `TELEGRAM_BOT_TOKEN`
-- Required local credential file: `service_account.json`
+- Google credential: `service_account.json` or protected `GOOGLE_SERVICE_ACCOUNT_JSON`
 - Optional env: `SPREADSHEET_NAME`, `SERVICE_ACCOUNT_FILE`, `LOG_LEVEL`
 
 ## Stack
@@ -43,7 +43,7 @@ A manager-only Telegram bot for car rental bookings, active rentals, and vehicle
 
 ## Gotchas
 
-- The bot cannot start Google Sheets operations until `service_account.json` is uploaded and shared access is granted to the spreadsheet.
+- The bot cannot start Google Sheets operations until a service-account credential is configured and shared access is granted to the spreadsheet.
 
 ## Pointers
 

@@ -12,7 +12,9 @@ This project contains a manager-only Telegram bot built with aiogram 3. It reads
 
 ## Setup
 
-1. Create a Google service account and download its JSON key into the project as `service_account.json`.
+1. Create a Google service account and either:
+   - download its JSON key into the project as `service_account.json`, or
+   - save the complete JSON as the protected `GOOGLE_SERVICE_ACCOUNT_JSON` secret.
 2. Share the Google spreadsheet with the service account email.
 3. Set the spreadsheet name in `SPREADSHEET_NAME` if it differs from the default. Copy `.env.example` to `.env` for local settings.
 4. Add each manager to the `Managers` worksheet with a `Telegram ID` column and set `Доступ активен` to `да`, `yes`, or `true`.

@@ -1,0 +1,1 @@
+- [Google Sheets identifier](google-sheets-connection.md) — use gspread's key-based open when configuration contains a Sheets ID rather than a title.

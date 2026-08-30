@@ -1,5 +1,6 @@
 import os
 import datetime
+import json
 import gspread
 from dotenv import load_dotenv
 
@@ -7,9 +8,19 @@ load_dotenv()
 
 SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME", "leon_rental_fleet_rub_v4")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
+SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
-gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
-sh = gc.open(SPREADSHEET_NAME)
+if SERVICE_ACCOUNT_JSON:
+    gc = gspread.service_account_from_dict(json.loads(SERVICE_ACCOUNT_JSON))
+else:
+    gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
+
+# Google Sheets IDs are not spreadsheet titles. Keep support for both so the
+# default name and an explicitly supplied spreadsheet ID work as expected.
+if len(SPREADSHEET_NAME) > 30 and " " not in SPREADSHEET_NAME:
+    sh = gc.open_by_key(SPREADSHEET_NAME)
+else:
+    sh = gc.open(SPREADSHEET_NAME)
 
 ws_cars = sh.worksheet("Cars")
 ws_bookings = sh.worksheet("Bookings")
