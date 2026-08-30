@@ -177,6 +177,9 @@ def calendar_keyboard(
     month: int | None = None,
     occupied_dates: dict[str, list[str]] | None = None,
     allow_past: bool = False,
+    selected_start_date: datetime.date | None = None,
+    selected_end_date: datetime.date | None = None,
+    locked: bool = False,
 ) -> InlineKeyboardMarkup:
     if not allow_past:
         minimum_date = minimum_date or datetime.date.today()
@@ -187,6 +190,13 @@ def calendar_keyboard(
     )
     previous_year, previous_month = _shift_month(year, month, -1)
     next_year, next_month = _shift_month(year, month, 1)
+
+    def day_callback(current_date: datetime.date, action: str = "day") -> str:
+        if locked:
+            return "calendar:noop"
+        return (
+            f"calendar:{flow}:{stage}:{action}:{current_date.isoformat()}"
+        )
 
     rows: list[list[InlineKeyboardButton]] = [
         [
@@ -199,22 +209,32 @@ def calendar_keyboard(
             InlineKeyboardButton(
                 text="‹",
                 callback_data=(
-                    f"calendar:{flow}:{stage}:{previous_year}:{previous_month}"
-                    if minimum_month is None
-                    or (previous_year, previous_month) > minimum_month
+                    "calendar:noop"
+                    if locked
+                    else f"calendar:{flow}:{stage}:{previous_year}:{previous_month}"
+                    if (
+                        minimum_month is None
+                        or (previous_year, previous_month) > minimum_month
+                    )
                     else "calendar:noop"
                 ),
             ),
             InlineKeyboardButton(
                 text="Сегодня",
                 callback_data=(
-                    f"calendar:{flow}:{stage}:{datetime.date.today().year}:"
+                    "calendar:noop"
+                    if locked
+                    else f"calendar:{flow}:{stage}:{datetime.date.today().year}:"
                     f"{datetime.date.today().month}"
                 ),
             ),
             InlineKeyboardButton(
                 text="›",
-                callback_data=f"calendar:{flow}:{stage}:{next_year}:{next_month}",
+                callback_data=(
+                    "calendar:noop"
+                    if locked
+                    else f"calendar:{flow}:{stage}:{next_year}:{next_month}"
+                ),
             ),
         ],
         [
@@ -230,13 +250,47 @@ def calendar_keyboard(
                 row.append(InlineKeyboardButton(text=" ", callback_data="calendar:noop"))
                 continue
             current_date = datetime.date(year, month, day)
-            if occupied_dates and current_date.isoformat() in occupied_dates:
+            if (
+                selected_start_date
+                and selected_end_date
+                and current_date == selected_start_date == selected_end_date
+            ):
+                row.append(
+                    InlineKeyboardButton(
+                        text=f"🟢🔴 {day}",
+                        callback_data=day_callback(current_date),
+                    )
+                )
+            elif selected_end_date and current_date == selected_end_date:
                 row.append(
                     InlineKeyboardButton(
                         text=f"🔴 {day}",
-                        callback_data=(
-                            f"calendar:{flow}:{stage}:busy:{current_date.isoformat()}"
-                        ),
+                        callback_data=day_callback(current_date),
+                    )
+                )
+            elif selected_start_date and current_date == selected_start_date:
+                row.append(
+                    InlineKeyboardButton(
+                        text=f"🟢 {day}",
+                        callback_data=day_callback(current_date),
+                    )
+                )
+            elif (
+                selected_start_date
+                and selected_end_date
+                and selected_start_date < current_date < selected_end_date
+            ):
+                row.append(
+                    InlineKeyboardButton(
+                        text=f"▫️ {day}",
+                        callback_data=day_callback(current_date),
+                    )
+                )
+            elif occupied_dates and current_date.isoformat() in occupied_dates:
+                row.append(
+                    InlineKeyboardButton(
+                        text=f"🔴 {day}",
+                        callback_data=day_callback(current_date, "busy"),
                     )
                 )
             elif minimum_date and current_date < minimum_date:
@@ -245,9 +299,7 @@ def calendar_keyboard(
                 row.append(
                     InlineKeyboardButton(
                         text=str(day),
-                        callback_data=(
-                            f"calendar:{flow}:{stage}:day:{current_date.isoformat()}"
-                        ),
+                        callback_data=day_callback(current_date),
                     )
                 )
         rows.append(row)
@@ -265,10 +317,26 @@ def _calendar_prompt(flow: str, stage: str, minimum_date: datetime.date | None =
             "\nМожно также ввести дату текстом в формате ГГГГ-ММ-ДД."
             + minimum_text
         )
+    if minimum_date:
+        return (
+            f"🟢 Дата начала: {minimum_date.isoformat()}. "
+            "Теперь выберите 🔴 Дату окончания (по):"
+            "\nМожно также ввести дату текстом в формате ГГГГ-ММ-ДД."
+        )
     return (
         "Выберите дату окончания аренды в календаре."
         "\nМожно также ввести дату текстом в формате ГГГГ-ММ-ДД."
         + minimum_text
+    )
+
+
+def _period_selection_text(start_date: str, end_date: str) -> str:
+    start = datetime.date.fromisoformat(start_date)
+    end = datetime.date.fromisoformat(end_date)
+    total_days = (end - start).days + 1
+    return (
+        f"📅 Выбран период: 🟢 {start_date} ➔ 🔴 {end_date} "
+        f"(всего {total_days} дней)"
     )
 
 
@@ -1883,6 +1951,7 @@ async def booking_start_date(message: Message, state: FSMContext) -> None:
             "booking",
             "end",
             minimum_date=selected_date,
+            selected_start_date=selected_date,
         ),
     )
     await state.update_data(calendar_message_id=calendar_message.message_id)
@@ -1897,6 +1966,7 @@ async def booking_end_date(message: Message, state: FSMContext) -> None:
     if value < data["start_date"]:
         await message.answer("Дата окончания не может быть раньше даты начала.")
         return
+    await message.answer(_period_selection_text(data["start_date"], value))
     await _finish_booking_dates(message, state, data["start_date"], value)
 
 
@@ -2259,6 +2329,11 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
                     if flow == "occupancy"
                     else None
                 ),
+                selected_start_date=(
+                    datetime.date.fromisoformat(data["start_date"])
+                    if stage == "end" and data.get("start_date")
+                    else None
+                ),
             )
         )
         return
@@ -2328,6 +2403,7 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
                 "availability",
                 "end",
                 minimum_date=selected_date,
+                selected_start_date=selected_date,
             ),
         )
         return
@@ -2353,13 +2429,25 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
                 "booking",
                 "end",
                 minimum_date=selected_date,
+                selected_start_date=selected_date,
             ),
         )
         return
 
     if flow == "booking" and stage == "end":
+        start_date = datetime.date.fromisoformat(data["start_date"])
         await message.edit_text(
-            f"Период брони выбран: {data['start_date']} — {selected_value}"
+            _period_selection_text(data["start_date"], selected_value),
+            reply_markup=calendar_keyboard(
+                "booking",
+                "end",
+                minimum_date=start_date,
+                year=selected_date.year,
+                month=selected_date.month,
+                selected_start_date=start_date,
+                selected_end_date=selected_date,
+                locked=True,
+            ),
         )
         await _finish_booking_dates(message, state, data["start_date"], selected_value)
         return
