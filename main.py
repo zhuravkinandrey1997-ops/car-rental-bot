@@ -2036,7 +2036,7 @@ async def expense_vehicle(message: Message, state: FSMContext) -> None:
         )
         if not vehicle or vehicle == "—":
             await message.answer(
-                "У выбранного автомобиля не указан госномер в листе Cars. "
+                "У выбранного автомобиля не указан госномер в листе Автомобили. "
                 "Заполните госномер или выберите общие расходы."
             )
             return
@@ -2119,7 +2119,7 @@ async def start_expense_cancellation(
         return
     if not expenses:
         await message.answer(
-            "В листе Expenses пока нет расходов для отмены.",
+            "В листе Затраты пока нет расходов для отмены.",
             reply_markup=main_keyboard(message.from_user.id),
         )
         return
@@ -2182,7 +2182,7 @@ async def expense_cancel_select_callback(
         f"Статья: {_value(expense, 'Категория / На что', default='—')}\n"
         "Авто: "
         f"{_value(expense, 'Автомобиль (Госномер / Общие)', default='—')}\n\n"
-        "Удалить эту строку из листа Expenses?",
+        "Удалить эту строку из листа Затраты?",
         reply_markup=confirmation_keyboard(),
     )
 
@@ -2228,7 +2228,7 @@ async def expense_cancel_confirmation(
         )
         return
     await message.answer(
-        f"Расход #{expense_id} успешно отменён и удалён из Expenses.",
+        f"Расход #{expense_id} успешно отменён и удалён из Затраты.",
         reply_markup=main_keyboard(message.from_user.id),
     )
 
