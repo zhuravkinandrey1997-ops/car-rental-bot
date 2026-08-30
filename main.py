@@ -30,12 +30,15 @@ from dotenv import load_dotenv
 
 from sheets_client import (
     add_new_booking,
+    cancel_booking,
     get_active_rentals,
     get_active_bookings_for_car,
     get_active_cars,
     get_available_cars,
     get_car_by_id,
     get_car_by_plate,
+    get_cancellable_bookings_for_car,
+    get_returnable_rentals,
     is_manager_authorized,
     save_actual_return,
 )
@@ -79,6 +82,7 @@ class BookingForm(StatesGroup):
     client_name = State()
     phone = State()
     price = State()
+    prepayment = State()
     start_mileage = State()
     deposit = State()
     pay_type = State()
@@ -88,6 +92,13 @@ class BookingForm(StatesGroup):
 class OccupancyForm(StatesGroup):
     car = State()
     calendar = State()
+
+
+class CancellationForm(StatesGroup):
+    car = State()
+    booking = State()
+    reason = State()
+    deposit_status = State()
 
 
 class ReturnForm(StatesGroup):
@@ -215,13 +226,17 @@ def main_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [
                 KeyboardButton(text="Доступные авто"),
-                KeyboardButton(text="🚗 Выдача авто"),
+                KeyboardButton(text="Новая бронь"),
             ],
             [
+                KeyboardButton(text="🚗 Выдача авто"),
                 KeyboardButton(text="Активные аренды"),
-                KeyboardButton(text="🏁 Приём авто"),
             ],
-            [KeyboardButton(text="🔍 Проверка броней")],
+            [
+                KeyboardButton(text="🏁 Приём авто"),
+                KeyboardButton(text="🔍 Проверка броней"),
+            ],
+            [KeyboardButton(text="🚫 Отмена брони")],
             [KeyboardButton(text="Отмена")],
         ],
         resize_keyboard=True,
@@ -273,7 +288,11 @@ def payment_methods_keyboard(flow: str = "return") -> InlineKeyboardMarkup:
                     callback_data=f"payment:{flow}:sbp",
                 ),
                 InlineKeyboardButton(
-                    text="🏦 Безнал (Юр. лицо)",
+                    text=(
+                        "🏦 Безнал"
+                        if flow == "reservation"
+                        else "🏦 Безнал (Юр. лицо)"
+                    ),
                     callback_data=f"payment:{flow}:legal",
                 ),
             ],
@@ -302,6 +321,58 @@ def rental_choice_keyboard(items: list[dict]) -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
     for index, item in enumerate(items, start=1):
         builder.add(KeyboardButton(text=f"{index}. {_booking_label(item)}"))
+    builder.adjust(1)
+    builder.row(KeyboardButton(text="Отмена"))
+    return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
+
+
+def cancellation_booking_keyboard(bookings: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, booking in enumerate(bookings):
+        text = (
+            f"Бронь #{_booking_id(booking)} · "
+            f"{_value(booking, 'Дата начала (ГГГГ-ММ-ДД)', 'Дата начала')} — "
+            f"{_value(booking, 'Дата окончания (ГГГГ-ММ-ДД)', 'Дата окончания')} · "
+            f"{_value(booking, 'ФИО Клиента', 'Клиент', 'Клиент ФИО')}"
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=text[:64],
+                    callback_data=f"cancel_booking:{index}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cancellation_deposit_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Залог возвращен клиенту",
+                    callback_data="cancel_deposit:returned",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Залог удержан автопрокатом",
+                    callback_data="cancel_deposit:retained",
+                )
+            ],
+        ]
+    )
+
+
+def cancellation_car_keyboard(cars: list[dict]) -> ReplyKeyboardMarkup:
+    builder = ReplyKeyboardBuilder()
+    for index, car in enumerate(cars, start=1):
+        builder.add(
+            KeyboardButton(
+                text=f"{index}. {_car_name(car)} ({_car_plate(car)})"
+            )
+        )
     builder.adjust(1)
     builder.row(KeyboardButton(text="Отмена"))
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
@@ -591,10 +662,11 @@ async def start_availability(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await state.set_state(AvailabilityForm.start_date)
-    await message.answer(
+    calendar_message = await message.answer(
         _calendar_prompt("availability", "start"),
         reply_markup=calendar_keyboard("availability", "start"),
     )
+    await state.update_data(calendar_message_id=calendar_message.message_id)
 
 
 async def availability_start_date(message: Message, state: FSMContext) -> None:
@@ -608,7 +680,7 @@ async def availability_start_date(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(start_date=value)
     await state.set_state(AvailabilityForm.end_date)
-    await message.answer(
+    calendar_message = await message.answer(
         _calendar_prompt("availability", "end", selected_date),
         reply_markup=calendar_keyboard(
             "availability",
@@ -616,6 +688,7 @@ async def availability_start_date(message: Message, state: FSMContext) -> None:
             minimum_date=selected_date,
         ),
     )
+    await state.update_data(calendar_message_id=calendar_message.message_id)
 
 
 async def availability_end_date(message: Message, state: FSMContext) -> None:
@@ -657,15 +730,30 @@ async def _finish_availability(
     )
 
 
-async def start_booking(message: Message, state: FSMContext) -> None:
+async def _start_booking_flow(
+    message: Message,
+    state: FSMContext,
+    mode: str,
+    title: str,
+) -> None:
     if not await ensure_manager(message):
         return
     await state.clear()
+    await state.update_data(booking_mode=mode)
     await state.set_state(BookingForm.start_date)
-    await message.answer(
-        "Выдача авто.\n\n" + _calendar_prompt("booking", "start"),
+    calendar_message = await message.answer(
+        f"{title}.\n\n" + _calendar_prompt("booking", "start"),
         reply_markup=calendar_keyboard("booking", "start"),
     )
+    await state.update_data(calendar_message_id=calendar_message.message_id)
+
+
+async def start_booking(message: Message, state: FSMContext) -> None:
+    await _start_booking_flow(message, state, "reservation", "Новая бронь")
+
+
+async def start_issuance(message: Message, state: FSMContext) -> None:
+    await _start_booking_flow(message, state, "issuance", "Выдача авто")
 
 
 async def booking_start_date(message: Message, state: FSMContext) -> None:
@@ -679,7 +767,7 @@ async def booking_start_date(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(start_date=value)
     await state.set_state(BookingForm.end_date)
-    await message.answer(
+    calendar_message = await message.answer(
         _calendar_prompt("booking", "end", selected_date),
         reply_markup=calendar_keyboard(
             "booking",
@@ -687,6 +775,7 @@ async def booking_start_date(message: Message, state: FSMContext) -> None:
             minimum_date=selected_date,
         ),
     )
+    await state.update_data(calendar_message_id=calendar_message.message_id)
 
 
 async def booking_end_date(message: Message, state: FSMContext) -> None:
@@ -778,7 +867,7 @@ async def occupancy_car(message: Message, state: FSMContext) -> None:
         occupancy_bookings=bookings,
     )
     await state.set_state(OccupancyForm.calendar)
-    await message.answer(
+    calendar_message = await message.answer(
         "📅 Занятость автомобиля\n"
         f"{_car_name(car)} ({plate})\n\n"
         "🔴 — дата занята. Нажмите на неё, чтобы увидеть номер брони.\n"
@@ -789,6 +878,189 @@ async def occupancy_car(message: Message, state: FSMContext) -> None:
             allow_past=True,
             occupied_dates=_occupied_dates(bookings),
         ),
+    )
+    await state.update_data(calendar_message_id=calendar_message.message_id)
+
+
+async def start_cancellation(message: Message, state: FSMContext) -> None:
+    if not await ensure_manager(message):
+        return
+    await state.clear()
+    try:
+        cars = get_active_cars()
+    except Exception:
+        logger.exception("Could not load cars for cancellation")
+        await message.answer(
+            "Не удалось получить список автомобилей.",
+            reply_markup=main_keyboard(),
+        )
+        return
+    if not cars:
+        await message.answer(
+            "В листе Cars нет активных автомобилей.",
+            reply_markup=main_keyboard(),
+        )
+        return
+    await state.update_data(cars=cars)
+    await state.set_state(CancellationForm.car)
+    await message.answer(
+        "🚫 Отмена брони.\n\nВыберите автомобиль:",
+        reply_markup=cancellation_car_keyboard(cars),
+    )
+
+
+async def cancellation_car(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    cars = data.get("cars", [])
+    try:
+        choice = int((message.text or "").split(".", 1)[0])
+        car = cars[choice - 1]
+    except (ValueError, IndexError):
+        await message.answer("Выберите автомобиль кнопкой из списка.")
+        return
+
+    try:
+        bookings = get_cancellable_bookings_for_car(_car_id(car), _car_plate(car))
+    except Exception:
+        logger.exception("Could not load bookings for cancellation")
+        await state.clear()
+        await message.answer(
+            "Не удалось получить список активных броней.",
+            reply_markup=main_keyboard(),
+        )
+        return
+    if not bookings:
+        await state.clear()
+        await message.answer(
+            f"Для автомобиля {_car_name(car)} ({_car_plate(car)}) активных броней нет.",
+            reply_markup=main_keyboard(),
+        )
+        return
+    await state.update_data(selected_car=car, cancel_bookings=bookings)
+    await state.set_state(CancellationForm.booking)
+    selection_message = await message.answer(
+        "Выберите бронь для отмены:",
+        reply_markup=cancellation_booking_keyboard(bookings),
+    )
+    await state.update_data(
+        cancellation_booking_message_id=selection_message.message_id
+    )
+
+
+async def cancellation_booking_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.data or not callback.message:
+        await callback.answer()
+        return
+    if await state.get_state() != CancellationForm.booking.state:
+        await callback.answer(
+            "Этот список устарел. Начните отмену заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if getattr(callback.message, "message_id", None) != data.get(
+        "cancellation_booking_message_id"
+    ):
+        await callback.answer(
+            "Этот список устарел. Используйте последний список броней.",
+            show_alert=True,
+        )
+        return
+    try:
+        booking_index = int(callback.data.split(":", 1)[1])
+        booking = data["cancel_bookings"][booking_index]
+    except (ValueError, KeyError, IndexError, TypeError):
+        await callback.answer("Список броней устарел.", show_alert=True)
+        return
+    await state.update_data(selected_booking=booking)
+    await state.set_state(CancellationForm.reason)
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        f"Введите причину отмены брони №{_booking_id(booking)}:"
+    )
+
+
+async def cancellation_reason(message: Message, state: FSMContext) -> None:
+    reason = (message.text or "").strip()
+    if len(reason) < 2:
+        await message.answer("Укажите причину отмены текстом.")
+        return
+    await state.update_data(cancellation_reason=reason)
+    await state.set_state(CancellationForm.deposit_status)
+    deposit_message = await message.answer(
+        "Что произошло с залогом/предоплатой?",
+        reply_markup=cancellation_deposit_keyboard(),
+    )
+    await state.update_data(
+        cancellation_deposit_message_id=deposit_message.message_id
+    )
+
+
+async def cancellation_deposit_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.data or not callback.message:
+        await callback.answer()
+        return
+    if await state.get_state() != CancellationForm.deposit_status.state:
+        await callback.answer(
+            "Этот выбор устарел. Начните отмену заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if getattr(callback.message, "message_id", None) != data.get(
+        "cancellation_deposit_message_id"
+    ):
+        await callback.answer(
+            "Этот выбор устарел. Используйте последние кнопки.",
+            show_alert=True,
+        )
+        return
+    deposit_status = {
+        "returned": "Возвращен",
+        "retained": "Удержан",
+    }.get(callback.data.removeprefix("cancel_deposit:"))
+    if not deposit_status:
+        await callback.answer("Этот вариант недоступен.", show_alert=True)
+        return
+    booking = data.get("selected_booking")
+    car = data.get("selected_car")
+    if not booking or not car:
+        await callback.answer(
+            "Операция устарела. Начните отмену заново.",
+            show_alert=True,
+        )
+        return
+    try:
+        cancel_booking(
+            booking_id=int(_booking_id(booking)),
+            reason=data.get("cancellation_reason", ""),
+            deposit_status=deposit_status,
+        )
+    except Exception:
+        logger.exception("Could not cancel booking")
+        await state.clear()
+        await callback.answer("Не удалось отменить бронь.", show_alert=True)
+        await callback.message.answer(
+            "Не удалось обновить бронь в Google Sheets.",
+            reply_markup=main_keyboard(),
+        )
+        return
+    await state.clear()
+    await callback.answer("Бронь отменена")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        f"Бронь №{_booking_id(booking)} отменена.\n"
+        f"Автомобиль: {_car_name(car)} ({_car_plate(car)})\n"
+        f"Статус залога: {deposit_status}.\n"
+        "Даты автомобиля освобождены.",
+        reply_markup=main_keyboard(),
     )
 
 
@@ -821,6 +1093,38 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
     flow = parts[1]
     stage = parts[2]
     data = await state.get_data()
+    expected_states = {
+        ("availability", "start"): AvailabilityForm.start_date.state,
+        ("availability", "end"): AvailabilityForm.end_date.state,
+        ("booking", "start"): BookingForm.start_date.state,
+        ("booking", "end"): BookingForm.end_date.state,
+        ("occupancy", "calendar"): OccupancyForm.calendar.state,
+    }
+    expected_state = expected_states.get((flow, stage))
+    current_state = await state.get_state()
+    if expected_state is None or current_state != expected_state:
+        await callback.answer(
+            "Этот календарь устарел. Откройте нужную операцию заново.",
+            show_alert=True,
+        )
+        return
+    if flow == "booking" and data.get("booking_mode") not in (
+        "reservation",
+        "issuance",
+    ):
+        await callback.answer(
+            "Этот календарь устарел. Откройте бронь заново.",
+            show_alert=True,
+        )
+        return
+    if getattr(callback.message, "message_id", None) != data.get(
+        "calendar_message_id"
+    ):
+        await callback.answer(
+            "Этот календарь устарел. Используйте последний календарь.",
+            show_alert=True,
+        )
+        return
     minimum_date = _calendar_minimum_date(flow, stage, data)
     message = callback.message
 
@@ -910,8 +1214,13 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
     if flow == "booking" and stage == "start":
         await state.update_data(start_date=selected_value)
         await state.set_state(BookingForm.end_date)
+        booking_title = (
+            "Новая бронь"
+            if data.get("booking_mode") == "reservation"
+            else "Выдача авто"
+        )
         await message.edit_text(
-            "Выдача авто.\n\n" + _calendar_prompt("booking", "end", selected_date),
+            f"{booking_title}.\n\n" + _calendar_prompt("booking", "end", selected_date),
             reply_markup=calendar_keyboard(
                 "booking",
                 "end",
@@ -964,7 +1273,11 @@ async def booking_phone(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(phone=value)
     await state.set_state(BookingForm.price)
-    await message.answer("Введите принятую сумму аренды в RUB:")
+    data = await state.get_data()
+    if data.get("booking_mode") == "reservation":
+        await message.answer("Введите итоговую стоимость аренды в RUB:")
+    else:
+        await message.answer("Введите принятую сумму аренды в RUB:")
 
 
 async def booking_price(message: Message, state: FSMContext) -> None:
@@ -977,8 +1290,38 @@ async def booking_price(message: Message, state: FSMContext) -> None:
         await message.answer(error)
         return
     await state.update_data(price=price)
+    data = await state.get_data()
+    if data.get("booking_mode") == "reservation":
+        await state.set_state(BookingForm.prepayment)
+        await message.answer(
+            "Введите сумму предоплаты/залога бронирования в RUB "
+            "(0, если без предоплаты):"
+        )
+        return
     await state.set_state(BookingForm.start_mileage)
     await message.answer("Введите начальный пробег автомобиля в км:")
+
+
+async def booking_prepayment(message: Message, state: FSMContext) -> None:
+    prepayment, error = _parse_int(
+        message.text or "",
+        "предоплата/залог бронирования",
+        minimum=0,
+    )
+    if error:
+        await message.answer(error)
+        return
+    await state.update_data(prepayment=prepayment)
+    if prepayment == 0:
+        await state.update_data(prepayment_pay_type="Без оплаты")
+        await _send_reservation_confirmation(message, state)
+        return
+    await state.set_state(BookingForm.pay_type)
+    payment_message = await message.answer(
+        "Выберите способ оплаты предоплаты/залога:",
+        reply_markup=payment_methods_keyboard("reservation"),
+    )
+    await state.update_data(payment_message_id=payment_message.message_id)
 
 
 async def booking_start_mileage(message: Message, state: FSMContext) -> None:
@@ -1006,10 +1349,11 @@ async def booking_deposit(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(deposit=deposit)
     await state.set_state(BookingForm.pay_type)
-    await message.answer(
+    payment_message = await message.answer(
         "Выберите форму оплаты принятой суммы аренды:",
-        reply_markup=payment_methods_keyboard("booking"),
+        reply_markup=payment_methods_keyboard("issuance"),
     )
+    await state.update_data(payment_message_id=payment_message.message_id)
 
 
 async def _send_booking_confirmation(message: Message, state: FSMContext) -> None:
@@ -1032,12 +1376,33 @@ async def _send_booking_confirmation(message: Message, state: FSMContext) -> Non
     )
 
 
+async def _send_reservation_confirmation(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    await state.set_state(BookingForm.confirmation)
+    await message.answer(
+        "Проверьте новую бронь:\n\n"
+        f"Авто: {data['car_name']}\n"
+        f"Период: {data['start_date']} — {data['end_date']}\n"
+        f"Клиент: {data['client_name']}\n"
+        f"Телефон: {data['phone']}\n"
+        f"Стоимость аренды: {int(data['price']):,} RUB\n"
+        f"Предоплата/залог: {int(data['prepayment']):,} RUB\n"
+        f"Тип оплаты залога: {data['prepayment_pay_type']}\n\n"
+        "Сохранить бронь?".replace(",", " "),
+        reply_markup=confirmation_keyboard(),
+    )
+
+
 async def booking_confirmation(message: Message, state: FSMContext) -> None:
     if (message.text or "").strip() != "Подтвердить":
         await cancel_flow(message, state)
         return
     data = await state.get_data()
     manager_id = message.from_user.id if message.from_user else 0
+    is_reservation = data.get("booking_mode") == "reservation"
     try:
         booking_id = add_new_booking(
             car_id=int(data["car_id"]),
@@ -1048,11 +1413,13 @@ async def booking_confirmation(message: Message, state: FSMContext) -> None:
             phone=data["phone"],
             price=int(data["price"]),
             manager_id=manager_id,
-            issued_at=_timestamp(),
-            start_mileage=int(data["start_mileage"]),
-            deposit=int(data["deposit"]),
-            pay_type=data["pay_type"],
-            status="В аренде",
+            issued_at="" if is_reservation else _timestamp(),
+            start_mileage=0 if is_reservation else int(data["start_mileage"]),
+            deposit=0 if is_reservation else int(data["deposit"]),
+            pay_type="Без оплаты" if is_reservation else data["pay_type"],
+            status="Подтверждена" if is_reservation else "В аренде",
+            prepayment=int(data.get("prepayment", 0)),
+            prepayment_pay_type=data.get("prepayment_pay_type", "Без оплаты"),
         )
     except Exception:
         logger.exception("Could not save booking")
@@ -1061,8 +1428,12 @@ async def booking_confirmation(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     await message.answer(
-        f"Акт выдачи авто по брони №{booking_id} сохранён. "
-        "Автомобиль отмечен как выданный.",
+        (
+            f"Бронь №{booking_id} сохранена."
+            if is_reservation
+            else f"Акт выдачи авто по брони №{booking_id} сохранён. "
+            "Автомобиль отмечен как выданный."
+        ),
         reply_markup=main_keyboard(),
     )
 
@@ -1097,7 +1468,7 @@ async def start_return(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     try:
-        rentals = get_active_rentals()
+        rentals = get_returnable_rentals()
     except Exception:
         logger.exception("Could not load rentals for return")
         await message.answer("Не удалось получить список аренд.", reply_markup=main_keyboard())
@@ -1193,15 +1564,33 @@ async def return_end_mileage(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(end_mileage=end_mileage)
     await state.set_state(ReturnForm.cleanliness)
-    await message.answer(
+    cleanliness_message = await message.answer(
         "Укажите состояние чистоты автомобиля:",
         reply_markup=cleanliness_keyboard(),
+    )
+    await state.update_data(
+        cleanliness_message_id=cleanliness_message.message_id
     )
 
 
 async def cleanliness_callback(callback: CallbackQuery, state: FSMContext) -> None:
     if not callback.data or not callback.message:
         await callback.answer()
+        return
+    if await state.get_state() != ReturnForm.cleanliness.state:
+        await callback.answer(
+            "Этот выбор устарел. Продолжите текущую операцию.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if getattr(callback.message, "message_id", None) != data.get(
+        "cleanliness_message_id"
+    ):
+        await callback.answer(
+            "Этот выбор устарел. Используйте последние кнопки.",
+            show_alert=True,
+        )
         return
     cleanliness = {
         "clean": "Чистая",
@@ -1271,17 +1660,19 @@ async def return_total_paid(message: Message, state: FSMContext) -> None:
         )
         return
     await state.set_state(ReturnForm.pay_type)
-    await message.answer(
+    payment_message = await message.answer(
         "Выберите способ оплаты:",
         reply_markup=payment_methods_keyboard(),
     )
+    await state.update_data(payment_message_id=payment_message.message_id)
 
 
 async def return_pay_type(message: Message, state: FSMContext) -> None:
-    await message.answer(
+    payment_message = await message.answer(
         "Выберите способ оплаты кнопкой ниже:",
         reply_markup=payment_methods_keyboard(),
     )
+    await state.update_data(payment_message_id=payment_message.message_id)
 
 
 async def payment_method_callback(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1299,17 +1690,55 @@ async def payment_method_callback(callback: CallbackQuery, state: FSMContext) ->
         await callback.answer("Некорректный вариант оплаты.", show_alert=True)
         return
     pay_type = PAYMENT_METHODS.get(payment_key)
+    if flow == "reservation" and payment_key == "legal":
+        pay_type = "Безнал"
     if not pay_type:
         await callback.answer("Этот вариант оплаты недоступен.", show_alert=True)
         return
-    await state.update_data(pay_type=pay_type)
+    current_state = await state.get_state()
+    data = await state.get_data()
+    valid_flow = (
+        flow == "reservation"
+        and current_state == BookingForm.pay_type.state
+        and data.get("booking_mode") == "reservation"
+    ) or (
+        flow in ("issuance", "booking")
+        and current_state == BookingForm.pay_type.state
+        and data.get("booking_mode") == "issuance"
+    ) or (
+        flow == "return"
+        and current_state == ReturnForm.pay_type.state
+    )
+    if not valid_flow:
+        await callback.answer(
+            "Этот выбор оплаты устарел. Продолжите текущую операцию.",
+            show_alert=True,
+        )
+        return
+    if getattr(callback.message, "message_id", None) != data.get(
+        "payment_message_id"
+    ):
+        await callback.answer(
+            "Этот выбор оплаты устарел. Используйте последние кнопки.",
+            show_alert=True,
+        )
+        return
     await callback.answer(f"Выбрано: {pay_type}")
     await callback.message.edit_reply_markup(reply_markup=None)
-    if flow == "booking":
+    if flow == "reservation":
+        await state.update_data(prepayment_pay_type=pay_type)
+        await _send_reservation_confirmation(callback.message, state)
+        return
+    if flow in ("issuance", "booking"):
+        await state.update_data(pay_type=pay_type)
         await _send_booking_confirmation(callback.message, state)
         return
-    await state.set_state(ReturnForm.notes)
-    await callback.message.answer("Введите примечание или отправьте «нет»:")
+    if flow == "return":
+        await state.update_data(pay_type=pay_type)
+        await state.set_state(ReturnForm.notes)
+        await callback.message.answer("Введите примечание или отправьте «нет»:")
+        return
+    await callback.answer("Этот вариант оплаты устарел.", show_alert=True)
 
 
 async def return_notes(message: Message, state: FSMContext) -> None:
@@ -1423,17 +1852,26 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(calendar_callback, F.data.startswith("calendar:"))
     dispatcher.callback_query.register(payment_method_callback, F.data.startswith("payment:"))
     dispatcher.callback_query.register(cleanliness_callback, F.data.startswith("cleanliness:"))
+    dispatcher.callback_query.register(
+        cancellation_booking_callback,
+        F.data.startswith("cancel_booking:"),
+    )
+    dispatcher.callback_query.register(
+        cancellation_deposit_callback,
+        F.data.startswith("cancel_deposit:"),
+    )
     dispatcher.message.register(start_handler, CommandStart())
     dispatcher.message.register(show_menu, Command("menu"))
     dispatcher.message.register(cancel_flow, F.text.casefold() == "отмена")
 
     dispatcher.message.register(start_availability, F.text == "Доступные авто")
-    dispatcher.message.register(start_booking, F.text == "🚗 Выдача авто")
     dispatcher.message.register(start_booking, F.text == "Новая бронь")
+    dispatcher.message.register(start_issuance, F.text == "🚗 Выдача авто")
     dispatcher.message.register(list_active_rentals, F.text == "Активные аренды")
     dispatcher.message.register(start_return, F.text == "🏁 Приём авто")
     dispatcher.message.register(start_return, F.text == "Оформить возврат")
     dispatcher.message.register(start_occupancy, F.text == "🔍 Проверка броней")
+    dispatcher.message.register(start_cancellation, F.text == "🚫 Отмена брони")
 
     dispatcher.message.register(availability_start_date, AvailabilityForm.start_date)
     dispatcher.message.register(availability_end_date, AvailabilityForm.end_date)
@@ -1444,11 +1882,15 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(booking_client_name, BookingForm.client_name)
     dispatcher.message.register(booking_phone, BookingForm.phone)
     dispatcher.message.register(booking_price, BookingForm.price)
+    dispatcher.message.register(booking_prepayment, BookingForm.prepayment)
     dispatcher.message.register(booking_start_mileage, BookingForm.start_mileage)
     dispatcher.message.register(booking_deposit, BookingForm.deposit)
     dispatcher.message.register(booking_confirmation, BookingForm.confirmation)
 
     dispatcher.message.register(occupancy_car, OccupancyForm.car)
+
+    dispatcher.message.register(cancellation_car, CancellationForm.car)
+    dispatcher.message.register(cancellation_reason, CancellationForm.reason)
 
     dispatcher.message.register(return_booking, ReturnForm.booking)
     dispatcher.message.register(return_end_mileage, ReturnForm.end_mileage)

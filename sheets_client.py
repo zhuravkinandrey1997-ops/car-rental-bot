@@ -81,7 +81,9 @@ def add_new_booking(
     start_mileage: int = 0,
     deposit: int = 0,
     pay_type: str = "Без оплаты",
-    status: str = "В аренде",
+    status: str = "Подтверждена",
+    prepayment: int = 0,
+    prepayment_pay_type: str = "Без оплаты",
 ):
     records = ws_bookings.get_all_records()
     new_id = len(records) + 101
@@ -106,6 +108,8 @@ def add_new_booking(
         "Сумма аренды получена (RUB)": price,
         "Залог (RUB)": deposit,
         "Способ оплаты": pay_type,
+        "Залог/Предоплата": prepayment,
+        "Тип оплаты залога": prepayment_pay_type,
         "Плановое окончание": f"{end_date} 23:59",
     }
     _append_record(
@@ -127,6 +131,8 @@ def add_new_booking(
             "Принятая сумма аренды (RUB)",
             "Залог (RUB)",
             "Способ оплаты",
+            "Залог/Предоплата",
+            "Тип оплаты залога",
             "Плановое окончание",
         ],
     )
@@ -136,6 +142,11 @@ def add_new_booking(
 def get_active_rentals():
     all_bookings = ws_bookings.get_all_records()
     return [b for b in all_bookings if b.get("Статус") in ["В аренде", "Подтверждена"]]
+
+
+def get_returnable_rentals():
+    all_bookings = ws_bookings.get_all_records()
+    return [b for b in all_bookings if b.get("Статус") == "В аренде"]
 
 
 def get_active_cars():
@@ -164,6 +175,49 @@ def get_active_bookings_for_car(car_id: str, plate: str = ""):
         if plate and booking_plate == str(plate).strip():
             matching_bookings.append(booking)
     return matching_bookings
+
+
+def get_cancellable_bookings_for_car(car_id: str, plate: str = ""):
+    return [
+        booking
+        for booking in get_active_bookings_for_car(car_id, plate)
+        if booking.get("Статус") == "Подтверждена"
+    ]
+
+
+def cancel_booking(
+    booking_id: int,
+    reason: str,
+    deposit_status: str,
+) -> None:
+    records = ws_bookings.get_all_records()
+    booking_row = None
+    current_status = ""
+    for row_number, booking in enumerate(records, start=2):
+        if str(
+            booking.get("ID Брони")
+            or booking.get("ID")
+            or booking.get("Booking ID")
+            or ""
+        ).strip() == str(booking_id).strip():
+            booking_row = row_number
+            current_status = str(booking.get("Статус", "")).strip()
+            break
+    if booking_row is None:
+        raise ValueError(f"Booking {booking_id} was not found")
+    if current_status != "Подтверждена":
+        raise ValueError(
+            f"Booking {booking_id} cannot be cancelled from status {current_status}"
+        )
+
+    updates = {
+        "Статус": "Отменена",
+        "Причина отмены": reason,
+        "Статус залога при отмене": deposit_status,
+    }
+    headers = _ensure_headers(ws_bookings, list(updates))
+    for header, value in updates.items():
+        ws_bookings.update_cell(booking_row, headers.index(header) + 1, value)
 
 
 def get_car_by_id(car_id: str):
