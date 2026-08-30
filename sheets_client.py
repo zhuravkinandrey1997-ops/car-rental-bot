@@ -14,6 +14,15 @@ logger = logging.getLogger("car-rental-sheets")
 SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME", "leon_rental_fleet_rub_v4")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
 SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+SHEET_TITLE_MAP = {
+    "Cars": "Автомобили",
+    "Bookings": "Бронирования",
+    "Returns_Cash": "Возвраты_Касса",
+    "Expenses": "Затраты",
+    "Monthly_Summary": "Сводная_по_месяцам",
+    "Car_Profit_Summary": "Прибыль_по_авто",
+    "Managers": "Менеджеры",
+}
 ACCEPTANCE_ACT_HEADERS = [
     "ID Акта",
     "ID Брони",
@@ -84,10 +93,42 @@ if len(SPREADSHEET_NAME) > 30 and " " not in SPREADSHEET_NAME:
 else:
     sh = gc.open(SPREADSHEET_NAME)
 
-ws_cars = sh.worksheet("Cars")
-ws_bookings = sh.worksheet("Bookings")
-ws_returns = sh.worksheet("Returns_Cash")
-ws_managers = sh.worksheet("Managers")
+def migrate_sheet_titles(spreadsheet) -> list[tuple[str, str]]:
+    """Rename legacy worksheet titles to their Russian equivalents."""
+    worksheets = {
+        worksheet.title: worksheet for worksheet in spreadsheet.worksheets()
+    }
+    renamed: list[tuple[str, str]] = []
+    for old_title, new_title in SHEET_TITLE_MAP.items():
+        source = worksheets.get(old_title)
+        target = worksheets.get(new_title)
+        if source is not None and target is not None:
+            raise RuntimeError(
+                f"Worksheet title conflict: both {old_title!r} and "
+                f"{new_title!r} exist."
+            )
+        if source is None:
+            continue
+        source.update_title(new_title)
+        worksheets.pop(old_title)
+        worksheets[new_title] = source
+        renamed.append((old_title, new_title))
+    if renamed:
+        logger.info(
+            "Renamed worksheets: %s",
+            ", ".join(f"{old} -> {new}" for old, new in renamed),
+        )
+    else:
+        logger.info("Worksheet title migration is already complete")
+    return renamed
+
+
+migrate_sheet_titles(sh)
+
+ws_cars = sh.worksheet("Автомобили")
+ws_bookings = sh.worksheet("Бронирования")
+ws_returns = sh.worksheet("Возвраты_Касса")
+ws_managers = sh.worksheet("Менеджеры")
 try:
     ws_acceptance_acts = sh.worksheet("Acceptance_Acts")
 except gspread.exceptions.WorksheetNotFound:
@@ -263,13 +304,13 @@ def _get_or_create_sheet(title: str, headers: list[str]):
     return worksheet
 
 
-ws_expenses = _get_or_create_sheet("Expenses", EXPENSE_HEADERS)
+ws_expenses = _get_or_create_sheet("Затраты", EXPENSE_HEADERS)
 ws_monthly_summary = _get_or_create_sheet(
-    "Monthly_Summary",
+    "Сводная_по_месяцам",
     MONTHLY_SUMMARY_HEADERS,
 )
 ws_car_profit_summary = _get_or_create_sheet(
-    "Car_Profit_Summary",
+    "Прибыль_по_авто",
     CAR_PROFIT_SUMMARY_HEADERS,
 )
 
