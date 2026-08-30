@@ -2159,7 +2159,7 @@ async def cancellation_deposit_callback(
         await callback.answer("Не удалось отменить бронь.", show_alert=True)
         await callback.message.answer(
             "Не удалось обновить бронь в Google Sheets.",
-            reply_markup=main_keyboard(),
+            reply_markup=main_keyboard(callback.from_user.id),
         )
         return
     await state.clear()
@@ -2170,7 +2170,7 @@ async def cancellation_deposit_callback(
         f"Автомобиль: {_car_name(car)} ({_car_plate(car)})\n"
         f"Статус задатка: {deposit_status}.\n"
         "Даты автомобиля освобождены.",
-        reply_markup=main_keyboard(),
+        reply_markup=main_keyboard(callback.from_user.id),
     )
 
 

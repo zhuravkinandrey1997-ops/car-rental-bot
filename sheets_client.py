@@ -1,12 +1,15 @@
 import os
 import datetime
 import json
+import logging
 import threading
 import uuid
 import gspread
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger("car-rental-sheets")
 
 SPREADSHEET_NAME = os.getenv("SPREADSHEET_NAME", "leon_rental_fleet_rub_v4")
 SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE", "service_account.json")
@@ -770,35 +773,50 @@ def cancel_booking(
     reason: str,
     deposit_status: str,
 ) -> None:
-    records = ws_bookings.get_all_records()
-    booking_row = None
-    current_status = ""
-    for row_number, booking in enumerate(records, start=2):
-        if str(
-            booking.get("ID Брони")
-            or booking.get("ID")
-            or booking.get("Booking ID")
-            or ""
-        ).strip() == str(booking_id).strip():
-            booking_row = row_number
-            current_status = str(booking.get("Статус", "")).strip()
-            break
-    if booking_row is None:
-        raise ValueError(f"Booking {booking_id} was not found")
-    if current_status != "Подтверждена":
-        raise ValueError(
-            f"Booking {booking_id} cannot be cancelled from status {current_status}"
-        )
+    try:
+        all_values = ws_bookings.get_all_values()
+        if not all_values:
+            raise ValueError("Bookings sheet is empty")
 
-    updates = {
-        "Статус": "Отменена",
-        "Причина отмены": reason,
-        "Статус залога при отмене": deposit_status,
-        "Статус задатка при отмене": deposit_status,
-    }
-    headers = _ensure_headers(ws_bookings, list(updates))
-    for header, value in updates.items():
-        ws_bookings.update_cell(booking_row, headers.index(header) + 1, value)
+        headers = all_values[0]
+        booking_row = None
+        current_status = ""
+        status_column = (
+            headers.index("Статус") if "Статус" in headers else None
+        )
+        for row_number, row in enumerate(all_values[1:], start=2):
+            if row and str(row[0]).strip() == str(booking_id).strip():
+                booking_row = row_number
+                if status_column is not None and status_column < len(row):
+                    current_status = str(row[status_column]).strip()
+                break
+        if booking_row is None:
+            raise ValueError(f"Booking {booking_id} was not found")
+        if current_status != "Подтверждена":
+            raise ValueError(
+                f"Booking {booking_id} cannot be cancelled from status "
+                f"{current_status}"
+            )
+
+        updates = {
+            "Статус": "Отменена",
+            "Причина отмены": reason,
+            "Статус залога при отмене": deposit_status,
+            "Статус задатка при отмене": deposit_status,
+        }
+        headers = _ensure_headers(ws_bookings, list(updates))
+        for header, value in updates.items():
+            ws_bookings.update_cell(
+                booking_row,
+                headers.index(header) + 1,
+                value,
+            )
+    except Exception:
+        logger.exception(
+            "Failed to cancel booking %s in Google Sheets",
+            booking_id,
+        )
+        raise
 
 
 def get_car_by_id(car_id: str):
