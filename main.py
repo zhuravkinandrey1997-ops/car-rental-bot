@@ -31,6 +31,7 @@ from sheets_client import (
     get_active_rentals,
     get_available_cars,
     get_car_by_id,
+    get_car_by_plate,
     is_manager_authorized,
     save_actual_return,
 )
@@ -270,14 +271,41 @@ def _car_label(car: dict) -> str:
     return f"{_car_name(car)} ({_car_plate(car)}) — {_car_daily_rate(car)} RUB/сутки"
 
 
+def _booking_car(booking: dict) -> dict:
+    car_id = _value(booking, "ID Авто", "Car ID", default="")
+    if car_id:
+        car = get_car_by_id(car_id)
+        if car:
+            return car
+
+    plate = _value(booking, "Госномер", "Номер авто", "Номер", "Plate", default="")
+    if plate:
+        car = get_car_by_plate(plate)
+        if car:
+            return car
+    return {}
+
+
 def _booking_label(booking: dict) -> str:
-    car = _value(booking, "Авто", "Название авто", "Модель")
-    client = _value(booking, "Клиент", "Клиент ФИО", "Имя клиента")
+    car_record = _booking_car(booking)
+    if car_record:
+        car = f"{_car_name(car_record)} ({_car_plate(car_record)})"
+    else:
+        saved_name = _value(
+            booking,
+            "Автомобиль",
+            "Авто",
+            "Название авто",
+            "Марка и Модель",
+            "Модель",
+        )
+        saved_plate = _value(booking, "Госномер", "Номер авто", "Номер", "Plate")
+        car = f"{saved_name} ({saved_plate})"
     dates = (
         f"{_value(booking, 'Дата начала (ГГГГ-ММ-ДД)', 'Дата начала')} — "
         f"{_value(booking, 'Дата окончания (ГГГГ-ММ-ДД)', 'Дата окончания')}"
     )
-    return f"{car} · {client} · {dates}"
+    return f"{car} · {dates}"
 
 
 def _parse_date(value: str) -> bool:

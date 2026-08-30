@@ -75,6 +75,14 @@ def get_car_by_id(car_id: str):
     return {}
 
 
+def get_car_by_plate(plate: str):
+    all_cars = ws_cars.get_all_records()
+    for car in all_cars:
+        if str(car.get("Госномер", "")).strip() == str(plate).strip():
+            return car
+    return {}
+
+
 def save_actual_return(booking_id: int, car_name: str, plate: str, client: str, start_mileage: int, end_mileage: int, delta_mileage: int, base_price: int, extra_fee: int, total_paid: int, pay_type: str, manager_id: int, notes: str):
     today_str = datetime.date.today().strftime("%Y-%m-%d")
     returns_records = ws_returns.get_all_records()
