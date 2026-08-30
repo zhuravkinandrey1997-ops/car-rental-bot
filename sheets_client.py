@@ -953,7 +953,7 @@ def cancel_booking(
     try:
         all_values = ws_bookings.get_all_values()
         if not all_values:
-            raise ValueError("Bookings sheet is empty")
+            raise ValueError("Бронирования sheet is empty")
 
         headers = all_values[0]
         booking_row = None

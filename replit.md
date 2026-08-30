@@ -29,7 +29,7 @@ A manager-only Telegram bot for car rental bookings, active rentals, and vehicle
 
 ## Architecture decisions
 
-- Manager access is checked before every menu operation using the `Managers` worksheet.
+- Manager access is checked before every menu operation using the `Менеджеры` worksheet.
 - Booking and return forms are conversational FSM flows so managers can complete them from Telegram.
 - Telegram credentials stay in Replit Secrets; Google credentials stay in the ignored service-account JSON file.
 

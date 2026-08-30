@@ -2371,10 +2371,10 @@ async def financial_report_type_callback(
         return
     if not cars:
         await state.clear()
-        await callback.answer("В листе Cars нет автомобилей.", show_alert=True)
+        await callback.answer("В листе Автомобили нет автомобилей.", show_alert=True)
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
-            "В листе Cars нет автомобилей.",
+            "В листе Автомобили нет автомобилей.",
             reply_markup=main_keyboard(callback.from_user.id),
         )
         return
@@ -2649,7 +2649,7 @@ async def issuance_booking(message: Message, state: FSMContext) -> None:
     if not car:
         await state.clear()
         await message.answer(
-            "Автомобиль из брони не найден в Cars.",
+            "Автомобиль из брони не найден в листе Автомобили.",
             reply_markup=main_keyboard(),
         )
         return
@@ -2776,7 +2776,7 @@ async def start_occupancy(message: Message, state: FSMContext) -> None:
         return
     if not cars:
         await message.answer(
-            "В листе Cars нет активных автомобилей.",
+            "В листе Автомобили нет активных автомобилей.",
             reply_markup=main_keyboard(),
         )
         return
@@ -2846,7 +2846,7 @@ async def start_cancellation(message: Message, state: FSMContext) -> None:
         return
     if not cars:
         await message.answer(
-            "В листе Cars нет активных автомобилей.",
+            "В листе Автомобили нет активных автомобилей.",
             reply_markup=main_keyboard(),
         )
         return
@@ -3324,9 +3324,9 @@ async def booking_start_mileage(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     base_deposit = _car_base_deposit(data.get("car", {}))
     hint = (
-        f"Базовый залог из Cars: {base_deposit:,} RUB.\n".replace(",", " ")
+        f"Базовый залог из листа Автомобили: {base_deposit:,} RUB.\n".replace(",", " ")
         if base_deposit is not None
-        else "Базовый залог в Cars не указан.\n"
+        else "Базовый залог в листе Автомобили не указан.\n"
     )
     await message.answer(
         hint
