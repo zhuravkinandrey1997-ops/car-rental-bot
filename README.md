@@ -67,8 +67,9 @@ Each completed return also creates one row in `Acceptance_Acts`. If the sheet
 does not exist, the bot creates it automatically with the act, booking, vehicle,
 client, mileage, penalty, deposit, payment, and note columns.
 The bot also creates `Expenses`, `Monthly_Summary`, and `Car_Profit_Summary`
-with their required headers when they are missing. Expense entry and financial
-reports are visible only to the three configured finance-manager Telegram IDs.
+with their required headers when they are missing. Expense entry, financial
+reports, and expense history are visible only to the three configured
+finance-manager Telegram IDs.
 After the expense amount and category are selected, the manager must assign the
 expense either to one car from `Cars` or to `🏢 Общие расходы (весь автопарк)`.
 The stored value is the vehicle plate or `Общие`.
@@ -87,6 +88,9 @@ Report revenue uses actual received income from `Итого приход (RUB)` 
 `Returns_Cash`, falling back to the actual rental payment plus received penalty
 top-up for legacy rows. It does not replace a recorded zero payment with the
 accrued rental price. Each calculated report updates the summary worksheets.
+The `📑 Просмотр расходов` menu opens a month-based history of `Expenses`.
+Authorized managers can view all records or filter them by a vehicle or
+`Общие расходы`; each result includes the record details and the period total.
 Cancelling an active booking changes its status to `Отменена`, records the
 cancellation reason and deposit outcome, and releases its dates for availability
 checks.

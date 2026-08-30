@@ -310,6 +310,52 @@ def _month_from_record(record: dict, *keys: str) -> str:
     return ""
 
 
+def get_available_expense_months(
+    reference_date: datetime.date | None = None,
+) -> list[str]:
+    reference_date = reference_date or datetime.date.today()
+    current_month = reference_date.strftime("%Y-%m")
+    previous_month_date = reference_date.replace(day=1) - datetime.timedelta(days=1)
+    months = {current_month, previous_month_date.strftime("%Y-%m")}
+    for record in ws_expenses.get_all_records():
+        month = _month_from_record(record, "Дата")
+        if month:
+            months.add(month)
+    return sorted(months, reverse=True)
+
+
+def get_expenses_for_month(
+    month_key: str,
+    vehicle_filter: str | None = None,
+) -> list[dict]:
+    records = ws_expenses.get_all_records()
+    normalized_filter = str(vehicle_filter or "").strip().casefold()
+    general_values = {
+        "",
+        "общие",
+        "общие расходы компании",
+        "общие расходы (весь автопарк)",
+        "🏢 общие расходы (весь автопарк)",
+    }
+    result: list[dict] = []
+    for record in records:
+        if _month_from_record(record, "Дата") != month_key:
+            continue
+        if normalized_filter:
+            vehicle = str(
+                record.get("Автомобиль (Госномер / Общие)")
+                or record.get("Автомобиль")
+                or ""
+            ).strip().casefold()
+            if normalized_filter == "general":
+                if vehicle not in general_values:
+                    continue
+            elif vehicle != normalized_filter:
+                continue
+        result.append(dict(record))
+    return result
+
+
 def _upsert_record(
     ws,
     key_header: str,

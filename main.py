@@ -45,6 +45,8 @@ from sheets_client import (
     get_cancellable_bookings_for_car,
     get_confirmed_bookings,
     get_available_financial_months,
+    get_available_expense_months,
+    get_expenses_for_month,
     get_financial_report,
     get_recent_expenses,
     get_pending_notification_manager_ids,
@@ -148,6 +150,12 @@ class FinancialReportForm(StatesGroup):
     month = State()
     report_type = State()
     cars = State()
+
+
+class ExpenseHistoryForm(StatesGroup):
+    month = State()
+    filter = State()
+    car = State()
 
 
 FINANCE_MANAGER_IDS = frozenset(
@@ -370,7 +378,10 @@ def main_keyboard(tg_id: int | None = None) -> ReplyKeyboardMarkup:
         )
         rows.insert(
             4,
-            [KeyboardButton(text="❌ Отменить расход")],
+            [
+                KeyboardButton(text="❌ Отменить расход"),
+                KeyboardButton(text="📑 Просмотр расходов"),
+            ],
         )
     return ReplyKeyboardMarkup(
         keyboard=rows,
@@ -630,6 +641,72 @@ def financial_month_keyboard(months: list[str]) -> InlineKeyboardMarkup:
                 )
             ]
         )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def expense_history_month_keyboard(months: list[str]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    current_month = _now_minsk().strftime("%Y-%m")
+    previous_month = (
+        _now_minsk().date().replace(day=1) - datetime.timedelta(days=1)
+    ).strftime("%Y-%m")
+    for month in months:
+        label = ""
+        if month == current_month:
+            label = "Текущий"
+        elif month == previous_month:
+            label = "Прошлый"
+        text = f"{label} ({month})" if label else month
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"expense_history_month:{month}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def expense_history_filter_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🏢 Все расходы за месяц",
+                    callback_data="expense_history_filter:all",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚗 Фильтр по автомобилю",
+                    callback_data="expense_history_filter:cars",
+                )
+            ],
+        ]
+    )
+
+
+def expense_history_car_keyboard(cars: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, car in enumerate(cars):
+        label = f"{_car_name(car)} ({_car_plate(car) or 'без госномера'})"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label[:64],
+                    callback_data=f"expense_history_car:{index}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🏢 Общие расходы",
+                callback_data="expense_history_car:general",
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1527,6 +1604,330 @@ async def _answer_financial_report(
                 else None
             ),
         )
+
+
+GENERAL_EXPENSE_LABELS = frozenset(
+    {
+        "",
+        "общие",
+        "общие расходы компании",
+        "общие расходы (весь автопарк)",
+        "🏢 общие расходы (весь автопарк)",
+    }
+)
+
+
+def _expense_history_vehicle(expense: dict) -> str:
+    vehicle = _value(
+        expense,
+        "Автомобиль (Госномер / Общие)",
+        "Автомобиль",
+        default="",
+    )
+    return (
+        "Общие"
+        if vehicle.casefold() in GENERAL_EXPENSE_LABELS
+        else vehicle
+    )
+
+
+def _expense_history_author(expense: dict) -> str:
+    author = _value(
+        expense,
+        "Имя",
+        "Кто внес",
+        "Менеджер",
+        default="",
+    )
+    if author:
+        return author
+    telegram_id = _value(
+        expense,
+        "Telegram ID",
+        "Telegram ID менеджера",
+        default="",
+    )
+    return f"Telegram ID {telegram_id}" if telegram_id else "—"
+
+
+def _format_expense_history(
+    expenses: list[dict],
+    month_key: str,
+    filter_label: str | None = None,
+) -> str:
+    if not expenses:
+        return (
+            f"📅 Месяц: {month_key}\n\n"
+            "За выбранный месяц расходов не найдено."
+        )
+
+    title = f"📑 ИСТОРИЯ РАСХОДОВ\n📅 Месяц: {month_key}"
+    if filter_label:
+        title += f"\n🔎 Фильтр: {filter_label}"
+    lines = [title, "", "Список записей:"]
+    total = 0
+    for expense in expenses:
+        amount = safe_int(expense.get("Сумма (RUB)"))
+        total += amount
+        lines.append(
+            "• "
+            f"№{_value(expense, 'ID Записи', 'ID', default='—')} | "
+            f"{_value(expense, 'Дата', default='—')} | "
+            f"{_format_number(amount)} ₽ | "
+            f"{_value(expense, 'Категория / На что', 'Категория', default='—')} | "
+            f"{_expense_history_vehicle(expense)} | "
+            f"{_expense_history_author(expense)}"
+        )
+        lines.append(
+            f"  💬 Примечание: "
+            f"{_value(expense, 'Примечание', 'Комментарий', default='—')}"
+        )
+    lines.extend(
+        [
+            "",
+            f"💰 Всего расходов за выбранный период: "
+            f"{_format_number(total)} ₽",
+        ]
+    )
+    return "\n".join(lines)
+
+
+async def _send_expense_history(
+    message: Message,
+    user_id: int,
+    month_key: str,
+    vehicle_filter: str | None = None,
+    filter_label: str | None = None,
+) -> None:
+    try:
+        expenses = await asyncio.to_thread(
+            get_expenses_for_month,
+            month_key,
+            vehicle_filter,
+        )
+    except Exception:
+        logger.exception(
+            "Could not load expense history for %s (filter=%s)",
+            month_key,
+            vehicle_filter,
+        )
+        await message.answer(
+            "Не удалось получить историю расходов из Google Sheets.",
+            reply_markup=main_keyboard(user_id),
+        )
+        return
+    await _answer_financial_report(
+        message,
+        _format_expense_history(expenses, month_key, filter_label),
+        user_id,
+    )
+
+
+async def start_expense_history(message: Message, state: FSMContext) -> None:
+    if not await ensure_finance_access(message):
+        return
+    await state.clear()
+    try:
+        months = await asyncio.to_thread(
+            get_available_expense_months,
+            _now_minsk().date(),
+        )
+    except Exception:
+        logger.exception("Could not load expense history months")
+        await message.answer(
+            "Не удалось получить список месяцев расходов.",
+            reply_markup=main_keyboard(message.from_user.id),
+        )
+        return
+    await state.set_state(ExpenseHistoryForm.month)
+    selection_message = await message.answer(
+        "Выберите месяц для просмотра расходов:",
+        reply_markup=expense_history_month_keyboard(months),
+    )
+    await state.update_data(
+        expense_history_months=months,
+        expense_history_month_message_id=selection_message.message_id,
+    )
+
+
+async def expense_history_month_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    if not _callback_has_finance_access(callback):
+        await callback.answer(
+            "У вас нет доступа к финансовым операциям.",
+            show_alert=True,
+        )
+        return
+    if await state.get_state() != ExpenseHistoryForm.month.state:
+        await callback.answer(
+            "Этот выбор месяца устарел. Откройте просмотр расходов заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if callback.message.message_id != data.get(
+        "expense_history_month_message_id"
+    ):
+        await callback.answer(
+            "Используйте последний список месяцев.",
+            show_alert=True,
+        )
+        return
+    month_key = callback.data.split(":", 1)[1]
+    if month_key not in data.get("expense_history_months", []):
+        await callback.answer("Недоступный месяц.", show_alert=True)
+        return
+    await callback.answer(f"Выбран месяц: {month_key}")
+    await state.update_data(expense_history_month=month_key)
+    await state.set_state(ExpenseHistoryForm.filter)
+    await callback.message.edit_text(
+        f"Месяц расходов: {month_key}\n\nВыберите фильтр:",
+        reply_markup=expense_history_filter_keyboard(),
+    )
+    await state.update_data(
+        expense_history_filter_message_id=callback.message.message_id,
+    )
+
+
+async def expense_history_filter_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    if not _callback_has_finance_access(callback):
+        await callback.answer(
+            "У вас нет доступа к финансовым операциям.",
+            show_alert=True,
+        )
+        return
+    if await state.get_state() != ExpenseHistoryForm.filter.state:
+        await callback.answer(
+            "Этот выбор фильтра устарел. Откройте просмотр расходов заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if callback.message.message_id != data.get(
+        "expense_history_filter_message_id"
+    ):
+        await callback.answer(
+            "Используйте последний выбор фильтра.",
+            show_alert=True,
+        )
+        return
+    filter_type = callback.data.split(":", 1)[1]
+    month_key = data.get("expense_history_month")
+    if filter_type not in {"all", "cars"} or not month_key:
+        await callback.answer("Некорректный фильтр.", show_alert=True)
+        return
+    if filter_type == "all":
+        await callback.answer(f"Формирую историю за {month_key}")
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await state.clear()
+        await _send_expense_history(
+            callback.message,
+            callback.from_user.id,
+            month_key,
+        )
+        return
+
+    try:
+        cars = list(await asyncio.to_thread(get_all_cars))
+    except Exception:
+        logger.exception("Could not load cars for expense history")
+        await state.clear()
+        await callback.answer(
+            "Не удалось получить список автомобилей.",
+            show_alert=True,
+        )
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            "Не удалось получить список автомобилей.",
+            reply_markup=main_keyboard(callback.from_user.id),
+        )
+        return
+    await callback.answer("Выберите автомобиль")
+    await state.update_data(
+        expense_history_cars=cars,
+        expense_history_car_message_id=callback.message.message_id,
+    )
+    await state.set_state(ExpenseHistoryForm.car)
+    await callback.message.edit_text(
+        f"Расходы за {month_key}.\nВыберите автомобиль или общие расходы:",
+        reply_markup=expense_history_car_keyboard(cars),
+    )
+
+
+async def expense_history_car_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    if not _callback_has_finance_access(callback):
+        await callback.answer(
+            "У вас нет доступа к финансовым операциям.",
+            show_alert=True,
+        )
+        return
+    if await state.get_state() != ExpenseHistoryForm.car.state:
+        await callback.answer(
+            "Этот список автомобилей устарел. Откройте просмотр расходов заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if callback.message.message_id != data.get(
+        "expense_history_car_message_id"
+    ):
+        await callback.answer(
+            "Используйте последний список автомобилей.",
+            show_alert=True,
+        )
+        return
+    selection = callback.data.split(":", 1)[1]
+    month_key = data.get("expense_history_month")
+    if not month_key:
+        await callback.answer("Месяц не выбран.", show_alert=True)
+        return
+    vehicle_filter: str | None
+    filter_label: str | None
+    if selection == "general":
+        vehicle_filter = "general"
+        filter_label = "Общие расходы"
+    else:
+        try:
+            index = int(selection)
+            car = data.get("expense_history_cars", [])[index]
+        except (ValueError, IndexError):
+            await callback.answer("Некорректный автомобиль.", show_alert=True)
+            return
+        vehicle_filter = _car_plate(car)
+        if not vehicle_filter or vehicle_filter == "—":
+            await callback.answer(
+                "У выбранного автомобиля не указан госномер.",
+                show_alert=True,
+            )
+            return
+        filter_label = _car_report_label(car)
+    await callback.answer(f"Формирую историю за {month_key}")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.clear()
+    await _send_expense_history(
+        callback.message,
+        callback.from_user.id,
+        month_key,
+        vehicle_filter,
+        filter_label,
+    )
 
 
 async def start_expense(message: Message, state: FSMContext) -> None:
@@ -3735,6 +4136,18 @@ def create_dispatcher() -> Dispatcher:
         F.data == "financial_car_calculate",
     )
     dispatcher.callback_query.register(
+        expense_history_month_callback,
+        F.data.startswith("expense_history_month:"),
+    )
+    dispatcher.callback_query.register(
+        expense_history_filter_callback,
+        F.data.startswith("expense_history_filter:"),
+    )
+    dispatcher.callback_query.register(
+        expense_history_car_callback,
+        F.data.startswith("expense_history_car:"),
+    )
+    dispatcher.callback_query.register(
         cancellation_booking_callback,
         F.data.startswith("cancel_booking:"),
     )
@@ -3762,6 +4175,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(
         start_financial_report,
         F.text == "📈 Фин. отчет",
+    )
+    dispatcher.message.register(
+        start_expense_history,
+        F.text == "📑 Просмотр расходов",
     )
 
     dispatcher.message.register(availability_start_date, AvailabilityForm.start_date)
@@ -3811,6 +4228,18 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(
         expense_cancel_confirmation,
         ExpenseCancellationForm.confirmation,
+    )
+    dispatcher.message.register(
+        unknown_message,
+        ExpenseHistoryForm.month,
+    )
+    dispatcher.message.register(
+        unknown_message,
+        ExpenseHistoryForm.filter,
+    )
+    dispatcher.message.register(
+        unknown_message,
+        ExpenseHistoryForm.car,
     )
 
     dispatcher.message.register(unknown_message)
