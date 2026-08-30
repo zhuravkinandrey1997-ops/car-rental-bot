@@ -1,0 +1,10 @@
+[project]
+name = "car-rental-telegram-bot"
+version = "0.1.0"
+description = "Telegram bot for manager-led car rental operations backed by Google Sheets."
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.31.0",
+    "gspread>=6.2.1",
+    "python-dotenv>=1.2.3",
+]
