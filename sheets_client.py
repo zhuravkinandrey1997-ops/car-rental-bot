@@ -234,6 +234,7 @@ def add_new_booking(
     status: str = "Подтверждена",
     prepayment: int = 0,
     prepayment_pay_type: str = "Без оплаты",
+    manager_name: str = "",
 ):
     records = ws_bookings.get_all_records()
     new_id = len(records) + 101
@@ -251,6 +252,8 @@ def add_new_booking(
         "Сумма брони (RUB)": price,
         "Цена": price,
         "Telegram ID Менеджера": manager_id,
+        "Имя менеджера": manager_name or str(manager_id),
+        "Менеджер": manager_name or str(manager_id),
         "Статус": status,
         "Дата и время выдачи": issued_at,
         "Пробег при выдаче (км)": start_mileage,
@@ -281,6 +284,8 @@ def add_new_booking(
             "Телефон",
             "Сумма брони (RUB)",
             "Telegram ID Менеджера",
+            "Имя менеджера",
+            "Менеджер",
             "Статус",
             "Дата и время выдачи",
             "Пробег при выдаче (км)",

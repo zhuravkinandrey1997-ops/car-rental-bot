@@ -419,6 +419,99 @@ def _booking_id(record: dict) -> str:
     return _value(record, "ID Брони", "ID", "Booking ID")
 
 
+def _manager_display_name(user) -> str:
+    return (
+        getattr(user, "full_name", "")
+        or getattr(user, "username", "")
+        or str(getattr(user, "id", "—"))
+    )
+
+
+def _booking_manager_name(booking: dict) -> str:
+    manager_name = _value(
+        booking,
+        "Имя менеджера",
+        "Менеджер",
+        "ФИО менеджера",
+        "Менеджер, создавший бронь",
+        default="",
+    )
+    if manager_name:
+        return manager_name
+    manager_id = _value(
+        booking,
+        "Telegram ID Менеджера",
+        "Telegram ID менеджера",
+        default="",
+    )
+    return f"Telegram ID {manager_id}" if manager_id else "—"
+
+
+def _booking_prepayment_text(booking: dict) -> str:
+    raw_amount = _value(
+        booking,
+        "Задаток/Предоплата",
+        "Залог/Предоплата",
+        "Предоплата",
+        default="0",
+    )
+    try:
+        amount = int(raw_amount.replace(" ", "").replace(",", ""))
+    except ValueError:
+        amount = 0
+    if amount <= 0:
+        return "Без задатка"
+    payment_type = _value(
+        booking,
+        "Способ оплаты задатка",
+        "Тип оплаты залога",
+        default="",
+    )
+    payment_suffix = (
+        f" ({payment_type})"
+        if payment_type and payment_type != "Без оплаты"
+        else ""
+    )
+    return f"{_format_number(amount)} RUB{payment_suffix}"
+
+
+def _booking_card_text(booking: dict) -> str:
+    client_name = _value(
+        booking,
+        "ФИО Клиента",
+        "Клиент",
+        "Клиент ФИО",
+        "Имя клиента",
+        default="—",
+    )
+    phone = _value(
+        booking,
+        "Телефон",
+        "Телефон клиента",
+        default="—",
+    )
+    start_date = _value(
+        booking,
+        "Дата начала (ГГГГ-ММ-ДД)",
+        "Дата начала",
+        default="—",
+    )
+    end_date = _value(
+        booking,
+        "Дата окончания (ГГГГ-ММ-ДД)",
+        "Дата окончания",
+        default="—",
+    )
+    return (
+        f"Номер: Бронь #{_booking_id(booking)}\n"
+        f"Клиент: {client_name} ({phone})\n"
+        f"Менеджер: {_booking_manager_name(booking)}\n"
+        f"Задаток: {_booking_prepayment_text(booking)}\n"
+        f"Период: {start_date} — {end_date}\n"
+        f"Статус: {_value(booking, 'Статус', default='—')}"
+    )
+
+
 def _car_id(record: dict) -> str:
     return _value(record, "ID Авто", "ID", "Car ID")
 
@@ -1316,7 +1409,7 @@ async def occupancy_car(message: Message, state: FSMContext) -> None:
     calendar_message = await message.answer(
         "📅 Занятость автомобиля\n"
         f"{_car_name(car)} ({plate})\n\n"
-        "🔴 — дата занята. Нажмите на неё, чтобы увидеть номер брони.\n"
+        "🔴 — дата занята. Нажмите на неё, чтобы увидеть детали брони.\n"
         "Обычная дата — свободна.",
         reply_markup=calendar_keyboard(
             "occupancy",
@@ -1608,12 +1701,30 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
         occupied = _occupied_dates(data.get("occupancy_bookings", []))
         booking_ids = occupied.get(selected_date.isoformat(), [])
         if booking_ids:
+            bookings_by_id = {
+                _booking_id(booking): booking
+                for booking in data.get("occupancy_bookings", [])
+            }
+            details = [
+                _booking_card_text(bookings_by_id[booking_id])
+                for booking_id in booking_ids
+                if booking_id in bookings_by_id
+            ]
+            if details:
+                await callback.answer("Детали брони отправлены ниже.")
+                await message.answer(
+                    "🔴 ЗАНЯТАЯ ДАТА\n\n" + "\n\n".join(details)
+                )
+            else:
+                await callback.answer(
+                    "Бронь для этой даты не найдена.",
+                    show_alert=True,
+                )
+        else:
             await callback.answer(
-                "Дата занята: " + ", ".join(f"Бронь #{booking_id}" for booking_id in booking_ids),
+                "Эта дата больше не занята.",
                 show_alert=True,
             )
-        else:
-            await callback.answer("Эта дата больше не занята.")
         return
 
     if len(parts) != 5 or parts[3] != "day":
@@ -1864,6 +1975,7 @@ async def booking_confirmation(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     manager_id = message.from_user.id if message.from_user else 0
+    manager_name = _manager_display_name(message.from_user)
     is_reservation = data.get("booking_mode") == "reservation"
     try:
         if is_reservation:
@@ -1882,6 +1994,7 @@ async def booking_confirmation(message: Message, state: FSMContext) -> None:
                     "prepayment_pay_type",
                     "Без оплаты",
                 ),
+                manager_name=manager_name,
             )
         else:
             booking_id = int(_booking_id(data["booking"]))
