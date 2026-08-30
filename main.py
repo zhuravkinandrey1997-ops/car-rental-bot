@@ -54,6 +54,7 @@ from sheets_client import (
     issue_booking,
     mark_notification_sent,
     save_actual_return,
+    safe_int,
 )
 
 load_dotenv()
@@ -727,10 +728,7 @@ def _booking_prepayment_text(booking: dict) -> str:
         "Предоплата",
         default="0",
     )
-    try:
-        amount = int(raw_amount.replace(" ", "").replace(",", ""))
-    except ValueError:
-        amount = 0
+    amount = safe_int(raw_amount)
     if amount <= 0:
         return "Без задатка"
     payment_type = _value(
@@ -927,8 +925,8 @@ def _parse_int(value: str, field_name: str, minimum: int = 0) -> tuple[int | Non
     return parsed, None
 
 
-def _format_number(value: int | str) -> str:
-    return f"{int(value):,}".replace(",", " ")
+def _format_number(value: object) -> str:
+    return f"{safe_int(value):,}".replace(",", " ")
 
 
 def _now_minsk() -> datetime.datetime:
@@ -1471,9 +1469,9 @@ def _format_selected_cars_report(
     group_expenses = 0
     group_profit = 0
     for car in selected_cars:
-        income = car["Приход / Выручка (RUB)"]
-        expenses = car["Затраты на авто (RUB)"]
-        profit = car["Чистая прибыль авто (RUB)"]
+        income = safe_int(car.get("Приход / Выручка (RUB)"))
+        expenses = safe_int(car.get("Затраты на авто (RUB)"))
+        profit = safe_int(car.get("Чистая прибыль авто (RUB)"))
         group_income += income
         group_expenses += expenses
         group_profit += profit
@@ -1488,14 +1486,14 @@ def _format_selected_cars_report(
         if by_category:
             for category, amount in by_category.items():
                 lines.append(
-                    f"    • {category}: {_format_number(amount)} RUB"
+                    f"    • {category}: {_format_number(safe_int(amount))} RUB"
                 )
         else:
             lines.append("    • Нет расходов")
         lines.extend(
             [
                 f"  Пробег за месяц: +"
-                f"{_format_number(car.get('Пробег за месяц (км)', 0))} км",
+                f"{_format_number(safe_int(car.get('Пробег за месяц (км)', 0)))} км",
                 f"  Чистая прибыль машины: {_format_number(profit)} RUB",
                 "",
             ]

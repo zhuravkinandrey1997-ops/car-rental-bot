@@ -274,14 +274,27 @@ ws_car_profit_summary = _get_or_create_sheet(
 )
 
 
-def _number(value: object) -> int:
-    raw = str(value or "").strip().replace(" ", "").replace(",", "")
-    if not raw:
+def safe_int(value: object) -> int:
+    """Convert a Sheets number/currency value to an integer safely."""
+    if not value:
         return 0
     try:
-        return int(float(raw))
-    except ValueError:
+        clean_value = (
+            str(value)
+            .replace(" ", "")
+            .replace("\xa0", "")
+            .replace("₽", "")
+            .replace(",", "")
+            .strip()
+        )
+        return int(float(clean_value)) if clean_value else 0
+    except (ValueError, TypeError):
         return 0
+
+
+def _number(value: object) -> int:
+    """Backward-compatible alias for numeric report values."""
+    return safe_int(value)
 
 
 def _month_from_record(record: dict, *keys: str) -> str:
