@@ -126,11 +126,35 @@ def _car_id(record: dict) -> str:
     return _value(record, "ID Авто", "ID", "Car ID")
 
 
+def _car_name(car: dict) -> str:
+    return _value(
+        car,
+        "Марка и Модель",
+        "Марка и модель",
+        "Марка Модель",
+        "Название",
+        "Авто",
+        "Модель",
+    )
+
+
+def _car_plate(car: dict) -> str:
+    return _value(car, "Госномер", "Номер", "Номер авто", "Plate")
+
+
+def _car_daily_rate(car: dict) -> str:
+    return _value(
+        car,
+        "Цена / сутки (RUB)",
+        "Суточный тариф",
+        "Цена за сутки",
+        "Цена",
+        "Стоимость",
+    )
+
+
 def _car_label(car: dict) -> str:
-    name = _value(car, "Название", "Авто", "Марка и модель", "Модель")
-    plate = _value(car, "Госномер", "Номер", "Номер авто", "Plate")
-    price = _value(car, "Цена за сутки", "Цена", "Стоимость")
-    return f"{name} · {plate} · {price} RUB/сутки"
+    return f"{_car_name(car)} ({_car_plate(car)}) — {_car_daily_rate(car)} RUB/сутки"
 
 
 def _booking_label(booking: dict) -> str:
@@ -308,7 +332,7 @@ async def booking_car(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(
         car_id=_car_id(car),
-        car_name=_value(car, "Название", "Авто", "Марка и модель", "Модель"),
+        car_name=_car_name(car),
     )
     await state.set_state(BookingForm.client_name)
     await message.answer("Введите ФИО клиента:")
@@ -449,6 +473,7 @@ async def return_booking(message: Message, state: FSMContext) -> None:
 
     start_mileage_text = _value(
         car,
+        "Текущий пробег (км)",
         "Пробег",
         "Текущий пробег",
         "Пробег (км)",
@@ -563,7 +588,7 @@ async def return_confirmation(message: Message, state: FSMContext) -> None:
         save_actual_return(
             booking_id=int(_booking_id(booking)),
             car_name=_value(booking, "Авто", "Название авто", "Модель"),
-            plate=_value(car, "Госномер", "Номер", "Номер авто", "Plate"),
+            plate=_car_plate(car),
             client=_value(booking, "Клиент", "Клиент ФИО", "Имя клиента"),
             start_mileage=int(data["start_mileage"]),
             end_mileage=int(data["end_mileage"]),
