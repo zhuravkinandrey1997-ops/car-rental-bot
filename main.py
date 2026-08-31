@@ -4418,7 +4418,7 @@ async def payment_method_callback(callback: CallbackQuery, state: FSMContext) ->
     ) or (
         flow == "issuance_deposit"
         and current_state == BookingForm.deposit_pay_type.state
-        and data.get("booking_mode") == "issuance"
+        and data.get("booking_mode") in {"issuance", "direct_issuance"}
     ) or (
         flow == "direct_rental"
         and current_state == BookingForm.pay_type.state
