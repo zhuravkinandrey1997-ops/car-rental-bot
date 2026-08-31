@@ -3,6 +3,7 @@ import datetime
 import json
 import logging
 import threading
+import traceback
 import uuid
 import gspread
 from dotenv import load_dotenv
@@ -23,6 +24,20 @@ SHEET_TITLE_MAP = {
     "Car_Profit_Summary": "Прибыль_по_авто",
     "Managers": "Менеджеры",
 }
+BOOKING_HEADERS = [
+    "ID Брони",
+    "ID Авто",
+    "Автомобиль",
+    "Дата начала",
+    "Дата окончания",
+    "ФИО Клиента",
+    "Телефон",
+    "Сумма брони (RUB)",
+    "Задаток (RUB)",
+    "Способ оплаты задатка",
+    "ID Менеджера",
+    "Статус",
+]
 ACCEPTANCE_ACT_HEADERS = [
     "ID Акта",
     "ID Брони",
@@ -126,7 +141,29 @@ def migrate_sheet_titles(spreadsheet) -> list[tuple[str, str]]:
 migrate_sheet_titles(sh)
 
 ws_cars = sh.worksheet("Автомобили")
-ws_bookings = sh.worksheet("Бронирования")
+
+
+def _get_bookings_sheet():
+    """Find the bookings worksheet under either supported title."""
+    try:
+        return sh.worksheet("Бронирования")
+    except gspread.exceptions.WorksheetNotFound:
+        try:
+            return sh.worksheet("Bookings")
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = sh.add_worksheet(
+                title="Бронирования",
+                rows=1000,
+                cols=len(BOOKING_HEADERS),
+            )
+            worksheet.append_row(
+                BOOKING_HEADERS,
+                value_input_option="USER_ENTERED",
+            )
+            return worksheet
+
+
+ws_bookings = _get_bookings_sheet()
 ws_returns = sh.worksheet("Возвраты_Касса")
 ws_managers = sh.worksheet("Менеджеры")
 try:
@@ -769,74 +806,118 @@ def add_new_booking(
     prepayment_pay_type: str = "Без оплаты",
     manager_name: str = "",
 ):
-    records = ws_bookings.get_all_records()
-    new_id = len(records) + 101
-    values = {
-        "ID Брони": new_id,
-        "ID": new_id,
-        "ID Авто": car_id,
-        "Автомобиль": car_name,
-        "Авто": car_name,
-        "Дата начала (ГГГГ-ММ-ДД)": start_date,
-        "Дата окончания (ГГГГ-ММ-ДД)": end_date,
-        "ФИО Клиента": client_name,
-        "Клиент": client_name,
-        "Телефон": phone,
-        "Сумма брони (RUB)": price,
-        "Цена": price,
-        "Telegram ID Менеджера": manager_id,
-        "Имя менеджера": manager_name or str(manager_id),
-        "Менеджер": manager_name or str(manager_id),
-        "Статус": status,
-        "Дата и время выдачи": issued_at,
-        "Пробег при выдаче (км)": start_mileage,
-        "Принятая сумма аренды (RUB)": price,
-        "Сумма аренды получена (RUB)": price,
-        "Залог (RUB)": deposit,
-        "Внесенный залог": deposit,
-        "Страховой залог": deposit,
-        "Способ оплаты": pay_type,
-        "Способ оплаты залога": deposit_pay_type,
-        "Способ оплаты страхового залога": deposit_pay_type,
-        "Залог/Предоплата": prepayment,
-        "Задаток/Предоплата": prepayment,
-        "Тип оплаты залога": prepayment_pay_type,
-        "Способ оплаты задатка": prepayment_pay_type,
-        "Плановое окончание": f"{end_date} 23:59",
-    }
-    _append_record(
-        ws_bookings,
-        values,
-        [
-            "ID Брони",
-            "ID Авто",
-            "Автомобиль",
-            "Дата начала (ГГГГ-ММ-ДД)",
-            "Дата окончания (ГГГГ-ММ-ДД)",
-            "ФИО Клиента",
-            "Телефон",
-            "Сумма брони (RUB)",
-            "Telegram ID Менеджера",
-            "Имя менеджера",
-            "Менеджер",
-            "Статус",
-            "Дата и время выдачи",
-            "Пробег при выдаче (км)",
-            "Принятая сумма аренды (RUB)",
-            "Залог (RUB)",
-            "Внесенный залог",
-            "Страховой залог",
-            "Способ оплаты",
-            "Способ оплаты залога",
-            "Способ оплаты страхового залога",
-            "Залог/Предоплата",
-            "Задаток/Предоплата",
-            "Тип оплаты залога",
-            "Способ оплаты задатка",
-            "Плановое окончание",
-        ],
-    )
-    return new_id
+    try:
+        bookings_sheet = _get_bookings_sheet()
+        records = bookings_sheet.get_all_records()
+        booking_ids = []
+        for record in records:
+            raw_booking_id = record.get("ID Брони", record.get("ID", 0))
+            try:
+                booking_ids.append(
+                    int(str(raw_booking_id).replace(" ", ""))
+                )
+            except (TypeError, ValueError):
+                continue
+        new_booking_id = max(booking_ids, default=100) + 1
+
+        booking_deposit = prepayment if prepayment else deposit
+        booking_deposit_pay_type = (
+            prepayment_pay_type
+            if prepayment
+            else deposit_pay_type
+        )
+        car_id_value = int(str(car_id or 0).replace(" ", ""))
+        total_price_value = int(str(price or 0).replace(" ", ""))
+        booking_deposit_value = int(
+            str(booking_deposit or 0).replace(" ", "")
+        )
+        manager_id_value = int(str(manager_id or 0).replace(" ", ""))
+        insurance_deposit_value = int(
+            str(deposit or 0).replace(" ", "")
+        )
+        start_mileage_value = int(
+            str(start_mileage or 0).replace(" ", "")
+        )
+        row = [
+            new_booking_id,
+            car_id_value,
+            str(car_name or ""),
+            str(start_date or ""),
+            str(end_date or ""),
+            str(client_name or ""),
+            str(phone or ""),
+            total_price_value,
+            booking_deposit_value,
+            str(booking_deposit_pay_type or "Без оплаты"),
+            manager_id_value,
+            "Подтверждена",
+        ]
+        headers = bookings_sheet.row_values(1)
+        if not headers:
+            bookings_sheet.append_row(
+                BOOKING_HEADERS,
+                value_input_option="USER_ENTERED",
+            )
+            headers = BOOKING_HEADERS
+
+        row_to_append = row
+        if headers[: len(BOOKING_HEADERS)] != BOOKING_HEADERS:
+            legacy_values = {
+                "ID Брони": new_booking_id,
+                "ID": new_booking_id,
+                "ID Авто": car_id_value,
+                "Автомобиль": str(car_name or ""),
+                "Авто": str(car_name or ""),
+                "Дата начала": str(start_date or ""),
+                "Дата начала (ГГГГ-ММ-ДД)": str(start_date or ""),
+                "Дата окончания": str(end_date or ""),
+                "Дата окончания (ГГГГ-ММ-ДД)": str(end_date or ""),
+                "ФИО Клиента": str(client_name or ""),
+                "Клиент": str(client_name or ""),
+                "Телефон": str(phone or ""),
+                "Сумма брони (RUB)": total_price_value,
+                "Цена": total_price_value,
+                "ID Менеджера": manager_id_value,
+                "Telegram ID Менеджера": manager_id_value,
+                "Имя менеджера": str(manager_name or manager_id),
+                "Менеджер": str(manager_name or manager_id),
+                "Статус": "Подтверждена",
+                "Задаток (RUB)": booking_deposit_value,
+                "Залог/Предоплата": booking_deposit_value,
+                "Задаток/Предоплата": booking_deposit_value,
+                "Способ оплаты задатка": str(
+                    booking_deposit_pay_type or "Без оплаты"
+                ),
+                "Тип оплаты залога": str(
+                    booking_deposit_pay_type or "Без оплаты"
+                ),
+                "Дата и время выдачи": str(issued_at or ""),
+                "Пробег при выдаче (км)": start_mileage_value,
+                "Принятая сумма аренды (RUB)": total_price_value,
+                "Залог (RUB)": insurance_deposit_value,
+                "Внесенный залог": insurance_deposit_value,
+                "Страховой залог": insurance_deposit_value,
+                "Способ оплаты": str(pay_type or "Без оплаты"),
+                "Способ оплаты залога": str(
+                    deposit_pay_type or "Без оплаты"
+                ),
+                "Способ оплаты страхового залога": str(
+                    deposit_pay_type or "Без оплаты"
+                ),
+                "Плановое окончание": f"{str(end_date or '')} 23:59",
+            }
+            row_to_append = [
+                legacy_values.get(header, "")
+                for header in headers
+            ]
+        bookings_sheet.append_row(
+            row_to_append,
+            value_input_option="USER_ENTERED",
+        )
+        return new_booking_id
+    except Exception:
+        traceback.print_exc()
+        raise
 
 
 def get_active_rentals():
