@@ -96,7 +96,7 @@ CAR_PROFIT_SUMMARY_HEADERS = [
 ]
 EXPENSES_LOCK = threading.Lock()
 MIN_OPERATIONAL_COLUMNS = 35
-TARGET_OPERATIONAL_COLUMNS = 40
+TARGET_OPERATIONAL_COLUMNS = 35
 
 if SERVICE_ACCOUNT_JSON:
     gc = gspread.service_account_from_dict(json.loads(SERVICE_ACCOUNT_JSON))
@@ -147,9 +147,23 @@ def _ensure_sheet_width(ws) -> None:
     """Keep operational worksheets wide enough for optional legacy fields."""
     current_columns = int(getattr(ws, "col_count", 0) or 0)
     if current_columns < MIN_OPERATIONAL_COLUMNS:
-        ws.resize(cols=TARGET_OPERATIONAL_COLUMNS)
+        ws.resize(
+            rows=ws.row_count,
+            cols=TARGET_OPERATIONAL_COLUMNS,
+        )
 
 
+def _ensure_all_sheet_widths(spreadsheet) -> None:
+    """Expand every worksheet before any header or data update is attempted."""
+    for worksheet in spreadsheet.worksheets():
+        if worksheet.col_count < MIN_OPERATIONAL_COLUMNS:
+            worksheet.resize(
+                rows=worksheet.row_count,
+                cols=MIN_OPERATIONAL_COLUMNS,
+            )
+
+
+_ensure_all_sheet_widths(sh)
 ws_cars = sh.worksheet("Автомобили")
 _ensure_sheet_width(ws_cars)
 
@@ -334,6 +348,37 @@ def _ensure_headers(ws, required_headers: list[str]) -> list[str]:
             headers.append(header)
             ws.update_cell(1, len(headers), header)
     return headers
+
+
+def _update_existing_headers(
+    ws,
+    row_number: int,
+    fields: list[tuple[tuple[str, ...], object, bool]],
+) -> None:
+    """Update only columns that are already present in the worksheet."""
+    headers = ws.row_values(1)
+    resolved_updates: list[tuple[int, object]] = []
+    missing_required: list[str] = []
+    for aliases, value, required in fields:
+        matching_columns = [
+            column_number
+            for column_number, header in enumerate(headers, start=1)
+            if header in aliases
+        ]
+        if not matching_columns:
+            if required:
+                missing_required.append(aliases[0])
+            continue
+        resolved_updates.extend(
+            (column_number, value) for column_number in matching_columns
+        )
+    if missing_required:
+        raise ValueError(
+            "Missing required booking headers: "
+            + ", ".join(missing_required)
+        )
+    for column_number, value in resolved_updates:
+        ws.update_cell(row_number, column_number, value)
 
 
 def _append_record(ws, values: dict[str, object], required_headers: list[str]) -> None:
@@ -977,26 +1022,36 @@ def issue_booking(
             f"Booking {booking_id} cannot be issued from status {current_status}"
         )
 
-    updates = {
-        "Статус": "В аренде",
-        "Дата и время выдачи": issued_at,
-        "Пробег при выдаче (км)": start_mileage,
-        "Telegram ID Менеджера выдачи": manager_id,
-        "Страховой залог": insurance_deposit,
-        "Страховой залог (RUB)": insurance_deposit,
-        "Внесенный страховой залог (RUB)": insurance_deposit,
-        "Способ оплаты страхового залога": insurance_deposit_pay_type,
-        "Залог (RUB)": insurance_deposit,
-        "Внесенный залог": insurance_deposit,
-        "Способ оплаты залога": insurance_deposit_pay_type,
-    }
-    headers = _ensure_headers(ws_bookings, list(updates))
-    for header, value in updates.items():
-        ws_bookings.update_cell(
-            booking_row,
-            headers.index(header) + 1,
-            value,
-        )
+    _update_existing_headers(
+        ws_bookings,
+        booking_row,
+        [
+            (("Статус",), "В аренде", True),
+            (("Дата и время выдачи",), issued_at, True),
+            (("Пробег при выдаче (км)",), start_mileage, True),
+            (
+                (
+                    "Залог (RUB)",
+                    "Страховой залог (RUB)",
+                    "Страховой залог",
+                    "Внесенный залог",
+                    "Внесенный страховой залог (RUB)",
+                ),
+                insurance_deposit,
+                True,
+            ),
+            (
+                (
+                    "Способ оплаты страхового залога",
+                    "Способ оплаты залога",
+                    "Способ оплаты",
+                ),
+                insurance_deposit_pay_type,
+                False,
+            ),
+            (("Telegram ID Менеджера выдачи",), manager_id, False),
+        ],
+    )
 
 
 def get_active_cars():
