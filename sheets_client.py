@@ -87,6 +87,7 @@ MONTHLY_SUMMARY_HEADERS = [
     "Чистая прибыль компании (RUB)",
 ]
 CAR_PROFIT_SUMMARY_HEADERS = [
+    "Месяц (ГГГГ-ММ)",
     "ID Авто",
     "Марка и Модель",
     "Госномер",
@@ -499,17 +500,40 @@ def _upsert_record(
     values: dict[str, object],
     required_headers: list[str],
 ) -> None:
+    _upsert_record_by_keys(
+        ws,
+        (key_header,),
+        (key_value,),
+        values,
+        required_headers,
+    )
+
+
+def _upsert_record_by_keys(
+    ws,
+    key_headers: tuple[str, ...],
+    key_values: tuple[object, ...],
+    values: dict[str, object],
+    required_headers: list[str],
+) -> None:
+    if len(key_headers) != len(key_values):
+        raise ValueError("Key headers and values must have the same length")
     records = ws.get_all_records()
     headers = _ensure_headers(ws, required_headers)
     target_row = None
     for row_number, record in enumerate(records, start=2):
-        if str(record.get(key_header, "")).strip() == str(key_value).strip():
+        if all(
+            str(record.get(header, "")).strip() == str(value).strip()
+            for header, value in zip(key_headers, key_values)
+        ):
             target_row = row_number
             break
     if target_row is None:
         ws.append_row([values.get(header, "") for header in headers])
         return
     for header, value in values.items():
+        if header not in headers:
+            continue
         ws.update_cell(target_row, headers.index(header) + 1, value)
 
 
@@ -797,6 +821,7 @@ def get_financial_report(month_key: str) -> dict:
         costs = car_expenses.get(plate_key, 0)
         car_rows.append(
             {
+                "Месяц (ГГГГ-ММ)": month_key,
                 "ID Авто": stable_car_id,
                 "Марка и Модель": display_name,
                 "Госномер": plate_display,
@@ -826,10 +851,10 @@ def get_financial_report(month_key: str) -> dict:
         MONTHLY_SUMMARY_HEADERS,
     )
     for row in car_rows:
-        _upsert_record(
+        _upsert_record_by_keys(
             ws_car_profit_summary,
-            "ID Авто",
-            row["ID Авто"],
+            ("Месяц (ГГГГ-ММ)", "ID Авто"),
+            (month_key, row["ID Авто"]),
             row,
             CAR_PROFIT_SUMMARY_HEADERS,
         )
