@@ -3434,10 +3434,19 @@ async def booking_confirmation(message: Message, state: FSMContext) -> None:
                 manager_id=manager_id,
                 issued_at=_timestamp(),
             )
-    except Exception:
-        logger.exception("Could not save booking")
+    except Exception as e:
+        import html
+        import traceback
+
+        err_text = traceback.format_exc()
+        print("Ошибка сохранения брони:", err_text)
         await state.clear()
-        await message.answer("Не удалось сохранить бронь в Google Sheets.", reply_markup=main_keyboard())
+        await message.answer(
+            "❌ Ошибка записи в таблицу:\n"
+            f"<code>{html.escape(str(e))}</code>",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(),
+        )
         return
     await state.clear()
     await message.answer(
