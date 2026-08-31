@@ -4181,13 +4181,16 @@ async def return_confirmation(
         payment_method = rental_pay_type
     else:
         payment_method = additional_pay_type
+    end_mileage = safe_int(data.get("end_mileage", 0))
+    start_mileage = safe_int(data.get("start_mileage", 0))
+    delta_mileage = end_mileage - start_mileage
     return_notification = (
         "🏁 <b>Автомобиль принят (Касса)!</b>\n"
         f"🚘 Авто: <b>{_html_value(_car_name(car))} "
         f"({_html_value(_car_plate(car))})</b>\n"
         f"👤 Клиент: <b>{_html_value(_value(booking, 'ФИО Клиента', 'Клиент'))}</b>\n"
-        f"📈 Пробег за поездку: <b>+{_html_value(data.get('end_mileage', 0) - data.get('start_mileage', 0))} км</b> "
-        f"(текущий: {_html_value(data.get('end_mileage'))} км)\n"
+        f"📈 Пробег за поездку: <b>+{_html_value(delta_mileage)} км</b> "
+        f"(текущий: {_html_value(end_mileage)} км)\n"
         f"💰 Оплачено: <b>{_format_number(total_received)} ₽</b> "
         f"({_html_value(payment_method)})\n"
         f"📝 Комментарий/состояние: <i>{_html_value(data.get('notes'), '—')}</i>\n"
