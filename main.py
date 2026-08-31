@@ -160,13 +160,13 @@ class ExpenseHistoryForm(StatesGroup):
     car = State()
 
 
-FINANCE_MANAGER_IDS = frozenset(
-    {
-        661842368,
-        946721277,
-        1574781782,
-    }
-)
+ADMIN_IDS = {
+    661842368,
+    946721277,
+    1574781782,
+    952125424,
+}
+FINANCE_MANAGER_IDS = frozenset(ADMIN_IDS)
 EXPENSE_CATEGORIES = (
     "Мойка / Детейлинг",
     "ТО / Ремонт",
@@ -353,40 +353,39 @@ def _period_selection_text(start_date: str, end_date: str) -> str:
     )
 
 
-def main_keyboard(tg_id: int | None = None) -> ReplyKeyboardMarkup:
-    rows = [
-            [
-                KeyboardButton(text="Доступные авто"),
-                KeyboardButton(text="Новая бронь"),
-            ],
-            [
-                KeyboardButton(text="🚗 Выдача авто"),
-                KeyboardButton(text="Активные аренды"),
-            ],
-            [
-                KeyboardButton(text="🏁 Приём авто"),
-                KeyboardButton(text="🔍 Проверка броней"),
-            ],
-            [KeyboardButton(text="🚫 Отмена брони")],
-            [KeyboardButton(text="Отмена")],
-        ]
-    if tg_id in FINANCE_MANAGER_IDS:
-        rows.insert(
-            3,
+def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    uid = int(user_id)
+    buttons = [
+        [
+            KeyboardButton(text="Доступные авто"),
+            KeyboardButton(text="Новая бронь"),
+        ],
+        [
+            KeyboardButton(text="🚗 Выдача авто"),
+            KeyboardButton(text="Активные аренды"),
+        ],
+        [
+            KeyboardButton(text="🏁 Приём авто"),
+            KeyboardButton(text="🔎 Проверка броней"),
+        ],
+    ]
+    if uid in ADMIN_IDS:
+        buttons.append(
             [
                 KeyboardButton(text="💸 Внести расход"),
                 KeyboardButton(text="📈 Фин. отчет"),
-            ],
+            ]
         )
-        rows.insert(
-            4,
+        buttons.append(
             [
                 KeyboardButton(text="❌ Отменить расход"),
                 KeyboardButton(text="📑 Просмотр расходов"),
-            ],
+            ]
         )
+    buttons.append([KeyboardButton(text="🚫 Отмена брони")])
+    buttons.append([KeyboardButton(text="Отмена")])
     return ReplyKeyboardMarkup(
-        keyboard=rows,
+        keyboard=buttons,
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -1451,9 +1450,7 @@ async def cancel_flow(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "Операция отменена.",
-        reply_markup=main_keyboard(
-            message.from_user.id if message.from_user else None
-        ),
+        reply_markup=get_main_keyboard(message.from_user.id),
     )
 
 
@@ -1463,9 +1460,7 @@ async def show_menu(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
         "Панель управления автопрокатом готова. Выберите операцию:",
-        reply_markup=main_keyboard(
-            message.from_user.id if message.from_user else None
-        ),
+        reply_markup=get_main_keyboard(message.from_user.id),
     )
 
 
@@ -1478,7 +1473,7 @@ async def ensure_finance_access(message: Message) -> bool:
     if user is None or user.id not in FINANCE_MANAGER_IDS:
         await message.answer(
             "Финансовые операции доступны только уполномоченным менеджерам.",
-            reply_markup=main_keyboard(user.id if user else None),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return False
     return True
@@ -1621,7 +1616,7 @@ async def _answer_financial_report(
         await message.answer(
             chunk,
             reply_markup=(
-                main_keyboard(user_id)
+                get_main_keyboard(user_id)
                 if index == len(chunks) - 1
                 else None
             ),
@@ -1735,7 +1730,7 @@ async def _send_expense_history(
         )
         await message.answer(
             "Не удалось получить историю расходов из Google Sheets.",
-            reply_markup=main_keyboard(user_id),
+            reply_markup=get_main_keyboard(user_id),
         )
         return
     await _answer_financial_report(
@@ -1758,7 +1753,7 @@ async def start_expense_history(message: Message, state: FSMContext) -> None:
         logger.exception("Could not load expense history months")
         await message.answer(
             "Не удалось получить список месяцев расходов.",
-            reply_markup=main_keyboard(message.from_user.id),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     await state.set_state(ExpenseHistoryForm.month)
@@ -1872,7 +1867,7 @@ async def expense_history_filter_callback(
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
             "Не удалось получить список автомобилей.",
-            reply_markup=main_keyboard(callback.from_user.id),
+            reply_markup=get_main_keyboard(callback.from_user.id),
         )
         return
     await callback.answer("Выберите автомобиль")
@@ -2020,7 +2015,7 @@ async def expense_category_callback(
         await state.clear()
         await callback.message.answer(
             "Не удалось получить список автомобилей.",
-            reply_markup=main_keyboard(callback.from_user.id),
+            reply_markup=get_main_keyboard(callback.from_user.id),
         )
         return
     await state.update_data(expense_category=category, expense_cars=cars)
@@ -2113,13 +2108,13 @@ async def expense_confirmation(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
             "Не удалось сохранить расход в Google Sheets.",
-            reply_markup=main_keyboard(user.id if user else None),
+            reply_markup=get_main_keyboard(user.id if user else 0),
         )
         return
     await state.clear()
     await message.answer(
         f"Расход №{expense_id} сохранён.",
-        reply_markup=main_keyboard(user.id if user else None),
+        reply_markup=get_main_keyboard(message.from_user.id),
     )
 
 
@@ -2136,13 +2131,13 @@ async def start_expense_cancellation(
         logger.exception("Could not load recent expenses")
         await message.answer(
             "Не удалось получить список расходов.",
-            reply_markup=main_keyboard(message.from_user.id),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     if not expenses:
         await message.answer(
             "В листе Затраты пока нет расходов для отмены.",
-            reply_markup=main_keyboard(message.from_user.id),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     await state.set_state(ExpenseCancellationForm.selection)
@@ -2225,7 +2220,7 @@ async def expense_cancel_confirmation(
         await state.clear()
         await message.answer(
             "Не удалось определить ID расхода. Откройте список заново.",
-            reply_markup=main_keyboard(message.from_user.id),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     try:
@@ -2239,19 +2234,19 @@ async def expense_cancel_confirmation(
         await state.clear()
         await message.answer(
             "Не удалось удалить расход из Google Sheets.",
-            reply_markup=main_keyboard(message.from_user.id),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     await state.clear()
     if not deleted:
         await message.answer(
             f"Расход #{expense_id} уже удалён, изменён или не найден.",
-            reply_markup=main_keyboard(message.from_user.id),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     await message.answer(
         f"Расход #{expense_id} успешно отменён и удалён из Затраты.",
-        reply_markup=main_keyboard(message.from_user.id),
+        reply_markup=get_main_keyboard(message.from_user.id),
     )
 
 
@@ -2268,7 +2263,7 @@ async def start_financial_report(message: Message, state: FSMContext) -> None:
         logger.exception("Could not load financial report months")
         await message.answer(
             "Не удалось получить список доступных месяцев.",
-            reply_markup=main_keyboard(message.from_user.id),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     await state.set_state(FinancialReportForm.month)
@@ -2366,7 +2361,7 @@ async def financial_report_type_callback(
             logger.exception("Could not build financial report for %s", month_key)
             await callback.message.answer(
                 "Не удалось сформировать финансовый отчёт.",
-                reply_markup=main_keyboard(callback.from_user.id),
+                reply_markup=get_main_keyboard(callback.from_user.id),
             )
             return
         await _answer_financial_report(
@@ -2388,7 +2383,7 @@ async def financial_report_type_callback(
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
             "Не удалось получить список автомобилей.",
-            reply_markup=main_keyboard(callback.from_user.id),
+            reply_markup=get_main_keyboard(callback.from_user.id),
         )
         return
     if not cars:
@@ -2397,7 +2392,7 @@ async def financial_report_type_callback(
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.message.answer(
             "В листе Автомобили нет автомобилей.",
-            reply_markup=main_keyboard(callback.from_user.id),
+            reply_markup=get_main_keyboard(callback.from_user.id),
         )
         return
     await callback.answer("Отметьте нужные автомобили")
@@ -2517,7 +2512,7 @@ async def financial_car_calculate_callback(
         logger.exception("Could not build car financial report for %s", month_key)
         await callback.message.answer(
             "Не удалось сформировать финансовый отчёт.",
-            reply_markup=main_keyboard(callback.from_user.id),
+            reply_markup=get_main_keyboard(callback.from_user.id),
         )
         return
     await _answer_financial_report(
@@ -2584,11 +2579,17 @@ async def _finish_availability(
     except Exception:
         logger.exception("Could not load available cars")
         await state.clear()
-        await message.answer("Не удалось получить список авто из Google Sheets.", reply_markup=main_keyboard())
+        await message.answer(
+            "Не удалось получить список авто из Google Sheets.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
     await state.clear()
     if not cars:
-        await message.answer("На выбранный период свободных авто нет.", reply_markup=main_keyboard())
+        await message.answer(
+            "На выбранный период свободных авто нет.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
     lines = [
         f"{index}. {_car_label(car)}"
@@ -2596,7 +2597,7 @@ async def _finish_availability(
     ]
     await message.answer(
         "Свободные автомобили:\n\n" + "\n".join(lines),
-        reply_markup=main_keyboard(),
+        reply_markup=get_main_keyboard(message.from_user.id),
     )
 
 
@@ -2632,13 +2633,13 @@ async def start_issuance(message: Message, state: FSMContext) -> None:
         logger.exception("Could not load confirmed bookings for issuance")
         await message.answer(
             "Не удалось получить подтверждённые брони.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     if not bookings:
         await message.answer(
             "Нет подтверждённых броней для выдачи. Сначала создайте новую бронь.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     await state.update_data(booking_mode="issuance", issuance_bookings=bookings)
@@ -2665,14 +2666,14 @@ async def issuance_booking(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
             "Не удалось получить данные автомобиля.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     if not car:
         await state.clear()
         await message.answer(
             "Автомобиль из брони не найден в листе Автомобили.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     prepayment, _ = _parse_int(
@@ -2772,11 +2773,17 @@ async def _finish_booking_dates(
     except Exception:
         logger.exception("Could not load cars for booking")
         await state.clear()
-        await message.answer("Не удалось получить список авто из Google Sheets.", reply_markup=main_keyboard())
+        await message.answer(
+            "Не удалось получить список авто из Google Sheets.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
     if not cars:
         await state.clear()
-        await message.answer("На выбранный период свободных авто нет.", reply_markup=main_keyboard())
+        await message.answer(
+            "На выбранный период свободных авто нет.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
     await state.update_data(end_date=end_date, cars=cars)
     await state.set_state(BookingForm.car)
@@ -2793,13 +2800,13 @@ async def start_occupancy(message: Message, state: FSMContext) -> None:
         logger.exception("Could not load cars for occupancy calendar")
         await message.answer(
             "Не удалось получить список автомобилей.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     if not cars:
         await message.answer(
             "В листе Автомобили нет активных автомобилей.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     await state.update_data(cars=cars)
@@ -2829,7 +2836,7 @@ async def occupancy_car(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
             "Не удалось получить брони из Google Sheets.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
 
@@ -2863,13 +2870,13 @@ async def start_cancellation(message: Message, state: FSMContext) -> None:
         logger.exception("Could not load cars for cancellation")
         await message.answer(
             "Не удалось получить список автомобилей.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     if not cars:
         await message.answer(
             "В листе Автомобили нет активных автомобилей.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     await state.update_data(cars=cars)
@@ -2897,14 +2904,14 @@ async def cancellation_car(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
             "Не удалось получить список активных броней.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     if not bookings:
         await state.clear()
         await message.answer(
             f"Для автомобиля {_car_name(car)} ({_car_plate(car)}) активных броней нет.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     await state.update_data(selected_car=car, cancel_bookings=bookings)
@@ -3020,7 +3027,7 @@ async def cancellation_deposit_callback(
         await callback.answer("Не удалось отменить бронь.", show_alert=True)
         await callback.message.answer(
             "Не удалось обновить бронь в Google Sheets.",
-            reply_markup=main_keyboard(callback.from_user.id),
+            reply_markup=get_main_keyboard(callback.from_user.id),
         )
         return
     await state.clear()
@@ -3031,7 +3038,7 @@ async def cancellation_deposit_callback(
         f"Автомобиль: {_car_name(car)} ({_car_plate(car)})\n"
         f"Статус задатка: {deposit_status}.\n"
         "Даты автомобиля освобождены.",
-        reply_markup=main_keyboard(callback.from_user.id),
+        reply_markup=get_main_keyboard(callback.from_user.id),
     )
 
 
@@ -3471,7 +3478,7 @@ async def booking_confirmation(
             "❌ Ошибка записи в таблицу:\n"
             f"<code>{html.escape(str(e))}</code>",
             parse_mode="HTML",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     await state.clear()
@@ -3482,7 +3489,7 @@ async def booking_confirmation(
             else f"Акт выдачи авто по брони №{booking_id} сохранён. "
             "Автомобиль отмечен как выданный."
         ),
-        reply_markup=main_keyboard(),
+        reply_markup=get_main_keyboard(message.from_user.id),
     )
     if is_reservation:
         booking_deposit = int(data.get("prepayment", 0))
@@ -3532,10 +3539,16 @@ async def list_active_rentals(message: Message, state: FSMContext) -> None:
         rentals = get_active_rentals()
     except Exception:
         logger.exception("Could not load active rentals")
-        await message.answer("Не удалось получить активные аренды.", reply_markup=main_keyboard())
+        await message.answer(
+            "Не удалось получить активные аренды.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
     if not rentals:
-        await message.answer("Активных аренд нет.", reply_markup=main_keyboard())
+        await message.answer(
+            "Активных аренд нет.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
     await message.answer(
         "Активные аренды:\n\n"
@@ -3545,7 +3558,7 @@ async def list_active_rentals(message: Message, state: FSMContext) -> None:
             f"Статус: {_value(item, 'Статус')}"
             for item in rentals
         ),
-        reply_markup=main_keyboard(),
+        reply_markup=get_main_keyboard(message.from_user.id),
     )
 
 
@@ -3557,10 +3570,16 @@ async def start_return(message: Message, state: FSMContext) -> None:
         rentals = get_returnable_rentals()
     except Exception:
         logger.exception("Could not load rentals for return")
-        await message.answer("Не удалось получить список аренд.", reply_markup=main_keyboard())
+        await message.answer(
+            "Не удалось получить список аренд.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
     if not rentals:
-        await message.answer("Нет аренд, которые можно принять обратно.", reply_markup=main_keyboard())
+        await message.answer(
+            "Нет аренд, которые можно принять обратно.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
     await state.update_data(rentals=rentals)
     await state.set_state(ReturnForm.booking)
@@ -3585,7 +3604,10 @@ async def return_booking(message: Message, state: FSMContext) -> None:
     except Exception:
         logger.exception("Could not load car for return")
         await state.clear()
-        await message.answer("Не удалось получить данные автомобиля.", reply_markup=main_keyboard())
+        await message.answer(
+            "Не удалось получить данные автомобиля.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
 
     car_mileage_text = _value(
@@ -4153,19 +4175,22 @@ async def return_confirmation(
         await message.answer(
             "Эта аренда уже была завершена или её статус изменился. "
             "Данные повторно не записаны.",
-            reply_markup=main_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     except Exception:
         logger.exception("Could not save return")
         await state.clear()
-        await message.answer("Не удалось сохранить возврат в Google Sheets.", reply_markup=main_keyboard())
+        await message.answer(
+            "Не удалось сохранить возврат в Google Sheets.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
     await state.clear()
     await message.answer(
         f"Возврат брони №{_booking_id(booking)} оформлен. "
         "Бронь завершена, пробег автомобиля обновлён.",
-        reply_markup=main_keyboard(),
+        reply_markup=get_main_keyboard(message.from_user.id),
     )
     rental_paid = int(data.get("rental_paid", 0))
     additional_paid = int(data.get("total_paid", 0))
@@ -4203,9 +4228,7 @@ async def unknown_message(message: Message) -> None:
     if await ensure_manager(message):
         await message.answer(
             "Выберите действие кнопками меню.",
-            reply_markup=main_keyboard(
-                message.from_user.id if message.from_user else None
-            ),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
 
 
@@ -4272,6 +4295,7 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(list_active_rentals, F.text == "Активные аренды")
     dispatcher.message.register(start_return, F.text == "🏁 Приём авто")
     dispatcher.message.register(start_return, F.text == "Оформить возврат")
+    dispatcher.message.register(start_occupancy, F.text == "🔎 Проверка броней")
     dispatcher.message.register(start_occupancy, F.text == "🔍 Проверка броней")
     dispatcher.message.register(start_cancellation, F.text == "🚫 Отмена брони")
     dispatcher.message.register(start_expense, F.text == "💸 Внести расход")
