@@ -96,6 +96,7 @@ CAR_PROFIT_SUMMARY_HEADERS = [
     "Чистая прибыль авто (RUB)",
 ]
 EXPENSES_LOCK = threading.Lock()
+BOOKINGS_LOCK = threading.Lock()
 MIN_OPERATIONAL_COLUMNS = 35
 TARGET_OPERATIONAL_COLUMNS = 35
 
@@ -344,10 +345,33 @@ def get_available_cars(start_date_str: str, end_date_str: str):
 def _ensure_headers(ws, required_headers: list[str]) -> list[str]:
     _ensure_sheet_width(ws)
     headers = ws.row_values(1)
+    required_columns = max(
+        TARGET_OPERATIONAL_COLUMNS,
+        len(headers),
+        len(required_headers),
+    )
+    if int(getattr(ws, "col_count", 0) or 0) < required_columns:
+        ws.resize(rows=ws.row_count, cols=required_columns)
     for header in required_headers:
         if header not in headers:
             headers.append(header)
             ws.update_cell(1, len(headers), header)
+    return headers
+
+
+def _ensure_header_aliases(
+    ws,
+    required_aliases: list[tuple[str, ...]],
+) -> list[str]:
+    """Ensure one header from each alias group exists without duplicating it."""
+    _ensure_sheet_width(ws)
+    headers = ws.row_values(1)
+    for aliases in required_aliases:
+        if any(alias in headers for alias in aliases):
+            continue
+        header = aliases[0]
+        headers.append(header)
+        ws.update_cell(1, len(headers), header)
     return headers
 
 
@@ -933,7 +957,7 @@ def add_new_booking(
             booking_deposit_value,
             str(booking_deposit_pay_type or "Без оплаты"),
             manager_id_value,
-            "Подтверждена",
+            str(status or "Подтверждена"),
         ]
         headers = bookings_sheet.row_values(1)
         if not headers:
@@ -964,7 +988,7 @@ def add_new_booking(
                 "Telegram ID Менеджера": manager_id_value,
                 "Имя менеджера": str(manager_name or manager_id),
                 "Менеджер": str(manager_name or manager_id),
-                "Статус": "Подтверждена",
+                "Статус": str(status or "Подтверждена"),
                 "Задаток (RUB)": booking_deposit_value,
                 "Залог/Предоплата": booking_deposit_value,
                 "Задаток/Предоплата": booking_deposit_value,
@@ -1001,6 +1025,258 @@ def add_new_booking(
     except Exception:
         traceback.print_exc()
         raise
+
+
+def get_available_cars_for_direct_issuance() -> list[dict]:
+    """Return cars that are free and have no overlapping active booking."""
+    all_cars = ws_cars.get_all_records()
+    busy_ids: set[str] = set()
+    busy_plates: set[str] = set()
+    for booking in ws_bookings.get_all_records():
+        if str(booking.get("Статус", "")).strip() not in {
+            "Подтверждена",
+            "В аренде",
+        }:
+            continue
+        car_id = str(
+            booking.get("ID Авто")
+            or booking.get("Car ID")
+            or ""
+        ).strip()
+        plate = str(
+            booking.get("Госномер")
+            or booking.get("Номер авто")
+            or booking.get("Номер")
+            or ""
+        ).strip()
+        if car_id:
+            busy_ids.add(car_id)
+        if plate:
+            busy_plates.add(plate.casefold())
+
+    available = []
+    for car in all_cars:
+        status = str(car.get("Статус", "")).strip().casefold()
+        if status not in {"активен", "свободен", "active", "free"}:
+            continue
+        car_id = str(
+            car.get("ID")
+            or car.get("ID Авто")
+            or car.get("Car ID")
+            or ""
+        ).strip()
+        plate = str(
+            car.get("Госномер")
+            or car.get("Номер авто")
+            or car.get("Номер")
+            or ""
+        ).strip()
+        if car_id and car_id in busy_ids:
+            continue
+        if plate and plate.casefold() in busy_plates:
+            continue
+        available.append(car)
+    return available
+
+
+def update_car_status(
+    car_id: str = "",
+    plate: str = "",
+    status: str = "Свободен",
+    mileage: int | None = None,
+) -> None:
+    """Update a car's status and, when provided, its current mileage."""
+    values = ws_cars.get_all_values()
+    if not values:
+        raise ValueError("Автомобили sheet is empty")
+    headers = values[0]
+    id_columns = [
+        index
+        for index, header in enumerate(headers)
+        if header in {"ID", "ID Авто", "Car ID"}
+    ]
+    plate_columns = [
+        index
+        for index, header in enumerate(headers)
+        if header in {"Госномер", "Номер авто", "Номер", "Plate"}
+    ]
+    target_row = None
+    for row_number, row in enumerate(values[1:], start=2):
+        row_id = next(
+            (str(row[index]).strip() for index in id_columns if index < len(row)),
+            "",
+        )
+        row_plate = next(
+            (
+                str(row[index]).strip()
+                for index in plate_columns
+                if index < len(row)
+            ),
+            "",
+        )
+        if (car_id and row_id == str(car_id).strip()) or (
+            plate and row_plate == str(plate).strip()
+        ):
+            target_row = row_number
+            break
+    if target_row is None:
+        raise ValueError(
+            f"Car was not found (ID={car_id!r}, plate={plate!r})"
+        )
+
+    status_column = next(
+        (
+            index + 1
+            for index, header in enumerate(headers)
+            if header == "Статус"
+        ),
+        None,
+    )
+    if status_column is None:
+        raise ValueError("Автомобили sheet has no Статус header")
+    ws_cars.update_cell(target_row, status_column, status)
+
+    if mileage is not None:
+        mileage_header = next(
+            (
+                header
+                for header in (
+                    "Текущий пробег (км)",
+                    "Пробег",
+                    "Текущий пробег",
+                    "Пробег (км)",
+                )
+                if header in headers
+            ),
+            None,
+        )
+        if mileage_header:
+            ws_cars.update_cell(
+                target_row,
+                headers.index(mileage_header) + 1,
+                mileage,
+            )
+
+
+def save_direct_issuance(
+    car_id: int,
+    car_name: str,
+    plate: str,
+    client_name: str,
+    phone: str,
+    end_date: str,
+    price: int,
+    pay_type: str,
+    start_mileage: int,
+    deposit: int,
+    deposit_pay_type: str,
+    manager_id: int,
+    manager_name: str,
+    issued_at: str,
+) -> int:
+    """Create an immediately active booking and mark its car as rented."""
+    with BOOKINGS_LOCK:
+        bookings_sheet = _get_bookings_sheet()
+        records = bookings_sheet.get_all_records()
+        booking_ids = []
+        for record in records:
+            try:
+                booking_ids.append(
+                    int(
+                        str(
+                            record.get("ID Брони")
+                            or record.get("ID")
+                            or 0
+                        ).replace(" ", "")
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        booking_id = max(booking_ids, default=100) + 1
+        today = datetime.date.today().isoformat()
+        required_headers = [
+            ("ID Брони", "ID", "Booking ID"),
+            ("ID Авто", "Car ID"),
+            ("Автомобиль", "Авто", "Название авто"),
+            ("Дата начала (ГГГГ-ММ-ДД)", "Дата начала"),
+            ("Дата окончания (ГГГГ-ММ-ДД)", "Дата окончания"),
+            ("ФИО Клиента", "Клиент", "Клиент ФИО"),
+            ("Телефон", "Телефон клиента"),
+            ("Сумма брони (RUB)", "Цена", "Стоимость"),
+            ("Telegram ID Менеджера", "ID Менеджера"),
+            ("Статус",),
+            ("Дата и время выдачи", "Дата выдачи"),
+            ("Пробег при выдаче (км)", "Начальный пробег"),
+            ("Принятая сумма аренды (RUB)", "Фактически оплачено за аренду (RUB)"),
+            ("Залог (RUB)", "Внесенный залог", "Страховой залог"),
+            ("Способ оплаты", "Способ оплаты аренды"),
+            ("Способ оплаты залога", "Способ оплаты страхового залога"),
+            ("Плановое окончание", "Плановая дата и время окончания"),
+        ]
+        headers = _ensure_header_aliases(bookings_sheet, required_headers)
+        values = {
+            "ID Брони": booking_id,
+            "ID": booking_id,
+            "Booking ID": booking_id,
+            "ID Авто": car_id,
+            "Car ID": car_id,
+            "Автомобиль": car_name,
+            "Авто": car_name,
+            "Название авто": car_name,
+            "Дата начала (ГГГГ-ММ-ДД)": today,
+            "Дата начала": today,
+            "Дата окончания (ГГГГ-ММ-ДД)": end_date,
+            "Дата окончания": end_date,
+            "ФИО Клиента": client_name,
+            "Клиент": client_name,
+            "Клиент ФИО": client_name,
+            "Телефон": phone,
+            "Телефон клиента": phone,
+            "Сумма брони (RUB)": price,
+            "Цена": price,
+            "Стоимость": price,
+            "Telegram ID Менеджера": manager_id,
+            "ID Менеджера": manager_id,
+            "Telegram ID Менеджера выдачи": manager_id,
+            "Имя менеджера": manager_name,
+            "Менеджер": manager_name,
+            "Статус": "В аренде",
+            "Дата и время выдачи": issued_at,
+            "Дата выдачи": issued_at,
+            "Пробег при выдаче (км)": start_mileage,
+            "Начальный пробег": start_mileage,
+            "Принятая сумма аренды (RUB)": price,
+            "Фактически оплачено за аренду (RUB)": price,
+            "Способ оплаты": pay_type,
+            "Способ оплаты аренды": pay_type,
+            "Залог (RUB)": deposit,
+            "Внесенный залог": deposit,
+            "Страховой залог": deposit,
+            "Способ оплаты залога": deposit_pay_type,
+            "Способ оплаты страхового залога": deposit_pay_type,
+            "Задаток/Предоплата": 0,
+            "Задаток (RUB)": 0,
+            "Способ оплаты задатка": "Без оплаты",
+            "Плановое окончание": f"{end_date} 23:59",
+            "Плановая дата и время окончания": f"{end_date} 23:59",
+        }
+        bookings_sheet.append_row(
+            [values.get(header, "") for header in headers],
+            value_input_option="USER_ENTERED",
+        )
+        try:
+            update_car_status(
+                car_id=str(car_id),
+                plate=plate,
+                status="В аренде",
+            )
+        except Exception:
+            logger.exception(
+                "Direct issuance created booking %s but car status update failed",
+                booking_id,
+            )
+            raise
+        return booking_id
 
 
 def get_active_rentals():
@@ -1187,7 +1463,7 @@ def get_car_by_plate(plate: str):
 
 
 def save_actual_return(
-    booking_id: int,
+    booking_id: int | str | None,
     car_name: str,
     plate: str,
     client: str,
@@ -1225,33 +1501,42 @@ def save_actual_return(
     phone: str = "",
     issued_at: str = "",
     act_created_at: str = "",
+    allow_unlinked: bool = False,
+    car_id: str = "",
+    idempotency_key: str = "",
 ):
     returned_at = returned_at or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     total_penalties = over_mileage_fee + late_fee + wash_fee + extra_fee
     booking_row = None
     current_status = ""
-    for row_number, booking in enumerate(
-        ws_bookings.get_all_records(),
-        start=2,
-    ):
-        current_id = (
-            booking.get("ID Брони")
-            or booking.get("ID")
-            or booking.get("Booking ID")
-            or ""
-        )
-        if str(current_id).strip() == str(booking_id).strip():
-            booking_row = row_number
-            current_status = str(booking.get("Статус", "")).strip()
-            break
-    if booking_row is None:
-        raise ValueError(f"Booking {booking_id} was not found")
+    if not allow_unlinked:
+        for row_number, booking in enumerate(
+            ws_bookings.get_all_records(),
+            start=2,
+        ):
+            current_id = (
+                booking.get("ID Брони")
+                or booking.get("ID")
+                or booking.get("Booking ID")
+                or ""
+            )
+            if str(current_id).strip() == str(booking_id).strip():
+                booking_row = row_number
+                current_status = str(booking.get("Статус", "")).strip()
+                break
+        if booking_row is None:
+            raise ValueError(f"Booking {booking_id} was not found")
     returns_records = ws_returns.get_all_records()
+    return_key = str(idempotency_key or booking_id or "").strip()
     return_already_saved = any(
-        str(record.get("ID Брони", "")).strip()
-        == str(booking_id).strip()
+        str(
+            record.get("ID внепланового возврата")
+            or record.get("ID Брони")
+            or ""
+        ).strip()
+        == return_key
         for record in returns_records
-    )
+    ) if return_key else False
     acceptance_records = ws_acceptance_acts.get_all_records()
     acceptance_already_saved = any(
         str(record.get("ID Брони", "")).strip()
@@ -1259,12 +1544,14 @@ def save_actual_return(
         for record in acceptance_records
     )
     if (
+        not allow_unlinked
+        and
         current_status == "Завершена"
         and return_already_saved
         and acceptance_already_saved
     ):
         raise ValueError(f"Booking {booking_id} was already returned")
-    if current_status not in {"В аренде", "Завершена"}:
+    if not allow_unlinked and current_status not in {"В аренде", "Завершена"}:
         raise ValueError(
             f"Booking {booking_id} cannot be returned from status {current_status}"
         )
@@ -1273,7 +1560,8 @@ def save_actual_return(
     values = {
         "ID Записи": new_id,
         "ID": new_id,
-        "ID Брони": booking_id,
+        "ID Брони": "" if allow_unlinked else booking_id,
+        "ID внепланового возврата": return_key if allow_unlinked else "",
         "Автомобиль": car_name,
         "Госномер": plate,
         "Клиент": client,
@@ -1330,6 +1618,7 @@ def save_actual_return(
             [
             "ID Записи",
             "ID Брони",
+            "ID внепланового возврата",
             "Автомобиль",
             "Госномер",
             "Клиент",
@@ -1381,51 +1670,53 @@ def save_actual_return(
             ],
         )
     booking_updates = {
-            "Дата и время приёма": returned_at,
-            "Пробег при возврате (км)": end_mileage,
-            "Пробег за аренду (км)": delta_mileage,
-            "Стоимость аренды (RUB)": rental_total,
-            "Задаток/Предоплата": prepayment,
-            "Способ оплаты задатка": prepayment_pay_type,
-            "Остаток к оплате аренды (RUB)": rental_balance,
-            "Сумма аренды к доплате (RUB)": rental_balance,
-            "Фактически оплачено за аренду (RUB)": rental_paid,
-            "Способ оплаты аренды": rental_pay_type,
-            "Осталось оплатить за аренду (RUB)": rental_outstanding,
-            "Переплата задатка к возврату (RUB)": prepayment_overpayment,
-            "Лимит пробега (км)": mileage_limit,
-            "Перепробег (км)": over_mileage,
-            "Штраф за перепробег (RUB)": over_mileage_fee,
-            "Просрочка (ч)": late_hours,
-            "Штраф за просрочку (RUB)": late_fee,
-            "Состояние чистоты": cleanliness,
-            "Мойка (RUB)": wash_fee,
-            "Доп. штрафы/удержания (RUB)": extra_fee,
-            "Итого удержаний (RUB)": total_penalties,
-            "Итого штрафов (RUB)": total_penalties,
-            "Внесенный залог": deposit,
-            "Страховой залог": deposit,
-            "Внесенный страховой залог (RUB)": deposit,
-            "Способ оплаты страхового залога": deposit_pay_type,
-            "Залог к возврату (RUB)": max(deposit_balance, 0),
-            "Страховой залог к возврату (RUB)": max(deposit_balance, 0),
-            "Доплата по залогу (RUB)": max(-deposit_balance, 0),
-            "Доплата за штрафы (RUB)": max(-deposit_balance, 0),
-            "Полученная доплата (RUB)": total_paid,
-            "Способ оплаты доплаты": pay_type,
-            "Итоговый расчёт (RUB)": deposit_balance,
-            "Примечания / Состояние": notes,
+        "Дата и время приёма": returned_at,
+        "Пробег при возврате (км)": end_mileage,
+        "Пробег за аренду (км)": delta_mileage,
+        "Стоимость аренды (RUB)": rental_total,
+        "Задаток/Предоплата": prepayment,
+        "Способ оплаты задатка": prepayment_pay_type,
+        "Остаток к оплате аренды (RUB)": rental_balance,
+        "Сумма аренды к доплате (RUB)": rental_balance,
+        "Фактически оплачено за аренду (RUB)": rental_paid,
+        "Способ оплаты аренды": rental_pay_type,
+        "Осталось оплатить за аренду (RUB)": rental_outstanding,
+        "Переплата задатка к возврату (RUB)": prepayment_overpayment,
+        "Лимит пробега (км)": mileage_limit,
+        "Перепробег (км)": over_mileage,
+        "Штраф за перепробег (RUB)": over_mileage_fee,
+        "Просрочка (ч)": late_hours,
+        "Штраф за просрочку (RUB)": late_fee,
+        "Состояние чистоты": cleanliness,
+        "Мойка (RUB)": wash_fee,
+        "Доп. штрафы/удержания (RUB)": extra_fee,
+        "Итого удержаний (RUB)": total_penalties,
+        "Итого штрафов (RUB)": total_penalties,
+        "Внесенный залог": deposit,
+        "Страховой залог": deposit,
+        "Внесенный страховой залог (RUB)": deposit,
+        "Способ оплаты страхового залога": deposit_pay_type,
+        "Залог к возврату (RUB)": max(deposit_balance, 0),
+        "Страховой залог к возврату (RUB)": max(deposit_balance, 0),
+        "Доплата по залогу (RUB)": max(-deposit_balance, 0),
+        "Доплата за штрафы (RUB)": max(-deposit_balance, 0),
+        "Полученная доплата (RUB)": total_paid,
+        "Способ оплаты доплаты": pay_type,
+        "Итоговый расчёт (RUB)": deposit_balance,
+        "Примечания / Состояние": notes,
     }
-    booking_headers = _ensure_headers(
-        ws_bookings,
-        [*booking_updates, "Статус"],
-    )
-    for header, value in booking_updates.items():
-        ws_bookings.update_cell(
-            booking_row,
-            booking_headers.index(header) + 1,
-            value,
+    booking_headers = []
+    if booking_row is not None:
+        booking_headers = _ensure_headers(
+            ws_bookings,
+            [*booking_updates, "Статус"],
         )
+        for header, value in booking_updates.items():
+            ws_bookings.update_cell(
+                booking_row,
+                booking_headers.index(header) + 1,
+                value,
+            )
 
     acceptance_id = len(acceptance_records) + 1
     acceptance_values = {
@@ -1470,21 +1761,16 @@ def save_actual_return(
             ACCEPTANCE_ACT_HEADERS,
         )
 
-    ws_bookings.update_cell(
-        booking_row,
-        booking_headers.index("Статус") + 1,
-        "Завершена",
+    update_car_status(
+        car_id=car_id,
+        plate=plate,
+        status="Свободен",
+        mileage=end_mileage,
     )
 
-    car_cell = ws_cars.find(plate)
-    if car_cell:
-        car_headers = ws_cars.row_values(1)
-        mileage_headers = (
-            "Текущий пробег (км)",
-            "Пробег",
-            "Текущий пробег",
-            "Пробег (км)",
+    if booking_row is not None:
+        ws_bookings.update_cell(
+            booking_row,
+            booking_headers.index("Статус") + 1,
+            "Завершена",
         )
-        mileage_header = next((header for header in mileage_headers if header in car_headers), None)
-        if mileage_header:
-            ws_cars.update_cell(car_cell.row, car_headers.index(mileage_header) + 1, end_mileage)

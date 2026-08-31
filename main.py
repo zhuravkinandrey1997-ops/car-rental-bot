@@ -46,6 +46,7 @@ from sheets_client import (
     get_active_cars,
     get_all_cars,
     get_available_cars,
+    get_available_cars_for_direct_issuance,
     get_car_by_id,
     get_car_by_plate,
     get_cancellable_bookings_for_car,
@@ -62,6 +63,7 @@ from sheets_client import (
     issue_booking,
     mark_notification_sent,
     save_actual_return,
+    save_direct_issuance,
     safe_int,
 )
 
@@ -99,9 +101,11 @@ class AvailabilityForm(StatesGroup):
 
 
 class BookingForm(StatesGroup):
+    issuance_mode = State()
     issuance_booking = State()
     start_date = State()
     end_date = State()
+    direct_end_date = State()
     car = State()
     client_name = State()
     phone = State()
@@ -129,6 +133,7 @@ class CancellationForm(StatesGroup):
 class ReturnForm(StatesGroup):
     booking = State()
     end_mileage = State()
+    direct_deposit = State()
     cleanliness = State()
     wash_fee = State()
     extra_fee = State()
@@ -406,6 +411,35 @@ def confirmation_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
+    )
+
+
+def issuance_mode_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📋 По существующей брони")],
+            [KeyboardButton(text="⚡ Срочная выдача (без брони)")],
+            [KeyboardButton(text="Отмена")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def direct_deposit_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Вернуть залог",
+                    callback_data="direct_deposit:return",
+                ),
+                InlineKeyboardButton(
+                    text="⚠️ Удержать залог",
+                    callback_data="direct_deposit:retain",
+                ),
+            ]
+        ]
     )
 
 
@@ -1368,7 +1402,7 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
     late_fee = round(daily_rate * 0.10 * late_hours)
 
     rental_days = max(1, (end_date - start_date).days + 1)
-    rental_total = daily_rate * rental_days
+    rental_total = 0 if data.get("direct_return") else daily_rate * rental_days
     prepayment, _ = _parse_int(
         _value(
             booking,
@@ -1393,6 +1427,14 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
     deposit = int(data.get("deposit", 0))
     total_penalties = late_fee + over_mileage_fee + wash_fee + extra_fee
     deposit_balance = deposit - total_penalties
+    if data.get("direct_return"):
+        direct_deposit_status = data.get("direct_deposit_status")
+        total_penalties = deposit if direct_deposit_status == "retained" else 0
+        deposit_balance = 0 if direct_deposit_status == "retained" else deposit
+        late_fee = 0
+        over_mileage_fee = 0
+        late_hours = 0
+        over_mileage = 0
 
     return {
         "daily_rate": daily_rate,
@@ -2818,6 +2860,55 @@ async def start_issuance(message: Message, state: FSMContext) -> None:
     if not await ensure_manager(message):
         return
     await state.clear()
+    await state.set_state(BookingForm.issuance_mode)
+    await message.answer(
+        "🚗 Выдача авто.\n\nВыберите способ оформления:",
+        reply_markup=issuance_mode_keyboard(),
+    )
+
+
+async def issuance_mode_selection(message: Message, state: FSMContext) -> None:
+    choice = (message.text or "").strip()
+    if choice == "⚡ Срочная выдача (без брони)":
+        try:
+            cars = get_available_cars_for_direct_issuance()
+        except Exception:
+            logger.exception("Could not load cars for direct issuance")
+            await state.clear()
+            await message.answer(
+                "Не удалось получить список свободных автомобилей.",
+                reply_markup=get_main_keyboard(message.from_user.id),
+            )
+            return
+        if not cars:
+            await state.clear()
+            await message.answer(
+                "Свободных автомобилей для срочной выдачи нет.",
+                reply_markup=get_main_keyboard(message.from_user.id),
+            )
+            return
+        await state.update_data(
+            booking_mode="direct_issuance",
+            cars=cars,
+            direct_issuance_cars=cars,
+        )
+        await state.set_state(BookingForm.car)
+        await message.answer(
+            "⚡ Срочная выдача без брони.\n\n"
+            "Выберите свободный автомобиль:",
+            reply_markup=car_choice_keyboard(cars),
+        )
+        return
+    if choice == "📋 По существующей брони":
+        await _start_existing_issuance(message, state)
+        return
+    await message.answer("Выберите один из вариантов кнопкой ниже.")
+
+
+async def _start_existing_issuance(
+    message: Message,
+    state: FSMContext,
+) -> None:
     try:
         bookings = get_confirmed_bookings()
     except Exception:
@@ -3478,12 +3569,35 @@ async def booking_phone(message: Message, state: FSMContext) -> None:
         await message.answer("Проверьте номер телефона и попробуйте снова.")
         return
     await state.update_data(phone=value)
-    await state.set_state(BookingForm.price)
     data = await state.get_data()
+    if data.get("booking_mode") == "direct_issuance":
+        await state.set_state(BookingForm.direct_end_date)
+        await message.answer(
+            "Введите дату окончания аренды в формате ГГГГ-ММ-ДД:"
+        )
+        return
+    await state.set_state(BookingForm.price)
     if data.get("booking_mode") == "reservation":
         await message.answer("Введите итоговую стоимость аренды в RUB:")
     else:
         await message.answer("Введите принятую сумму аренды в RUB:")
+
+
+async def direct_end_date(message: Message, state: FSMContext) -> None:
+    value = (message.text or "").strip()
+    if not _parse_date(value):
+        await message.answer("Неверный формат. Пример: 2026-09-20.")
+        return
+    selected_date = datetime.date.fromisoformat(value)
+    if selected_date < datetime.date.today():
+        await message.answer("Дата окончания не может быть в прошлом.")
+        return
+    await state.update_data(
+        start_date=datetime.date.today().isoformat(),
+        end_date=value,
+    )
+    await state.set_state(BookingForm.price)
+    await message.answer("Введите фактическую сумму аренды в RUB:")
 
 
 async def booking_price(message: Message, state: FSMContext) -> None:
@@ -3503,6 +3617,14 @@ async def booking_price(message: Message, state: FSMContext) -> None:
             "Введите задаток (предоплату за бронь) в RUB "
             "(0, если без задатка):"
         )
+        return
+    if data.get("booking_mode") == "direct_issuance":
+        await state.set_state(BookingForm.pay_type)
+        payment_message = await message.answer(
+            "Выберите способ оплаты аренды:",
+            reply_markup=payment_methods_keyboard("direct_rental"),
+        )
+        await state.update_data(payment_message_id=payment_message.message_id)
         return
     await state.set_state(BookingForm.start_mileage)
     await message.answer("Введите начальный пробег автомобиля в км:")
@@ -3581,12 +3703,19 @@ async def _send_booking_confirmation(message: Message, state: FSMContext) -> Non
     data = await state.get_data()
     issued_at = data.get("issued_at") or _timestamp()
     await state.set_state(BookingForm.confirmation)
+    direct_payment_text = ""
+    if data.get("booking_mode") == "direct_issuance":
+        direct_payment_text = (
+            f"Сумма аренды: {_format_number(data.get('price', 0))} RUB\n"
+            f"Способ оплаты аренды: {data.get('pay_type', 'Без оплаты')}\n"
+        )
     await message.answer(
         "Проверьте акт выдачи авто:\n\n"
         f"Авто: {data['car_name']}\n"
         f"Период: {data['start_date']} — {data['end_date']}\n"
         f"Клиент: {data['client_name']}\n"
         f"Телефон: {data['phone']}\n"
+        f"{direct_payment_text}"
         f"Задаток (предоплата): {int(data.get('prepayment', 0)):,} RUB\n"
         f"Начальный пробег: {int(data['start_mileage']):,} км\n"
         f"Страховой залог: {int(data['deposit']):,} RUB\n"
@@ -3629,6 +3758,7 @@ async def booking_confirmation(
     manager_id = message.from_user.id if message.from_user else 0
     manager_name = _manager_display_name(message.from_user)
     is_reservation = data.get("booking_mode") == "reservation"
+    is_direct_issuance = data.get("booking_mode") == "direct_issuance"
     try:
         if is_reservation:
             booking_id = add_new_booking(
@@ -3647,6 +3777,26 @@ async def booking_confirmation(
                     "Без оплаты",
                 ),
                 manager_name=manager_name,
+            )
+        elif is_direct_issuance:
+            booking_id = save_direct_issuance(
+                car_id=int(data["car_id"]),
+                car_name=data["car_name"],
+                plate=_car_plate(data.get("car", {})),
+                client_name=data["client_name"],
+                phone=data["phone"],
+                end_date=data["end_date"],
+                price=int(data["price"]),
+                pay_type=data.get("pay_type", "Без оплаты"),
+                start_mileage=int(data["start_mileage"]),
+                deposit=int(data["deposit"]),
+                deposit_pay_type=data.get(
+                    "deposit_pay_type",
+                    "Без оплаты",
+                ),
+                manager_id=manager_id,
+                manager_name=manager_name,
+                issued_at=_timestamp(),
             )
         else:
             booking_id = int(_booking_id(data["booking"]))
@@ -3677,6 +3827,11 @@ async def booking_confirmation(
         (
             f"Бронь №{booking_id} сохранена."
             if is_reservation
+            else (
+                f"Срочная выдача №{booking_id} сохранена. "
+                "Автомобиль отмечен как выданный."
+            )
+            if is_direct_issuance
             else f"Акт выдачи авто по брони №{booking_id} сохранён. "
             "Автомобиль отмечен как выданный."
         ),
@@ -3710,9 +3865,14 @@ async def booking_confirmation(
         )
         issuance_notification = (
             "🚗 <b>Автомобиль выдан клиенту!</b>\n"
+            f"🧾 Основание: "
+            f"<b>{'срочная выдача без брони' if is_direct_issuance else f'бронь №{_html_value(booking_id)}'}</b>\n"
             f"🚘 Авто: <b>{_html_value(_car_name(car))} "
             f"({_html_value(_car_plate(car))})</b>\n"
             f"👤 Клиент: <b>{_html_value(data.get('client_name'))}</b>\n"
+            f"💰 Аренда: <b>{_format_number(data.get('price', 0))} ₽</b> "
+            f"({_html_value(data.get('pay_type'), 'Без оплаты')})\n"
+            f"🛡 Залог: <b>{_format_number(data.get('deposit', 0))} ₽</b>\n"
             f"📍 Пробег на выезде: <b>"
             f"{_html_value(data.get('start_mileage'))} км</b>\n"
             f"⛽ Уровень топлива: <b>{_html_value(fuel_level)}</b>\n"
@@ -3758,126 +3918,209 @@ async def start_return(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     try:
-        rentals = get_returnable_rentals()
+        cars = get_all_cars()
     except Exception:
-        logger.exception("Could not load rentals for return")
+        logger.exception("Could not load cars for return")
         await message.answer(
-            "Не удалось получить список аренд.",
+            "Не удалось получить список автомобилей.",
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    if not rentals:
+    if not cars:
         await message.answer(
-            "Нет аренд, которые можно принять обратно.",
+            "В листе Автомобили нет записей для приёма.",
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    await state.update_data(rentals=rentals)
+    await state.update_data(return_cars=cars)
     await state.set_state(ReturnForm.booking)
     await message.answer(
-        "🏁 Приём авто.\n\nВыберите аренду для оформления:",
-        reply_markup=rental_choice_keyboard(rentals),
+        "🏁 Приём авто.\n\nВыберите автомобиль из автопарка:",
+        reply_markup=car_choice_keyboard(cars),
     )
 
 
-async def return_booking(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    rentals = data.get("rentals", [])
-    try:
-        choice = int((message.text or "").split(".", 1)[0])
-        booking = rentals[choice - 1]
-    except (ValueError, IndexError):
-        await message.answer("Выберите аренду кнопкой из списка.")
-        return
-
-    try:
-        car = get_car_by_id(_car_id(booking))
-    except Exception:
-        logger.exception("Could not load car for return")
-        await state.clear()
-        await message.answer(
-            "Не удалось получить данные автомобиля.",
-            reply_markup=get_main_keyboard(message.from_user.id),
+async def _prepare_return(
+    message: Message,
+    state: FSMContext,
+    car: dict,
+    booking: dict | None,
+) -> None:
+    direct_return = booking is None
+    if direct_return:
+        current_mileage = _value(
+            car,
+            "Текущий пробег (км)",
+            "Пробег",
+            "Текущий пробег",
+            "Пробег (км)",
+            default="0",
         )
-        return
-
-    car_mileage_text = _value(
-        car,
-        "Текущий пробег (км)",
-        "Пробег",
-        "Текущий пробег",
-        "Пробег (км)",
-        "Пробег начальный",
-        default="0",
-    )
-    start_mileage_text = _value(
-        booking,
-        "Пробег при выдаче (км)",
-        default=car_mileage_text,
-    )
-    start_mileage, _ = _parse_int(start_mileage_text, "начальный пробег", minimum=0)
-    if start_mileage is None:
-        start_mileage = 0
-    base_price, _ = _parse_int(
-        _value(
-            booking,
-            "Сумма брони (RUB)",
-            "Принятая сумма аренды (RUB)",
-            "Цена",
-            "Стоимость",
-            "Итоговая стоимость",
-            default="0",
-        ),
-        "базовая стоимость",
-        minimum=0,
-    )
-    if base_price is None:
+        start_mileage = safe_int(current_mileage)
+        deposit = _car_base_deposit(car) or 0
+        returned_at = _timestamp()
+        return_key = (
+            "DIRECT-"
+            + re.sub(
+                r"[^A-Za-z0-9_-]",
+                "-",
+                _car_id(car) or _car_plate(car) or "CAR",
+            )
+            + "-"
+            + re.sub(r"[^0-9]", "", returned_at)
+        )
+        booking = {
+            "ID Брони": return_key,
+            "ID Авто": _car_id(car),
+            "Автомобиль": _car_name(car),
+            "Госномер": _car_plate(car),
+            "Дата начала": returned_at[:10],
+            "Дата окончания": returned_at[:10],
+            "ФИО Клиента": "Без брони",
+            "Телефон": "—",
+            "Статус": "В аренде",
+            "Залог (RUB)": deposit,
+            "Страховой залог": deposit,
+            "Пробег при выдаче (км)": start_mileage,
+        }
         base_price = 0
-    deposit, _ = _parse_int(
-        _value(
-            booking,
-            "Страховой залог",
-            "Страховой залог (RUB)",
-            "Внесенный страховой залог (RUB)",
-            "Внесенный залог",
-            "Залог (RUB)",
-            "Залог",
-            default="0",
-        ),
-        "залог",
-        minimum=0,
-    )
-    deposit_pay_type = _value(
-        booking,
-        "Способ оплаты страхового залога",
-        "Способ оплаты залога",
-        "Способ оплаты",
-        default="Без оплаты",
-    )
-    prepayment_pay_type = _value(
-        booking,
-        "Способ оплаты задатка",
-        "Тип оплаты залога",
-        default="Без оплаты",
-    )
+        prepayment = 0
+        deposit_pay_type = "Без оплаты"
+    else:
+        try:
+            current_mileage = _value(
+                car,
+                "Текущий пробег (км)",
+                "Пробег",
+                "Текущий пробег",
+                "Пробег (км)",
+                "Пробег начальный",
+                default="0",
+            )
+            start_mileage_text = _value(
+                booking,
+                "Пробег при выдаче (км)",
+                default=current_mileage,
+            )
+            start_mileage = safe_int(start_mileage_text)
+            base_price = safe_int(
+                _value(
+                    booking,
+                    "Сумма брони (RUB)",
+                    "Принятая сумма аренды (RUB)",
+                    "Цена",
+                    "Стоимость",
+                    "Итоговая стоимость",
+                    default="0",
+                )
+            )
+            deposit = safe_int(
+                _value(
+                    booking,
+                    "Страховой залог",
+                    "Страховой залог (RUB)",
+                    "Внесенный страховой залог (RUB)",
+                    "Внесенный залог",
+                    "Залог (RUB)",
+                    "Залог",
+                    default="0",
+                )
+            )
+            deposit_pay_type = _value(
+                booking,
+                "Способ оплаты страхового залога",
+                "Способ оплаты залога",
+                "Способ оплаты",
+                default="Без оплаты",
+            )
+            prepayment = safe_int(
+                _value(
+                    booking,
+                    "Задаток/Предоплата",
+                    "Залог/Предоплата",
+                    "Предоплата",
+                    default="0",
+                )
+            )
+        except Exception:
+            logger.exception("Could not prepare booking for return")
+            await state.clear()
+            await message.answer(
+                "Не удалось получить данные аренды.",
+                reply_markup=get_main_keyboard(message.from_user.id),
+            )
+            return
+        returned_at = _timestamp()
 
     await state.update_data(
         booking=booking,
         car=car,
         start_mileage=start_mileage,
         base_price=base_price,
-        deposit=deposit or 0,
+        deposit=deposit,
         deposit_pay_type=deposit_pay_type,
-        prepayment_pay_type=prepayment_pay_type,
-        returned_at=_timestamp(),
+        prepayment=prepayment,
+        prepayment_pay_type=_value(
+            booking,
+            "Способ оплаты задатка",
+            "Тип оплаты залога",
+            default="Без оплаты",
+        ),
+        returned_at=returned_at,
         wash_fee=0,
+        extra_fee=0,
+        direct_return=direct_return,
+        direct_return_id=booking.get("ID Брони") if direct_return else None,
     )
     await state.set_state(ReturnForm.end_mileage)
-    await message.answer(
-        f"Возврат брони №{_booking_id(booking)}.\n"
-        f"Начальный пробег: {start_mileage} км.\n"
-        "Введите конечный пробег в км:",
-        reply_markup=ReplyKeyboardRemove(),
+    if direct_return:
+        prompt = (
+            f"Автомобиль: {_car_name(car)} ({_car_plate(car)}).\n"
+            f"Начальный пробег: {start_mileage} км.\n"
+            f"Базовый залог: {deposit} RUB.\n\n"
+            "Введите конечный пробег в км:"
+        )
+    else:
+        prompt = (
+            f"Возврат брони №{_booking_id(booking)}.\n"
+            f"Начальный пробег: {start_mileage} км.\n"
+            "Введите конечный пробег в км:"
+        )
+    await message.answer(prompt, reply_markup=ReplyKeyboardRemove())
+
+
+async def return_booking(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    cars = data.get("return_cars", [])
+    try:
+        choice = int((message.text or "").split(".", 1)[0])
+        car = cars[choice - 1]
+    except (ValueError, IndexError):
+        await message.answer("Выберите автомобиль кнопкой из списка.")
+        return
+
+    try:
+        active_bookings = [
+            booking
+            for booking in get_active_bookings_for_car(
+                _car_id(car),
+                _car_plate(car),
+            )
+            if str(booking.get("Статус", "")).strip() == "В аренде"
+        ]
+    except Exception:
+        logger.exception("Could not load booking for selected return car")
+        await state.clear()
+        await message.answer(
+            "Не удалось проверить активную аренду автомобиля.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
+        return
+    await _prepare_return(
+        message,
+        state,
+        car,
+        active_bookings[0] if active_bookings else None,
     )
 
 
@@ -3891,6 +4134,13 @@ async def return_end_mileage(message: Message, state: FSMContext) -> None:
         await message.answer("Конечный пробег не может быть меньше начального.")
         return
     await state.update_data(end_mileage=end_mileage)
+    if data.get("direct_return"):
+        await state.set_state(ReturnForm.rental_paid)
+        await message.answer(
+            "Введите фактически полученную оплату за аренду в RUB "
+            "(0, если оплаты не было):"
+        )
+        return
     await state.set_state(ReturnForm.cleanliness)
     cleanliness_message = await message.answer(
         "Укажите состояние чистоты автомобиля:",
@@ -4027,6 +4277,16 @@ async def _continue_return_after_rental_payment(
 ) -> None:
     data = await state.get_data()
     calculation = _return_calculation(data)
+    if data.get("direct_return"):
+        await state.set_state(ReturnForm.direct_deposit)
+        deposit_message = await message.answer(
+            "Выберите, что сделать со страховым залогом:",
+            reply_markup=direct_deposit_keyboard(),
+        )
+        await state.update_data(
+            direct_deposit_message_id=deposit_message.message_id,
+        )
+        return
     difference = int(calculation["deposit_balance"])
     if difference < 0:
         required_payment = abs(difference)
@@ -4043,6 +4303,51 @@ async def _continue_return_after_rental_payment(
     await message.answer(
         _deposit_settlement_text(calculation)
         + "\n\nВведите примечание или отправьте «нет»:"
+    )
+
+
+async def direct_deposit_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.data or not callback.message:
+        await callback.answer()
+        return
+    if await state.get_state() != ReturnForm.direct_deposit.state:
+        await callback.answer(
+            "Этот выбор устарел. Продолжите текущую операцию.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if getattr(callback.message, "message_id", None) != data.get(
+        "direct_deposit_message_id"
+    ):
+        await callback.answer(
+            "Этот выбор оплаты устарел. Используйте последние кнопки.",
+            show_alert=True,
+        )
+        return
+    decision = callback.data.removeprefix("direct_deposit:")
+    if decision not in {"return", "retain"}:
+        await callback.answer("Этот вариант недоступен.", show_alert=True)
+        return
+    await state.update_data(
+        direct_deposit_status=(
+            "returned" if decision == "return" else "retained"
+        ),
+        total_paid=0,
+        pay_type="Без оплаты",
+    )
+    await callback.answer(
+        "Залог будет возвращён."
+        if decision == "return"
+        else "Залог будет удержан."
+    )
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.set_state(ReturnForm.notes)
+    await callback.message.answer(
+        "Введите комментарий к внеплановому возврату или отправьте «нет»:"
     )
 
 
@@ -4115,6 +4420,10 @@ async def payment_method_callback(callback: CallbackQuery, state: FSMContext) ->
         and current_state == BookingForm.deposit_pay_type.state
         and data.get("booking_mode") == "issuance"
     ) or (
+        flow == "direct_rental"
+        and current_state == BookingForm.pay_type.state
+        and data.get("booking_mode") == "direct_issuance"
+    ) or (
         flow == "return_rental"
         and current_state == ReturnForm.rental_pay_type.state
     ) or (
@@ -4144,6 +4453,13 @@ async def payment_method_callback(callback: CallbackQuery, state: FSMContext) ->
     if flow == "issuance_deposit":
         await state.update_data(deposit_pay_type=pay_type)
         await _send_booking_confirmation(callback.message, state)
+        return
+    if flow == "direct_rental":
+        await state.update_data(pay_type=pay_type)
+        await state.set_state(BookingForm.start_mileage)
+        await callback.message.answer(
+            "Введите пробег автомобиля на момент выдачи в км:"
+        )
         return
     if flow == "return_rental":
         await state.update_data(rental_pay_type=pay_type)
@@ -4277,9 +4593,15 @@ async def return_confirmation(
     car = data["car"]
     manager_id = message.from_user.id if message.from_user else 0
     calculation = _return_calculation(data)
+    direct_return = bool(data.get("direct_return"))
+    return_id = (
+        _booking_id(booking)
+        if direct_return
+        else int(_booking_id(booking))
+    )
     try:
         save_actual_return(
-            booking_id=int(_booking_id(booking)),
+            booking_id=None if direct_return else return_id,
             car_name=_value(
                 booking,
                 "Автомобиль",
@@ -4355,6 +4677,9 @@ async def return_confirmation(
                 default="—",
             ),
             act_created_at=_timestamp(),
+            allow_unlinked=direct_return,
+            car_id=_car_id(car),
+            idempotency_key=return_id if direct_return else "",
         )
     except ValueError:
         logger.warning(
@@ -4379,8 +4704,15 @@ async def return_confirmation(
         return
     await state.clear()
     await message.answer(
-        f"Возврат брони №{_booking_id(booking)} оформлен. "
-        "Бронь завершена, пробег автомобиля обновлён.",
+        (
+            f"Внеплановый возврат автомобиля {_car_name(car)} оформлен. "
+            "Автомобиль освобождён, пробег обновлён."
+            if direct_return
+            else (
+                f"Возврат брони №{_booking_id(booking)} оформлен. "
+                "Бронь завершена, автомобиль освобождён, пробег обновлён."
+            )
+        ),
         reply_markup=get_main_keyboard(message.from_user.id),
     )
     rental_paid = int(data.get("rental_paid", 0))
@@ -4432,6 +4764,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(calendar_callback, F.data.startswith("calendar:"))
     dispatcher.callback_query.register(payment_method_callback, F.data.startswith("payment:"))
     dispatcher.callback_query.register(cleanliness_callback, F.data.startswith("cleanliness:"))
+    dispatcher.callback_query.register(
+        direct_deposit_callback,
+        F.data.startswith("direct_deposit:"),
+    )
     dispatcher.callback_query.register(
         expense_category_callback,
         F.data.startswith("expense_category:"),
@@ -4512,6 +4848,11 @@ def create_dispatcher() -> Dispatcher:
 
     dispatcher.message.register(booking_start_date, BookingForm.start_date)
     dispatcher.message.register(booking_end_date, BookingForm.end_date)
+    dispatcher.message.register(
+        issuance_mode_selection,
+        BookingForm.issuance_mode,
+    )
+    dispatcher.message.register(direct_end_date, BookingForm.direct_end_date)
     dispatcher.message.register(
         issuance_booking,
         BookingForm.issuance_booking,
