@@ -95,6 +95,8 @@ CAR_PROFIT_SUMMARY_HEADERS = [
     "Чистая прибыль авто (RUB)",
 ]
 EXPENSES_LOCK = threading.Lock()
+MIN_OPERATIONAL_COLUMNS = 35
+TARGET_OPERATIONAL_COLUMNS = 40
 
 if SERVICE_ACCOUNT_JSON:
     gc = gspread.service_account_from_dict(json.loads(SERVICE_ACCOUNT_JSON))
@@ -140,27 +142,37 @@ def migrate_sheet_titles(spreadsheet) -> list[tuple[str, str]]:
 
 migrate_sheet_titles(sh)
 
+
+def _ensure_sheet_width(ws) -> None:
+    """Keep operational worksheets wide enough for optional legacy fields."""
+    current_columns = int(getattr(ws, "col_count", 0) or 0)
+    if current_columns < MIN_OPERATIONAL_COLUMNS:
+        ws.resize(cols=TARGET_OPERATIONAL_COLUMNS)
+
+
 ws_cars = sh.worksheet("Автомобили")
+_ensure_sheet_width(ws_cars)
 
 
 def _get_bookings_sheet():
     """Find the bookings worksheet under either supported title."""
     try:
-        return sh.worksheet("Бронирования")
+        worksheet = sh.worksheet("Бронирования")
     except gspread.exceptions.WorksheetNotFound:
         try:
-            return sh.worksheet("Bookings")
+            worksheet = sh.worksheet("Bookings")
         except gspread.exceptions.WorksheetNotFound:
             worksheet = sh.add_worksheet(
                 title="Бронирования",
                 rows=1000,
-                cols=len(BOOKING_HEADERS),
+                cols=TARGET_OPERATIONAL_COLUMNS,
             )
             worksheet.append_row(
                 BOOKING_HEADERS,
                 value_input_option="USER_ENTERED",
             )
-            return worksheet
+    _ensure_sheet_width(worksheet)
+    return worksheet
 
 
 ws_bookings = _get_bookings_sheet()
@@ -315,6 +327,7 @@ def get_available_cars(start_date_str: str, end_date_str: str):
 
 
 def _ensure_headers(ws, required_headers: list[str]) -> list[str]:
+    _ensure_sheet_width(ws)
     headers = ws.row_values(1)
     for header in required_headers:
         if header not in headers:
