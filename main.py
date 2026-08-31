@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import datetime
+import html
 import logging
 import math
 import os
@@ -68,6 +69,7 @@ logging.basicConfig(
 logger = logging.getLogger("car-rental-bot")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+NOTIFY_MANAGERS = [661842368, 952125424, 1574781782]
 
 MONTH_NAMES = (
     "Январь",
@@ -765,6 +767,11 @@ def _value(record: dict, *keys: str, default: str = "—") -> str:
     return default
 
 
+def _html_value(value: object, default: str = "—") -> str:
+    text = str(value).strip() if value is not None else ""
+    return html.escape(text or default)
+
+
 def _booking_id(record: dict) -> str:
     return _value(record, "ID Брони", "ID", "Booking ID")
 
@@ -1208,6 +1215,21 @@ async def _send_notification_chunks(
                     await asyncio.sleep(5 * (attempt + 1))
         if last_error is not None:
             raise last_error
+
+
+async def send_broadcast_notification(bot: Bot, text: str):
+    for manager_id in NOTIFY_MANAGERS:
+        try:
+            await bot.send_message(
+                chat_id=manager_id,
+                text=text,
+                parse_mode="HTML",
+            )
+        except Exception as e:
+            print(
+                f"Не удалось отправить уведомление менеджеру "
+                f"{manager_id}: {e}"
+            )
 
 
 async def send_tomorrow_notifications(
@@ -3397,7 +3419,11 @@ async def _send_reservation_confirmation(
     )
 
 
-async def booking_confirmation(message: Message, state: FSMContext) -> None:
+async def booking_confirmation(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
     if (message.text or "").strip() != "Подтвердить":
         await cancel_flow(message, state)
         return
@@ -3458,6 +3484,44 @@ async def booking_confirmation(message: Message, state: FSMContext) -> None:
         ),
         reply_markup=main_keyboard(),
     )
+    if is_reservation:
+        booking_deposit = int(data.get("prepayment", 0))
+        booking_notification = (
+            f"🔔 <b>Новая бронь №{_html_value(booking_id)}</b>\n"
+            f"🚗 Автомобиль: <b>{_html_value(data.get('car_name'))}</b>\n"
+            f"📅 Период: <b>{_html_value(data.get('start_date'))} — "
+            f"{_html_value(data.get('end_date'))}</b>\n"
+            f"👤 Клиент: <b>{_html_value(data.get('client_name'))}</b> "
+            f"(тел: {_html_value(data.get('phone'))})\n"
+            f"💰 Сумма: <b>{_format_number(data.get('price', 0))} ₽</b> | "
+            f"Задаток: <b>{_format_number(booking_deposit)} ₽</b> "
+            f"({_html_value(data.get('prepayment_pay_type'), 'Без оплаты')})\n"
+            f"👨‍💼 Оформил менеджер: <b>{_html_value(manager_name)}</b>"
+        )
+    else:
+        booking = data.get("booking", {})
+        car = data.get("car", {})
+        fuel_level = _value(
+            car,
+            "Уровень топлива",
+            "Топливо",
+            "Уровень топлива (%)",
+            "Топливо (%)",
+            "Топливо при выдаче",
+            default="—",
+        )
+        issuance_notification = (
+            "🚗 <b>Автомобиль выдан клиенту!</b>\n"
+            f"🚘 Авто: <b>{_html_value(_car_name(car))} "
+            f"({_html_value(_car_plate(car))})</b>\n"
+            f"👤 Клиент: <b>{_html_value(data.get('client_name'))}</b>\n"
+            f"📍 Пробег на выезде: <b>"
+            f"{_html_value(data.get('start_mileage'))} км</b>\n"
+            f"⛽ Уровень топлива: <b>{_html_value(fuel_level)}</b>\n"
+            f"👨‍💼 Выдал менеджер: <b>{_html_value(manager_name)}</b>"
+        )
+        booking_notification = issuance_notification
+    await send_broadcast_notification(bot, booking_notification)
 
 
 async def list_active_rentals(message: Message, state: FSMContext) -> None:
@@ -3987,7 +4051,11 @@ async def return_notes(message: Message, state: FSMContext) -> None:
     )
 
 
-async def return_confirmation(message: Message, state: FSMContext) -> None:
+async def return_confirmation(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
     if (message.text or "").strip() != "Подтвердить":
         await cancel_flow(message, state)
         return
@@ -4099,6 +4167,33 @@ async def return_confirmation(message: Message, state: FSMContext) -> None:
         "Бронь завершена, пробег автомобиля обновлён.",
         reply_markup=main_keyboard(),
     )
+    rental_paid = int(data.get("rental_paid", 0))
+    additional_paid = int(data.get("total_paid", 0))
+    total_received = rental_paid + additional_paid
+    rental_pay_type = data.get("rental_pay_type", "Без оплаты")
+    additional_pay_type = data.get("pay_type", "Без оплаты")
+    if rental_paid and additional_paid:
+        payment_method = (
+            f"аренда: {rental_pay_type}; "
+            f"доплата: {additional_pay_type}"
+        )
+    elif rental_paid:
+        payment_method = rental_pay_type
+    else:
+        payment_method = additional_pay_type
+    return_notification = (
+        "🏁 <b>Автомобиль принят (Касса)!</b>\n"
+        f"🚘 Авто: <b>{_html_value(_car_name(car))} "
+        f"({_html_value(_car_plate(car))})</b>\n"
+        f"👤 Клиент: <b>{_html_value(_value(booking, 'ФИО Клиента', 'Клиент'))}</b>\n"
+        f"📈 Пробег за поездку: <b>+{_html_value(data.get('end_mileage', 0) - data.get('start_mileage', 0))} км</b> "
+        f"(текущий: {_html_value(data.get('end_mileage'))} км)\n"
+        f"💰 Оплачено: <b>{_format_number(total_received)} ₽</b> "
+        f"({_html_value(payment_method)})\n"
+        f"📝 Комментарий/состояние: <i>{_html_value(data.get('notes'), '—')}</i>\n"
+        f"👨‍💼 Принял менеджер: <b>{_html_value(data.get('manager_name') or _manager_display_name(message.from_user))}</b>"
+    )
+    await send_broadcast_notification(bot, return_notification)
 
 
 async def unknown_message(message: Message) -> None:
