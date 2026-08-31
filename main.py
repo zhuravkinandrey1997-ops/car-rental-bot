@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import csv
 import datetime
 import html
+import io
 import logging
 import math
 import os
+import re
 from contextlib import suppress
+from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, Dispatcher, F
@@ -19,6 +23,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
+    BufferedInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -709,6 +714,26 @@ def expense_history_car_keyboard(cars: list[dict]) -> InlineKeyboardMarkup:
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def expense_history_export_keyboard(
+    month_key: str,
+    vehicle_filter: str | None = None,
+) -> InlineKeyboardMarkup:
+    filter_code = vehicle_filter or "all"
+    callback_data = (
+        f"expense_export:{month_key}:{quote(filter_code, safe='')}"
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⬇️ Скачать CSV для бухгалтерии",
+                    callback_data=callback_data,
+                )
+            ]
+        ]
+    )
 
 
 def financial_report_type_keyboard() -> InlineKeyboardMarkup:
@@ -1673,9 +1698,10 @@ def _format_expense_history(
     filter_label: str | None = None,
 ) -> str:
     if not expenses:
+        filter_text = f"\n🔎 Фильтр: {filter_label}" if filter_label else ""
         return (
-            f"📅 Месяц: {month_key}\n\n"
-            "За выбранный месяц расходов не найдено."
+            f"📅 Месяц: {month_key}{filter_text}\n\n"
+            "За выбранный период и фильтр расходов не найдено."
         )
 
     title = f"📑 ИСТОРИЯ РАСХОДОВ\n📅 Месяц: {month_key}"
@@ -1709,6 +1735,67 @@ def _format_expense_history(
     return "\n".join(lines)
 
 
+def _expense_export_csv(
+    expenses: list[dict],
+    month_key: str,
+    filter_label: str | None = None,
+) -> tuple[bytes, int]:
+    """Build an Excel-compatible UTF-8 CSV and return it with its total."""
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow(["Период", month_key])
+    if filter_label:
+        writer.writerow(["Фильтр", filter_label])
+    writer.writerow([])
+    headers = [
+        "ID",
+        "Дата",
+        "Сумма (RUB)",
+        "Категория / На что",
+        "Привязка",
+        "Автор",
+        "Примечание",
+    ]
+    writer.writerow(headers)
+    total = 0
+    for expense in expenses:
+        amount = safe_int(expense.get("Сумма (RUB)"))
+        total += amount
+        writer.writerow(
+            [
+                _value(expense, "ID Записи", "ID", default=""),
+                _value(expense, "Дата", default=""),
+                amount,
+                _value(
+                    expense,
+                    "Категория / На что",
+                    "Категория",
+                    default="",
+                ),
+                _expense_history_vehicle(expense),
+                _expense_history_author(expense),
+                _value(
+                    expense,
+                    "Примечание",
+                    "Комментарий",
+                    default="",
+                ),
+            ]
+        )
+    writer.writerow([])
+    writer.writerow(["ИТОГО", "", total, "", "", "", ""])
+    return output.getvalue().encode("utf-8-sig"), total
+
+
+def _expense_export_filename(
+    month_key: str,
+    vehicle_filter: str | None = None,
+) -> str:
+    suffix = vehicle_filter or "all"
+    safe_suffix = re.sub(r"[^0-9A-Za-zА-Яа-я_-]+", "_", suffix).strip("_")
+    return f"expenses_{month_key}_{safe_suffix or 'all'}.csv"
+
+
 async def _send_expense_history(
     message: Message,
     user_id: int,
@@ -1737,6 +1824,110 @@ async def _send_expense_history(
         message,
         _format_expense_history(expenses, month_key, filter_label),
         user_id,
+    )
+    if expenses:
+        await message.answer(
+            "Файл с этой же выборкой можно скачать для бухгалтерии:",
+            reply_markup=expense_history_export_keyboard(
+                month_key,
+                vehicle_filter,
+            ),
+        )
+
+
+async def expense_history_export_callback(
+    callback: CallbackQuery,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    if not _callback_has_finance_access(callback):
+        await callback.answer(
+            "У вас нет доступа к финансовым операциям.",
+            show_alert=True,
+        )
+        return
+    try:
+        _, month_key, encoded_filter = callback.data.split(":", 2)
+        vehicle_filter = unquote(encoded_filter)
+    except ValueError:
+        await callback.answer("Некорректный запрос экспорта.", show_alert=True)
+        return
+    if not re.fullmatch(r"\d{4}-\d{2}", month_key):
+        await callback.answer("Некорректный месяц.", show_alert=True)
+        return
+    if vehicle_filter == "all":
+        vehicle_filter = None
+        filter_label = None
+    elif vehicle_filter == "general":
+        filter_label = "Общие расходы"
+    elif vehicle_filter:
+        filter_label = f"Автомобиль: {vehicle_filter}"
+    else:
+        await callback.answer("Некорректный фильтр.", show_alert=True)
+        return
+
+    try:
+        available_months = await asyncio.to_thread(
+            get_available_expense_months,
+            _now_minsk().date(),
+        )
+    except Exception:
+        logger.exception("Could not validate expense export month")
+        await callback.answer(
+            "Не удалось проверить доступность месяца.",
+            show_alert=True,
+        )
+        return
+    if month_key not in available_months:
+        await callback.answer(
+            "Этот месяц больше недоступен. Откройте историю расходов заново.",
+            show_alert=True,
+        )
+        return
+
+    try:
+        expenses = await asyncio.to_thread(
+            get_expenses_for_month,
+            month_key,
+            vehicle_filter,
+        )
+    except Exception:
+        logger.exception(
+            "Could not export expense history for %s (filter=%s)",
+            month_key,
+            vehicle_filter,
+        )
+        await callback.answer(
+            "Не удалось сформировать экспорт из Google Sheets.",
+            show_alert=True,
+        )
+        return
+    if not expenses:
+        await callback.answer(
+            "По выбранному месяцу и фильтру расходов нет — файл не сформирован.",
+            show_alert=True,
+        )
+        return
+
+    csv_bytes, total = _expense_export_csv(
+        expenses,
+        month_key,
+        filter_label,
+    )
+    await callback.answer("CSV-файл готов")
+    with suppress(TelegramAPIError):
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer_document(
+        document=BufferedInputFile(
+            csv_bytes,
+            filename=_expense_export_filename(month_key, vehicle_filter),
+        ),
+        caption=(
+            f"Экспорт расходов за {month_key}"
+            f"{f' ({filter_label})' if filter_label else ''}\n"
+            f"Итого: {_format_number(total)} ₽"
+        ),
     )
 
 
@@ -4276,6 +4467,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(
         expense_history_car_callback,
         F.data.startswith("expense_history_car:"),
+    )
+    dispatcher.callback_query.register(
+        expense_history_export_callback,
+        F.data.startswith("expense_export:"),
     )
     dispatcher.callback_query.register(
         cancellation_booking_callback,

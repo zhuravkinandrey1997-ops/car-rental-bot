@@ -91,6 +91,10 @@ accrued rental price. Each calculated report updates the summary worksheets.
 The `📑 Просмотр расходов` menu opens a month-based history of `Затраты`.
 Authorized managers can view all records or filter them by a vehicle or
 `Общие расходы`; each result includes the record details and the period total.
+When the selection is not empty, the bot also offers a UTF-8 CSV download for
+accounting with the period, selected filter, record ID, date, amount, category,
+vehicle/general binding, author, note, and an `ИТОГО` row. Stale month
+selections and empty filtered results are reported without creating a file.
 Cancelling an active booking changes its status to `Отменена`, records the
 cancellation reason and deposit outcome, and releases its dates for availability
 checks.
