@@ -1028,55 +1028,8 @@ def add_new_booking(
 
 
 def get_available_cars_for_direct_issuance() -> list[dict]:
-    """Return cars that are free and have no overlapping active booking."""
-    all_cars = ws_cars.get_all_records()
-    busy_ids: set[str] = set()
-    busy_plates: set[str] = set()
-    for booking in ws_bookings.get_all_records():
-        if str(booking.get("Статус", "")).strip() not in {
-            "Подтверждена",
-            "В аренде",
-        }:
-            continue
-        car_id = str(
-            booking.get("ID Авто")
-            or booking.get("Car ID")
-            or ""
-        ).strip()
-        plate = str(
-            booking.get("Госномер")
-            or booking.get("Номер авто")
-            or booking.get("Номер")
-            or ""
-        ).strip()
-        if car_id:
-            busy_ids.add(car_id)
-        if plate:
-            busy_plates.add(plate.casefold())
-
-    available = []
-    for car in all_cars:
-        status = str(car.get("Статус", "")).strip().casefold()
-        if status not in {"активен", "свободен", "active", "free"}:
-            continue
-        car_id = str(
-            car.get("ID")
-            or car.get("ID Авто")
-            or car.get("Car ID")
-            or ""
-        ).strip()
-        plate = str(
-            car.get("Госномер")
-            or car.get("Номер авто")
-            or car.get("Номер")
-            or ""
-        ).strip()
-        if car_id and car_id in busy_ids:
-            continue
-        if plate and plate.casefold() in busy_plates:
-            continue
-        available.append(car)
-    return available
+    """Return every car so the manager can explicitly override its status."""
+    return ws_cars.get_all_records()
 
 
 def update_car_status(

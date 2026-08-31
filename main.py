@@ -103,6 +103,7 @@ class AvailabilityForm(StatesGroup):
 class BookingForm(StatesGroup):
     issuance_mode = State()
     issuance_booking = State()
+    direct_car_confirmation = State()
     start_date = State()
     end_date = State()
     direct_end_date = State()
@@ -570,6 +571,44 @@ def cancellation_car_keyboard(cars: list[dict]) -> ReplyKeyboardMarkup:
     builder.adjust(1)
     builder.row(KeyboardButton(text="Отмена"))
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
+
+
+def direct_issuance_car_keyboard(cars: list[dict]) -> ReplyKeyboardMarkup:
+    builder = ReplyKeyboardBuilder()
+    for index, car in enumerate(cars, start=1):
+        status = _value(car, "Статус", default="Не указан")
+        normalized_status = status.casefold()
+        if normalized_status in {"свободен", "активен", "free", "active"}:
+            icon = "🟢"
+        elif normalized_status in {"в аренде", "rented"}:
+            icon = "🔴"
+        else:
+            icon = "🟡"
+        builder.add(
+            KeyboardButton(
+                text=f"{index}. {icon} {_car_name(car)} ({status})"
+            )
+        )
+    builder.adjust(1)
+    builder.row(KeyboardButton(text="Отмена"))
+    return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
+
+
+def direct_issuance_warning_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да",
+                    callback_data="direct_issuance_car:yes",
+                ),
+                InlineKeyboardButton(
+                    text="Назад",
+                    callback_data="direct_issuance_car:back",
+                ),
+            ]
+        ]
+    )
 
 
 def car_choice_keyboard(cars: list[dict]) -> ReplyKeyboardMarkup:
@@ -2876,14 +2915,14 @@ async def issuance_mode_selection(message: Message, state: FSMContext) -> None:
             logger.exception("Could not load cars for direct issuance")
             await state.clear()
             await message.answer(
-                "Не удалось получить список свободных автомобилей.",
+                "Не удалось получить список автомобилей.",
                 reply_markup=get_main_keyboard(message.from_user.id),
             )
             return
         if not cars:
             await state.clear()
             await message.answer(
-                "Свободных автомобилей для срочной выдачи нет.",
+                "В листе Автомобили нет автомобилей.",
                 reply_markup=get_main_keyboard(message.from_user.id),
             )
             return
@@ -2895,8 +2934,8 @@ async def issuance_mode_selection(message: Message, state: FSMContext) -> None:
         await state.set_state(BookingForm.car)
         await message.answer(
             "⚡ Срочная выдача без брони.\n\n"
-            "Выберите свободный автомобиль:",
-            reply_markup=car_choice_keyboard(cars),
+            "Выберите автомобиль:",
+            reply_markup=direct_issuance_car_keyboard(cars),
         )
         return
     if choice == "📋 По существующей брони":
@@ -3544,6 +3583,24 @@ async def booking_car(message: Message, state: FSMContext) -> None:
     except (ValueError, IndexError):
         await message.answer("Выберите автомобиль кнопкой из списка.")
         return
+    if (
+        data.get("booking_mode") == "direct_issuance"
+        and _value(car, "Статус", default="").strip().casefold()
+        in {"в аренде", "rented"}
+    ):
+        await state.update_data(
+            pending_direct_car=car,
+        )
+        warning_message = await message.answer(
+            "⚠️ Этот автомобиль сейчас числится в аренде. "
+            "Всё равно оформить выдачу?",
+            reply_markup=direct_issuance_warning_keyboard(),
+        )
+        await state.set_state(BookingForm.direct_car_confirmation)
+        await state.update_data(
+            direct_car_warning_message_id=warning_message.message_id,
+        )
+        return
     await state.update_data(
         car_id=_car_id(car),
         car_name=_car_name(car),
@@ -3551,6 +3608,62 @@ async def booking_car(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(BookingForm.client_name)
     await message.answer("Введите ФИО клиента:")
+
+
+async def direct_issuance_car_confirmation(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.data or not callback.message:
+        await callback.answer()
+        return
+    if await state.get_state() != BookingForm.direct_car_confirmation.state:
+        await callback.answer(
+            "Этот выбор устарел. Начните выдачу заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if getattr(callback.message, "message_id", None) != data.get(
+        "direct_car_warning_message_id"
+    ):
+        await callback.answer(
+            "Это предупреждение устарело. Используйте последнее.",
+            show_alert=True,
+        )
+        return
+    choice = callback.data.removeprefix("direct_issuance_car:")
+    if choice == "back":
+        cars = data.get("cars", [])
+        await callback.answer("Вернитесь к выбору автомобиля.")
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await state.set_state(BookingForm.car)
+        await callback.message.answer(
+            "Выберите автомобиль:",
+            reply_markup=direct_issuance_car_keyboard(cars),
+        )
+        return
+    if choice != "yes":
+        await callback.answer("Этот вариант недоступен.", show_alert=True)
+        return
+    car = data.get("pending_direct_car")
+    if not car:
+        await callback.answer(
+            "Автомобиль не найден. Начните выдачу заново.",
+            show_alert=True,
+        )
+        await state.clear()
+        return
+    await state.update_data(
+        car_id=_car_id(car),
+        car_name=_car_name(car),
+        car=car,
+        pending_direct_car=None,
+    )
+    await callback.answer("Продолжаем оформление выдачи.")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.set_state(BookingForm.client_name)
+    await callback.message.answer("Введите ФИО клиента:")
 
 
 async def booking_client_name(message: Message, state: FSMContext) -> None:
@@ -4764,6 +4877,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(calendar_callback, F.data.startswith("calendar:"))
     dispatcher.callback_query.register(payment_method_callback, F.data.startswith("payment:"))
     dispatcher.callback_query.register(cleanliness_callback, F.data.startswith("cleanliness:"))
+    dispatcher.callback_query.register(
+        direct_issuance_car_confirmation,
+        F.data.startswith("direct_issuance_car:"),
+    )
     dispatcher.callback_query.register(
         direct_deposit_callback,
         F.data.startswith("direct_deposit:"),
