@@ -2,7 +2,9 @@ import os
 import datetime
 import json
 import logging
+import socket
 import threading
+import time
 import traceback
 import uuid
 import gspread
@@ -100,6 +102,59 @@ BOOKINGS_LOCK = threading.Lock()
 MIN_OPERATIONAL_COLUMNS = 35
 TARGET_OPERATIONAL_COLUMNS = 35
 
+
+def _is_transient_spreadsheet_error(error: Exception) -> bool:
+    """Return whether a Google Sheets open failure is safe to retry."""
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(response, dict):
+        status_code = response.get("status_code", response.get("status"))
+    try:
+        status_code = int(status_code)
+    except (TypeError, ValueError):
+        status_code = None
+    if status_code in {500, 502, 503}:
+        return True
+    if isinstance(error, (TimeoutError, ConnectionError, socket.timeout)):
+        return True
+
+    error_name = type(error).__name__.casefold()
+    error_text = str(error).casefold()
+    return (
+        "timeout" in error_name
+        or "connection" in error_name
+        or "timed out" in error_text
+        or "temporarily unavailable" in error_text
+        or "service unavailable" in error_text
+        or any(code in error_text for code in ("500", "502", "503"))
+    )
+
+
+def get_spreadsheet_with_retry(
+    gc_client,
+    spreadsheet_key: str,
+    max_retries: int = 5,
+):
+    """Open a spreadsheet while tolerating short Google API outages."""
+    if max_retries < 1:
+        raise ValueError("max_retries must be at least 1")
+
+    for attempt in range(max_retries):
+        try:
+            return gc_client.open_by_key(spreadsheet_key)
+        except Exception as error:
+            is_last_attempt = attempt == max_retries - 1
+            if is_last_attempt or not _is_transient_spreadsheet_error(error):
+                raise
+            retry_number = attempt + 1
+            print(
+                "Временный сбой Google API "
+                f"({error}), повторная попытка "
+                f"{retry_number}/{max_retries} через 3 сек..."
+            )
+            time.sleep(3)
+
+
 if SERVICE_ACCOUNT_JSON:
     gc = gspread.service_account_from_dict(json.loads(SERVICE_ACCOUNT_JSON))
 else:
@@ -108,7 +163,7 @@ else:
 # Google Sheets IDs are not spreadsheet titles. Keep support for both so the
 # default name and an explicitly supplied spreadsheet ID work as expected.
 if len(SPREADSHEET_NAME) > 30 and " " not in SPREADSHEET_NAME:
-    sh = gc.open_by_key(SPREADSHEET_NAME)
+    sh = get_spreadsheet_with_retry(gc, SPREADSHEET_NAME)
 else:
     sh = gc.open(SPREADSHEET_NAME)
 
