@@ -278,6 +278,23 @@ def is_manager_authorized(tg_id: int) -> bool:
     return False
 
 
+def is_partner_authorized(tg_id: int) -> bool:
+    """Return whether an active manager row has the partner role."""
+    partner_roles = {"партнёр", "партнер", "partner"}
+    for manager in ws_managers.get_all_records():
+        if str(manager.get("Telegram ID", "")).strip() != str(tg_id):
+            continue
+        access = str(manager.get("Доступ активен", "")).strip().casefold()
+        role = str(
+            manager.get("Роль")
+            or manager.get("Role")
+            or manager.get("Тип доступа")
+            or ""
+        ).strip().casefold()
+        return access in {"да", "yes", "true"} and role in partner_roles
+    return False
+
+
 def get_active_manager_ids() -> list[int]:
     manager_ids = []
     seen_ids = set()
@@ -1379,6 +1396,98 @@ def get_active_cars():
 
 def get_all_cars():
     return ws_cars.get_all_records()
+
+
+def _contains_car_keyword(
+    record: dict,
+    keyword: str,
+    fields: tuple[str, ...],
+) -> bool:
+    normalized_keyword = str(keyword or "").strip().casefold()
+    if not normalized_keyword:
+        return False
+    return any(
+        normalized_keyword in str(record.get(field, "") or "").casefold()
+        for field in fields
+    )
+
+
+def get_partner_cars(keyword: str) -> list[dict]:
+    """Return cars matching the partner's make/model keyword."""
+    return [
+        dict(car)
+        for car in ws_cars.get_all_records()
+        if _contains_car_keyword(
+            car,
+            keyword,
+            (
+                "Марка и Модель",
+                "Марка и модель",
+                "Марка Модель",
+                "Название",
+                "Авто",
+                "Модель",
+            ),
+        )
+    ]
+
+
+def get_partner_bookings(keyword: str) -> list[dict]:
+    """Return bookings whose car name contains the partner keyword."""
+    return [
+        dict(booking)
+        for booking in ws_bookings.get_all_records()
+        if _contains_car_keyword(
+            booking,
+            keyword,
+            (
+                "Автомобиль",
+                "Авто",
+                "Название авто",
+                "Марка и Модель",
+                "Модель",
+            ),
+        )
+    ]
+
+
+def get_partner_expenses(keyword: str) -> list[dict]:
+    """Return expenses tied to cars matching the partner keyword."""
+    partner_cars = get_partner_cars(keyword)
+    normalized_identifiers = {str(keyword or "").strip().casefold()}
+    car_fields = (
+        "Марка и Модель",
+        "Марка и модель",
+        "Марка Модель",
+        "Название",
+        "Авто",
+        "Модель",
+        "Госномер",
+        "Номер авто",
+        "Номер",
+        "Plate",
+    )
+    for car in partner_cars:
+        normalized_identifiers.update(
+            str(car.get(field, "") or "").strip().casefold()
+            for field in car_fields
+            if str(car.get(field, "") or "").strip()
+        )
+
+    expenses = []
+    for expense in ws_expenses.get_all_records():
+        vehicle = str(
+            expense.get("Автомобиль (Госномер / Общие)")
+            or expense.get("Автомобиль")
+            or ""
+        ).strip().casefold()
+        if vehicle and any(
+            identifier in vehicle
+            for identifier in normalized_identifiers
+            if identifier
+        ):
+            expenses.append(dict(expense))
+    return expenses
 
 
 def get_active_bookings_for_car(car_id: str, plate: str = ""):

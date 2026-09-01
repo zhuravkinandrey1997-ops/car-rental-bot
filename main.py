@@ -59,7 +59,11 @@ from sheets_client import (
     get_pending_notification_manager_ids,
     get_returnable_rentals,
     get_tomorrow_bookings,
+    get_partner_bookings,
+    get_partner_cars,
+    get_partner_expenses,
     is_manager_authorized,
+    is_partner_authorized,
     issue_booking,
     mark_notification_sent,
     save_actual_return,
@@ -77,6 +81,8 @@ logger = logging.getLogger("car-rental-bot")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 NOTIFY_MANAGERS = [661842368, 952125424, 1574781782]
+PARTNER_ID = 226694751
+PARTNER_CAR_KEYWORD = "Dodge"
 
 MONTH_NAMES = (
     "Январь",
@@ -371,8 +377,22 @@ def _period_selection_text(start_date: str, end_date: str) -> str:
     )
 
 
+def partner_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔎 Брони Dodge")],
+            [KeyboardButton(text="🚗 Статус Dodge")],
+            [KeyboardButton(text="📑 Расходы Dodge")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
 def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     uid = int(user_id)
+    if uid == PARTNER_ID:
+        return partner_menu_keyboard()
     buttons = [
         [
             KeyboardButton(text="Доступные авто"),
@@ -1382,6 +1402,29 @@ async def send_broadcast_notification(bot: Bot, text: str):
             )
 
 
+async def send_operation_notification(
+    bot: Bot,
+    text: str,
+    car_name: str = "",
+) -> None:
+    """Notify managers and, for Dodge operations, the partner separately."""
+    await send_broadcast_notification(bot, text)
+    if PARTNER_CAR_KEYWORD.casefold() not in str(car_name or "").casefold():
+        return
+    try:
+        await bot.send_message(
+            chat_id=PARTNER_ID,
+            text=text,
+            parse_mode="HTML",
+        )
+    except Exception as error:
+        logger.exception(
+            "Could not send partner notification to %s: %s",
+            PARTNER_ID,
+            error,
+        )
+
+
 async def send_tomorrow_notifications(
     bot: Bot,
     now: datetime.datetime | None = None,
@@ -1587,9 +1630,45 @@ def _deposit_outcome_text(calculation: dict[str, int | str]) -> str:
     )
 
 
+def is_partner_user(user_id: int) -> bool:
+    if int(user_id) == PARTNER_ID:
+        return True
+    try:
+        return is_partner_authorized(user_id)
+    except Exception:
+        logger.exception("Partner authorization check failed")
+        return False
+
+
+def _partner_car_status(car: dict) -> str:
+    status = _value(car, "Статус", default="—")
+    if status.casefold() in {"активен", "свободен", "available"}:
+        return "Свободен"
+    if status.casefold() in {"в аренде", "rented"}:
+        return "В аренде"
+    return status
+
+
+async def ensure_partner(message: Message) -> bool:
+    user = message.from_user
+    if user is not None and is_partner_user(user.id):
+        return True
+    await message.answer(
+        "Эта функция доступна только партнёру по автомобилю Dodge.",
+        reply_markup=get_main_keyboard(user.id if user else 0),
+    )
+    return False
+
+
 async def ensure_manager(message: Message) -> bool:
     user = message.from_user
     if user is None:
+        return False
+    if is_partner_user(user.id):
+        await message.answer(
+            "Административные функции недоступны в партнёрском режиме.",
+            reply_markup=partner_menu_keyboard(),
+        )
         return False
     try:
         authorized = is_manager_authorized(user.id)
@@ -1607,13 +1686,26 @@ async def ensure_manager(message: Message) -> bool:
 
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     await state.clear()
+    reply_markup = (
+        partner_menu_keyboard()
+        if message.from_user and is_partner_user(message.from_user.id)
+        else get_main_keyboard(message.from_user.id)
+    )
     await message.answer(
         "Операция отменена.",
-        reply_markup=get_main_keyboard(message.from_user.id),
+        reply_markup=reply_markup,
     )
 
 
 async def show_menu(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if user and is_partner_user(user.id):
+        await state.clear()
+        await message.answer(
+            "Партнёрский кабинет Dodge. Выберите раздел:",
+            reply_markup=partner_menu_keyboard(),
+        )
+        return
     if not await ensure_manager(message):
         return
     await state.clear()
@@ -1627,8 +1719,144 @@ async def start_handler(message: Message, state: FSMContext) -> None:
     await show_menu(message, state)
 
 
+async def partner_bookings(message: Message) -> None:
+    if not await ensure_partner(message):
+        return
+    try:
+        bookings = await asyncio.to_thread(
+            get_partner_bookings,
+            PARTNER_CAR_KEYWORD,
+        )
+    except Exception:
+        logger.exception("Could not load partner bookings")
+        await message.answer("Не удалось загрузить брони Dodge.")
+        return
+    if not bookings:
+        await message.answer(
+            "Брони Dodge не найдены.",
+            reply_markup=partner_menu_keyboard(),
+        )
+        return
+    lines = ["🔎 БРОНИ DODGE", ""]
+    for booking in bookings:
+        amount = _format_number(
+            _value(
+                booking,
+                "Сумма брони (RUB)",
+                "Цена",
+                "Стоимость",
+                default="0",
+            )
+        )
+        lines.extend(
+            [
+                f"Бронь №{_booking_id(booking)}",
+                f"Автомобиль: {_value(booking, 'Автомобиль', 'Авто', default='—')}",
+                "Период: "
+                f"{format_date_ru(_value(booking, 'Дата начала', default='—'))} — "
+                f"{format_date_ru(_value(booking, 'Дата окончания', default='—'))}",
+                f"Клиент: {_value(booking, 'ФИО Клиента', 'Клиент', default='—')}",
+                f"Статус: {_value(booking, 'Статус', default='—')}",
+                f"Сумма: {amount} RUB",
+                "",
+            ]
+        )
+    chunks = split_telegram_message("\n".join(lines).rstrip())
+    for index, chunk in enumerate(chunks):
+        await message.answer(
+            chunk,
+            reply_markup=(
+                partner_menu_keyboard()
+                if index == len(chunks) - 1
+                else None
+            ),
+        )
+
+
+async def partner_status(message: Message) -> None:
+    if not await ensure_partner(message):
+        return
+    try:
+        cars = await asyncio.to_thread(
+            get_partner_cars,
+            PARTNER_CAR_KEYWORD,
+        )
+    except Exception:
+        logger.exception("Could not load partner car status")
+        await message.answer("Не удалось загрузить статус Dodge.")
+        return
+    if not cars:
+        await message.answer(
+            "Автомобиль Dodge не найден.",
+            reply_markup=partner_menu_keyboard(),
+        )
+        return
+    lines = ["🚗 СТАТУС DODGE", ""]
+    for car in cars:
+        lines.extend(
+            [
+                f"Автомобиль: {_car_name(car)}",
+                f"Статус: {_partner_car_status(car)}",
+                f"Текущий пробег: {_value(car, 'Текущий пробег (км)', 'Пробег', 'Текущий пробег', default='—')} км",
+                f"Госномер: {_value(car, 'Госномер', 'Номер авто', 'Номер', 'Plate', default='—')}",
+                "",
+            ]
+        )
+    await message.answer(
+        "\n".join(lines).rstrip(),
+        reply_markup=partner_menu_keyboard(),
+    )
+
+
+async def partner_expenses(message: Message) -> None:
+    if not await ensure_partner(message):
+        return
+    try:
+        expenses = await asyncio.to_thread(
+            get_partner_expenses,
+            PARTNER_CAR_KEYWORD,
+        )
+    except Exception:
+        logger.exception("Could not load partner expenses")
+        await message.answer("Не удалось загрузить расходы Dodge.")
+        return
+    if not expenses:
+        await message.answer(
+            "Расходы Dodge не найдены.",
+            reply_markup=partner_menu_keyboard(),
+        )
+        return
+    lines = ["📑 РАСХОДЫ DODGE", ""]
+    for expense in expenses:
+        lines.extend(
+            [
+                f"Дата: {format_date_ru(_value(expense, 'Дата', default='—'))}",
+                f"Сумма: {_format_number(expense.get('Сумма (RUB)', 0))} RUB",
+                f"Категория: {_value(expense, 'Категория / На что', 'Категория', default='—')}",
+                f"Описание: {_value(expense, 'Примечание', 'Комментарий', 'Описание', default='—')}",
+                "",
+            ]
+        )
+    chunks = split_telegram_message("\n".join(lines).rstrip())
+    for index, chunk in enumerate(chunks):
+        await message.answer(
+            chunk,
+            reply_markup=(
+                partner_menu_keyboard()
+                if index == len(chunks) - 1
+                else None
+            ),
+        )
+
+
 async def ensure_finance_access(message: Message) -> bool:
     user = message.from_user
+    if user is not None and is_partner_user(user.id):
+        await message.answer(
+            "Финансовые операции недоступны в партнёрском режиме.",
+            reply_markup=partner_menu_keyboard(),
+        )
+        return False
     if user is None or user.id not in FINANCE_MANAGER_IDS:
         await message.answer(
             "Финансовые операции доступны только уполномоченным менеджерам.",
@@ -2361,6 +2589,7 @@ async def expense_vehicle(message: Message, state: FSMContext) -> None:
         "Общие расходы компании",
     }:
         vehicle = "Общие"
+        car_name = ""
     else:
         try:
             index = int(value.split(".", 1)[0])
@@ -2382,7 +2611,11 @@ async def expense_vehicle(message: Message, state: FSMContext) -> None:
                 "Заполните госномер или выберите общие расходы."
             )
             return
-    await state.update_data(expense_vehicle=vehicle)
+        car_name = _car_name(car)
+    await state.update_data(
+        expense_vehicle=vehicle,
+        expense_car_name=car_name,
+    )
     await state.set_state(ExpenseForm.note)
     await message.answer(
         "Введите комментарий/примечание к расходу или отправьте «нет»:"
@@ -2409,7 +2642,11 @@ async def expense_note(message: Message, state: FSMContext) -> None:
     )
 
 
-async def expense_confirmation(message: Message, state: FSMContext) -> None:
+async def expense_confirmation(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
     if not await ensure_finance_access(message):
         return
     if (message.text or "").strip() != "Подтвердить":
@@ -2417,6 +2654,7 @@ async def expense_confirmation(message: Message, state: FSMContext) -> None:
         return
     data = await state.get_data()
     user = message.from_user
+    expense_date = _now_minsk().strftime("%Y-%m-%d")
     try:
         expense_id = await asyncio.to_thread(
             add_expense,
@@ -2426,7 +2664,7 @@ async def expense_confirmation(message: Message, state: FSMContext) -> None:
             user.id if user else 0,
             _manager_display_name(user),
             data.get("expense_note", ""),
-            _now_minsk().strftime("%Y-%m-%d"),
+            expense_date,
         )
     except Exception:
         logger.exception("Could not save expense")
@@ -2440,6 +2678,21 @@ async def expense_confirmation(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"Расход №{expense_id} сохранён.",
         reply_markup=get_main_keyboard(message.from_user.id),
+    )
+    expense_notification = (
+        "💸 <b>Добавлен расход</b>\n"
+        f"🧾 Номер: <b>{_html_value(expense_id)}</b>\n"
+        f"🚗 Автомобиль: <b>{_html_value(data.get('expense_car_name'), '—')}</b>\n"
+        f"📅 Дата: <b>{_html_value(format_date_ru(expense_date))}</b>\n"
+        f"💰 Сумма: <b>{_format_number(data.get('expense_amount', 0))} ₽</b>\n"
+        f"📂 Категория: <b>{_html_value(data.get('expense_category'))}</b>\n"
+        f"📝 Описание: <i>{_html_value(data.get('expense_note'), '—')}</i>\n"
+        f"👨‍💼 Внёс менеджер: <b>{_html_value(_manager_display_name(user))}</b>"
+    )
+    await send_operation_notification(
+        bot,
+        expense_notification,
+        data.get("expense_car_name", ""),
     )
 
 
@@ -4133,7 +4386,16 @@ async def booking_confirmation(
             f"👨‍💼 Выдал менеджер: <b>{_html_value(manager_name)}</b>"
         )
         booking_notification = issuance_notification
-    await send_broadcast_notification(bot, booking_notification)
+    notification_car_name = (
+        data.get("car_name", "")
+        if is_direct_issuance
+        else _car_name(data.get("car", {}))
+    )
+    await send_operation_notification(
+        bot,
+        booking_notification,
+        notification_car_name if not is_reservation else data.get("car_name", ""),
+    )
 
 
 async def list_active_rentals(message: Message, state: FSMContext) -> None:
@@ -4998,7 +5260,11 @@ async def return_confirmation(
         f"📝 Комментарий/состояние: <i>{_html_value(data.get('notes'), '—')}</i>\n"
         f"👨‍💼 Принял менеджер: <b>{_html_value(data.get('manager_name') or _manager_display_name(message.from_user))}</b>"
     )
-    await send_broadcast_notification(bot, return_notification)
+    await send_operation_notification(
+        bot,
+        return_notification,
+        _car_name(car),
+    )
 
 
 async def unknown_message(message: Message) -> None:
@@ -5081,6 +5347,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(start_handler, CommandStart())
     dispatcher.message.register(show_menu, Command("menu"))
     dispatcher.message.register(cancel_flow, F.text.casefold() == "отмена")
+
+    dispatcher.message.register(partner_bookings, F.text == "🔎 Брони Dodge")
+    dispatcher.message.register(partner_status, F.text == "🚗 Статус Dodge")
+    dispatcher.message.register(partner_expenses, F.text == "📑 Расходы Dodge")
 
     dispatcher.message.register(start_availability, F.text == "Доступные авто")
     dispatcher.message.register(start_booking, F.text == "Новая бронь")
