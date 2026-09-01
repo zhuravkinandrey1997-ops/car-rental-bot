@@ -39,6 +39,8 @@ BOOKING_HEADERS = [
     "Способ оплаты задатка",
     "ID Менеджера",
     "Статус",
+    "Адрес доставки",
+    "Стоимость доставки (RUB)",
 ]
 ACCEPTANCE_ACT_HEADERS = [
     "ID Акта",
@@ -967,6 +969,8 @@ def add_new_booking(
     prepayment: int = 0,
     prepayment_pay_type: str = "Без оплаты",
     manager_name: str = "",
+    delivery_address: str = "Самовывоз",
+    delivery_price: int = 0,
 ):
     try:
         bookings_sheet = _get_bookings_sheet()
@@ -989,7 +993,14 @@ def add_new_booking(
             else deposit_pay_type
         )
         car_id_value = int(str(car_id or 0).replace(" ", ""))
-        total_price_value = int(str(price or 0).replace(" ", ""))
+        rent_price_value = int(str(price or 0).replace(" ", ""))
+        delivery_price_value = int(
+            str(delivery_price or 0).replace(" ", "")
+        )
+        total_price_value = rent_price_value + delivery_price_value
+        delivery_address_value = str(delivery_address or "Самовывоз").strip()
+        if not delivery_address_value:
+            delivery_address_value = "Самовывоз"
         booking_deposit_value = int(
             str(booking_deposit or 0).replace(" ", "")
         )
@@ -1013,14 +1024,10 @@ def add_new_booking(
             str(booking_deposit_pay_type or "Без оплаты"),
             manager_id_value,
             str(status or "Подтверждена"),
+            delivery_address_value,
+            delivery_price_value,
         ]
-        headers = bookings_sheet.row_values(1)
-        if not headers:
-            bookings_sheet.append_row(
-                BOOKING_HEADERS,
-                value_input_option="USER_ENTERED",
-            )
-            headers = BOOKING_HEADERS
+        headers = _ensure_headers(bookings_sheet, BOOKING_HEADERS)
 
         row_to_append = row
         if headers[: len(BOOKING_HEADERS)] != BOOKING_HEADERS:
@@ -1039,6 +1046,8 @@ def add_new_booking(
                 "Телефон": str(phone or ""),
                 "Сумма брони (RUB)": total_price_value,
                 "Цена": total_price_value,
+                "Адрес доставки": delivery_address_value,
+                "Стоимость доставки (RUB)": delivery_price_value,
                 "ID Менеджера": manager_id_value,
                 "Telegram ID Менеджера": manager_id_value,
                 "Имя менеджера": str(manager_name or manager_id),

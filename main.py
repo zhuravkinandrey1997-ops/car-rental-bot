@@ -110,6 +110,9 @@ class BookingForm(StatesGroup):
     car = State()
     client_name = State()
     phone = State()
+    delivery = State()
+    delivery_address = State()
+    delivery_price = State()
     price = State()
     prepayment = State()
     start_mileage = State()
@@ -438,6 +441,23 @@ def direct_deposit_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="⚠️ Удержать залог",
                     callback_data="direct_deposit:retain",
+                ),
+            ]
+        ]
+    )
+
+
+def delivery_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚗 Нужна доставка",
+                    callback_data="delivery_yes",
+                ),
+                InlineKeyboardButton(
+                    text="🏢 Самовывоз",
+                    callback_data="delivery_no",
                 ),
             ]
         ]
@@ -3689,11 +3709,81 @@ async def booking_phone(message: Message, state: FSMContext) -> None:
             "Введите дату окончания аренды в формате ГГГГ-ММ-ДД:"
         )
         return
-    await state.set_state(BookingForm.price)
     if data.get("booking_mode") == "reservation":
-        await message.answer("Введите итоговую стоимость аренды в RUB:")
-    else:
-        await message.answer("Введите принятую сумму аренды в RUB:")
+        await state.set_state(BookingForm.delivery)
+        await message.answer(
+            "Нужна ли доставка автомобиля?",
+            reply_markup=delivery_choice_keyboard(),
+        )
+        return
+    await state.set_state(BookingForm.price)
+    await message.answer("Введите принятую сумму аренды в RUB:")
+
+
+async def booking_delivery_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or callback.data not in {"delivery_yes", "delivery_no"}:
+        await callback.answer()
+        return
+    if await state.get_state() != BookingForm.delivery.state:
+        await callback.answer(
+            "Этот выбор устарел. Продолжите оформление брони заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if data.get("booking_mode") != "reservation":
+        await callback.answer(
+            "Доставка доступна только при создании новой брони.",
+            show_alert=True,
+        )
+        return
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    if callback.data == "delivery_yes":
+        await state.set_state(BookingForm.delivery_address)
+        await callback.message.answer("Введите адрес доставки автомобиля:")
+        return
+    await state.update_data(
+        delivery_address="Самовывоз",
+        delivery_price=0,
+    )
+    await state.set_state(BookingForm.price)
+    await callback.message.answer("Введите итоговую стоимость аренды в RUB:")
+
+
+async def booking_delivery_address(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    address = (message.text or "").strip()
+    if not address:
+        await message.answer("Введите адрес доставки текстом.")
+        return
+    await state.update_data(delivery_address=address)
+    await state.set_state(BookingForm.delivery_price)
+    await message.answer(
+        "Введите стоимость доставки в RUB (целое число, можно 0):"
+    )
+
+
+async def booking_delivery_price(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    delivery_price, error = _parse_int(
+        message.text or "",
+        "стоимость доставки",
+        minimum=0,
+    )
+    if error:
+        await message.answer(error)
+        return
+    await state.update_data(delivery_price=delivery_price)
+    await state.set_state(BookingForm.price)
+    await message.answer("Введите итоговую стоимость аренды в RUB:")
 
 
 async def direct_end_date(message: Message, state: FSMContext) -> None:
@@ -3844,6 +3934,9 @@ async def _send_reservation_confirmation(
     state: FSMContext,
 ) -> None:
     data = await state.get_data()
+    rent_price = int(data.get("price", 0))
+    delivery_price = int(data.get("delivery_price", 0))
+    total_price = rent_price + delivery_price
     await state.set_state(BookingForm.confirmation)
     await message.answer(
         "Проверьте новую бронь:\n\n"
@@ -3851,7 +3944,10 @@ async def _send_reservation_confirmation(
         f"Период: {data['start_date']} — {data['end_date']}\n"
         f"Клиент: {data['client_name']}\n"
         f"Телефон: {data['phone']}\n"
-        f"Стоимость аренды: {int(data['price']):,} RUB\n"
+        f"Стоимость аренды: {rent_price:,} RUB\n"
+        f"📍 Доставка: {data.get('delivery_address', 'Самовывоз')}\n"
+        f"🚚 Стоимость доставки: {delivery_price:,} RUB\n"
+        f"Итого: {total_price:,} RUB\n"
         f"Задаток (предоплата за бронь): {int(data['prepayment']):,} RUB\n"
         f"Способ оплаты задатка: {data['prepayment_pay_type']}\n\n"
         "Сохранить бронь?".replace(",", " "),
@@ -3882,6 +3978,8 @@ async def booking_confirmation(
                 client_name=data["client_name"],
                 phone=data["phone"],
                 price=int(data["price"]),
+                delivery_address=data.get("delivery_address", "Самовывоз"),
+                delivery_price=int(data.get("delivery_price", 0)),
                 manager_id=manager_id,
                 status="Подтверждена",
                 prepayment=int(data.get("prepayment", 0)),
@@ -3952,6 +4050,10 @@ async def booking_confirmation(
     )
     if is_reservation:
         booking_deposit = int(data.get("prepayment", 0))
+        rent_price = int(data.get("price", 0))
+        delivery_price = int(data.get("delivery_price", 0))
+        total_price = rent_price + delivery_price
+        delivery_address = data.get("delivery_address", "Самовывоз")
         booking_notification = (
             f"🔔 <b>Новая бронь №{_html_value(booking_id)}</b>\n"
             f"🚗 Автомобиль: <b>{_html_value(data.get('car_name'))}</b>\n"
@@ -3959,9 +4061,12 @@ async def booking_confirmation(
             f"{_html_value(data.get('end_date'))}</b>\n"
             f"👤 Клиент: <b>{_html_value(data.get('client_name'))}</b> "
             f"(тел: {_html_value(data.get('phone'))})\n"
-            f"💰 Сумма: <b>{_format_number(data.get('price', 0))} ₽</b> | "
+            f"💰 Сумма: <b>{_format_number(total_price)} ₽</b> "
+            f"(аренда: <b>{_format_number(rent_price)} ₽</b>) | "
             f"Задаток: <b>{_format_number(booking_deposit)} ₽</b> "
             f"({_html_value(data.get('prepayment_pay_type'), 'Без оплаты')})\n"
+            f"📍 Доставка: <b>{_html_value(delivery_address)}</b> "
+            f"(Стоимость: <b>{_format_number(delivery_price)} ₽</b>)\n"
             f"👨‍💼 Оформил менеджер: <b>{_html_value(manager_name)}</b>"
         )
     else:
@@ -4878,6 +4983,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(payment_method_callback, F.data.startswith("payment:"))
     dispatcher.callback_query.register(cleanliness_callback, F.data.startswith("cleanliness:"))
     dispatcher.callback_query.register(
+        booking_delivery_callback,
+        F.data.in_({"delivery_yes", "delivery_no"}),
+    )
+    dispatcher.callback_query.register(
         direct_issuance_car_confirmation,
         F.data.startswith("direct_issuance_car:"),
     )
@@ -4977,6 +5086,14 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(booking_car, BookingForm.car)
     dispatcher.message.register(booking_client_name, BookingForm.client_name)
     dispatcher.message.register(booking_phone, BookingForm.phone)
+    dispatcher.message.register(
+        booking_delivery_address,
+        BookingForm.delivery_address,
+    )
+    dispatcher.message.register(
+        booking_delivery_price,
+        BookingForm.delivery_price,
+    )
     dispatcher.message.register(booking_price, BookingForm.price)
     dispatcher.message.register(booking_prepayment, BookingForm.prepayment)
     dispatcher.message.register(booking_start_mileage, BookingForm.start_mileage)
