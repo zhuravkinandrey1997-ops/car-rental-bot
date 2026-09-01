@@ -337,7 +337,10 @@ def calendar_keyboard(
 def _calendar_prompt(flow: str, stage: str, minimum_date: datetime.date | None = None) -> str:
     minimum_text = ""
     if minimum_date:
-        minimum_text = f"\nМинимальная дата: {minimum_date.strftime('%d.%m.%Y')}."
+        minimum_text = (
+            f"\nМинимальная дата: "
+            f"{format_date_ru(minimum_date.isoformat())}."
+        )
     if stage == "start":
         return (
             "Выберите дату начала аренды в календаре."
@@ -346,7 +349,7 @@ def _calendar_prompt(flow: str, stage: str, minimum_date: datetime.date | None =
         )
     if minimum_date:
         return (
-            f"🟢 Дата начала: {minimum_date.isoformat()}. "
+            f"🟢 Дата начала: {format_date_ru(minimum_date.isoformat())}. "
             "Теперь выберите 🔴 Дату окончания (по):"
             "\nМожно также ввести дату текстом в формате ГГГГ-ММ-ДД."
         )
@@ -362,7 +365,8 @@ def _period_selection_text(start_date: str, end_date: str) -> str:
     end = datetime.date.fromisoformat(end_date)
     total_days = (end - start).days + 1
     return (
-        f"📅 Выбран период: 🟢 {start_date} ➔ 🔴 {end_date} "
+        f"📅 Выбран период: 🟢 {format_date_ru(start_date)} ➔ "
+        f"🔴 {format_date_ru(end_date)} "
         f"(всего {total_days} дней)"
     )
 
@@ -546,8 +550,8 @@ def cancellation_booking_keyboard(bookings: list[dict]) -> InlineKeyboardMarkup:
     for index, booking in enumerate(bookings):
         text = (
             f"Бронь #{_booking_id(booking)} · "
-            f"{_value(booking, 'Дата начала (ГГГГ-ММ-ДД)', 'Дата начала')} — "
-            f"{_value(booking, 'Дата окончания (ГГГГ-ММ-ДД)', 'Дата окончания')} · "
+            f"{format_date_ru(_value(booking, 'Дата начала (ГГГГ-ММ-ДД)', 'Дата начала'))} — "
+            f"{format_date_ru(_value(booking, 'Дата окончания (ГГГГ-ММ-ДД)', 'Дата окончания'))} · "
             f"{_value(booking, 'ФИО Клиента', 'Клиент', 'Клиент ФИО')}"
         )
         rows.append(
@@ -683,7 +687,7 @@ def expense_cancellation_keyboard(
     for index, expense in enumerate(expenses):
         raw_amount = str(expense.get("Сумма (RUB)") or "0")
         amount = _format_number(raw_amount.replace(" ", "").replace(",", ""))
-        date = _value(expense, "Дата", default="—")
+        date = format_date_ru(_value(expense, "Дата", default="—"))
         category = _value(expense, "Категория / На что", default="—")
         vehicle = _value(
             expense,
@@ -884,6 +888,34 @@ def _value(record: dict, *keys: str, default: str = "—") -> str:
     return default
 
 
+def format_date_ru(date_str: str) -> str:
+    """Преобразует дату из YYYY-MM-DD или ISO в DD.MM.YYYY."""
+    if not date_str:
+        return ""
+    date_text = str(date_str)
+    try:
+        if "." in date_text and len(date_text.split(".")[0]) == 2:
+            return date_text
+        dt = datetime.datetime.strptime(date_text.split()[0], "%Y-%m-%d")
+        return dt.strftime("%d.%m.%Y")
+    except Exception:
+        return date_text
+
+
+def _format_datetime_ru(date_time_str: str) -> str:
+    """Format an ISO date-time for Telegram while retaining its time."""
+    if not date_time_str:
+        return ""
+    date_time_text = str(date_time_str).strip()
+    parts = date_time_text.replace("T", " ").split(maxsplit=1)
+    formatted_date = format_date_ru(parts[0])
+    return (
+        f"{formatted_date} {parts[1]}"
+        if len(parts) > 1
+        else formatted_date
+    )
+
+
 def _html_value(value: object, default: str = "—") -> str:
     text = str(value).strip() if value is not None else ""
     return html.escape(text or default)
@@ -978,7 +1010,8 @@ def _booking_card_text(booking: dict) -> str:
         f"Клиент: {client_name} ({phone})\n"
         f"Менеджер: {_booking_manager_name(booking)}\n"
         f"Задаток: {_booking_prepayment_text(booking)}\n"
-        f"Период: {start_date} — {end_date}\n"
+        f"Период: {format_date_ru(start_date)} — "
+        f"{format_date_ru(end_date)}\n"
         f"Статус: {_value(booking, 'Статус', default='—')}"
     )
 
@@ -1066,8 +1099,8 @@ def _booking_label(booking: dict) -> str:
         saved_plate = _value(booking, "Госномер", "Номер авто", "Номер", "Plate")
         car = f"{saved_name} ({saved_plate})"
     dates = (
-        f"{_value(booking, 'Дата начала (ГГГГ-ММ-ДД)', 'Дата начала')} — "
-        f"{_value(booking, 'Дата окончания (ГГГГ-ММ-ДД)', 'Дата окончания')}"
+        f"{format_date_ru(_value(booking, 'Дата начала (ГГГГ-ММ-ДД)', 'Дата начала'))} — "
+        f"{format_date_ru(_value(booking, 'Дата окончания (ГГГГ-ММ-ДД)', 'Дата окончания'))}"
     )
     return f"{car} · {dates}"
 
@@ -1251,7 +1284,7 @@ def build_tomorrow_summary(
     events: dict[str, list[dict]],
     cars: list[dict] | None = None,
 ) -> str:
-    date_label = target_date.strftime("%d.%m.%Y")
+    date_label = format_date_ru(target_date.isoformat())
     issuances = events.get("issuances", [])
     returns = events.get("returns", [])
     if not issuances and not returns:
@@ -1816,7 +1849,7 @@ def _format_expense_history(
         lines.append(
             "• "
             f"№{_value(expense, 'ID Записи', 'ID', default='—')} | "
-            f"{_value(expense, 'Дата', default='—')} | "
+            f"{format_date_ru(_value(expense, 'Дата', default='—'))} | "
             f"{_format_number(amount)} ₽ | "
             f"{_value(expense, 'Категория / На что', 'Категория', default='—')} | "
             f"{_expense_history_vehicle(expense)} | "
@@ -2486,7 +2519,7 @@ async def expense_cancel_select_callback(
     await callback.message.answer(
         "Подтвердите отмену расхода:\n\n"
         f"ID: {expense_id}\n"
-        f"Дата: {_value(expense, 'Дата', default='—')}\n"
+        f"Дата: {format_date_ru(_value(expense, 'Дата', default='—'))}\n"
         f"Сумма: {_format_number(expense_amount.replace(' ', '').replace(',', ''))} RUB\n"
         f"Статья: {_value(expense, 'Категория / На что', default='—')}\n"
         "Авто: "
@@ -3528,7 +3561,7 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
     selected_value = selected_date.isoformat()
     if flow == "occupancy" and stage == "calendar":
         await callback.answer(
-            f"Свободная дата: {selected_date.strftime('%d.%m.%Y')}"
+            f"Свободная дата: {format_date_ru(selected_value)}"
         )
         return
     await callback.answer()
@@ -3549,7 +3582,8 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
 
     if flow == "availability" and stage == "end":
         await message.edit_text(
-            f"Период выбран: {data['start_date']} — {selected_value}"
+            f"Период выбран: {format_date_ru(data['start_date'])} — "
+            f"{format_date_ru(selected_value)}"
         )
         await _finish_availability(message, state, data["start_date"], selected_value)
         return
@@ -3915,7 +3949,8 @@ async def _send_booking_confirmation(message: Message, state: FSMContext) -> Non
     await message.answer(
         "Проверьте акт выдачи авто:\n\n"
         f"Авто: {data['car_name']}\n"
-        f"Период: {data['start_date']} — {data['end_date']}\n"
+        f"Период: {format_date_ru(data['start_date'])} — "
+        f"{format_date_ru(data['end_date'])}\n"
         f"Клиент: {data['client_name']}\n"
         f"Телефон: {data['phone']}\n"
         f"{direct_payment_text}"
@@ -3923,7 +3958,7 @@ async def _send_booking_confirmation(message: Message, state: FSMContext) -> Non
         f"Начальный пробег: {int(data['start_mileage']):,} км\n"
         f"Страховой залог: {int(data['deposit']):,} RUB\n"
         f"Оплата страхового залога: {data['deposit_pay_type']}\n"
-        f"Дата и время выдачи: {issued_at}".replace(",", " ")
+        f"Дата и время выдачи: {_format_datetime_ru(issued_at)}".replace(",", " ")
         + "\n\nСохранить выдачу авто?",
         reply_markup=confirmation_keyboard(),
     )
@@ -3941,7 +3976,8 @@ async def _send_reservation_confirmation(
     await message.answer(
         "Проверьте новую бронь:\n\n"
         f"Авто: {data['car_name']}\n"
-        f"Период: {data['start_date']} — {data['end_date']}\n"
+        f"Период: {format_date_ru(data['start_date'])} — "
+        f"{format_date_ru(data['end_date'])}\n"
         f"Клиент: {data['client_name']}\n"
         f"Телефон: {data['phone']}\n"
         f"Стоимость аренды: {rent_price:,} RUB\n"
@@ -4057,8 +4093,8 @@ async def booking_confirmation(
         booking_notification = (
             f"🔔 <b>Новая бронь №{_html_value(booking_id)}</b>\n"
             f"🚗 Автомобиль: <b>{_html_value(data.get('car_name'))}</b>\n"
-            f"📅 Период: <b>{_html_value(data.get('start_date'))} — "
-            f"{_html_value(data.get('end_date'))}</b>\n"
+            f"📅 Период: <b>{_html_value(format_date_ru(data.get('start_date', '')))} — "
+            f"{_html_value(format_date_ru(data.get('end_date', '')))}</b>\n"
             f"👤 Клиент: <b>{_html_value(data.get('client_name'))}</b> "
             f"(тел: {_html_value(data.get('phone'))})\n"
             f"💰 Сумма: <b>{_format_number(total_price)} ₽</b> "
@@ -4760,8 +4796,8 @@ async def return_notes(message: Message, state: FSMContext) -> None:
         f"• Автомобиль: {_car_name(data['car'])} ({_car_plate(data['car'])})\n"
         f"• Клиент: {_value(data['booking'], 'ФИО Клиента', 'Клиент', default='—')} / {phone}\n"
         f"• Менеджер приёмки: {manager_name}\n"
-        f"• Фактический период: {issued_at} — "
-        f"{data.get('returned_at', _timestamp())}\n\n"
+        f"• Фактический период: {_format_datetime_ru(issued_at)} — "
+        f"{_format_datetime_ru(data.get('returned_at', _timestamp()))}\n\n"
         "\n💰 РАСЧЕТ АРЕНДЫ:\n"
         f"• Полная стоимость аренды: {_format_number(rental_total)} RUB "
         f"({_format_number(calculation['daily_rate'])} × "
