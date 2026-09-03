@@ -62,6 +62,7 @@ from sheets_client import (
     get_partner_bookings,
     get_partner_cars,
     get_partner_expenses,
+    get_manager_access,
     is_manager_authorized,
     is_partner_authorized,
     issue_booking,
@@ -389,9 +390,20 @@ def partner_menu_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+def get_main_keyboard(
+    user_id: int,
+    role: str | None = None,
+) -> ReplyKeyboardMarkup:
     uid = int(user_id)
-    if uid == PARTNER_ID:
+    if role is None and uid != PARTNER_ID:
+        try:
+            access = get_manager_access(uid)
+            if access and access["active"]:
+                role = access["role"]
+        except Exception:
+            logger.exception("Could not resolve role for menu")
+    normalized_role = str(role or "").strip().lower()
+    if uid == PARTNER_ID or normalized_role in {"партнёр", "партнер", "partner"}:
         return partner_menu_keyboard()
     buttons = [
         [
@@ -407,7 +419,7 @@ def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
             KeyboardButton(text="🔎 Проверка броней"),
         ],
     ]
-    if uid in ADMIN_IDS:
+    if normalized_role in {"администратор", "admin"}:
         buttons.append(
             [
                 KeyboardButton(text="💸 Внести расход"),
@@ -1630,11 +1642,32 @@ def _deposit_outcome_text(calculation: dict[str, int | str]) -> str:
     )
 
 
+def _manager_access_for_user(user_id: int) -> dict | None:
+    if str(user_id).strip() == str(PARTNER_ID):
+        return {
+            "user_id": str(PARTNER_ID),
+            "role": "партнёр",
+            "active": True,
+        }
+    return get_manager_access(user_id)
+
+
+def _normalized_role(access: dict | None) -> str:
+    return str(access.get("role", "") if access else "").strip().lower()
+
+
 def is_partner_user(user_id: int) -> bool:
-    if int(user_id) == PARTNER_ID:
-        return True
     try:
-        return is_partner_authorized(user_id)
+        access = _manager_access_for_user(user_id)
+        return bool(
+            access
+            and access["active"]
+            and (
+                str(user_id).strip() == str(PARTNER_ID)
+                or _normalized_role(access)
+                in {"партнёр", "партнер", "partner"}
+            )
+        )
     except Exception:
         logger.exception("Partner authorization check failed")
         return False
@@ -1651,11 +1684,24 @@ def _partner_car_status(car: dict) -> str:
 
 async def ensure_partner(message: Message) -> bool:
     user = message.from_user
-    if user is not None and is_partner_user(user.id):
+    if user is None:
+        return False
+    try:
+        access = _manager_access_for_user(user.id)
+    except Exception:
+        logger.exception("Partner authorization check failed")
+        await message.answer("Не удалось проверить доступ. Попробуйте ещё раз позже.")
+        return False
+    if access is None:
+        await message.answer(
+            f"У вас нет доступа к системе. Ваш ID: {str(user.id).strip()}"
+        )
+        return False
+    if is_partner_user(user.id):
         return True
     await message.answer(
         "Эта функция доступна только партнёру по автомобилю Dodge.",
-        reply_markup=get_main_keyboard(user.id if user else 0),
+        reply_markup=get_main_keyboard(user.id, _normalized_role(access)),
     )
     return False
 
@@ -1664,21 +1710,25 @@ async def ensure_manager(message: Message) -> bool:
     user = message.from_user
     if user is None:
         return False
-    if is_partner_user(user.id):
-        await message.answer(
-            "Административные функции недоступны в партнёрском режиме.",
-            reply_markup=partner_menu_keyboard(),
-        )
-        return False
     try:
-        authorized = is_manager_authorized(user.id)
+        access = _manager_access_for_user(user.id)
     except Exception:
         logger.exception("Manager authorization check failed")
         await message.answer("Не удалось проверить доступ. Попробуйте ещё раз позже.")
         return False
-    if not authorized:
+    user_id = str(user.id).strip()
+    if access is None:
+        await message.answer(f"У вас нет доступа к системе. Ваш ID: {user_id}")
+        return False
+    if not access["active"]:
         await message.answer(
             "У вас нет активного доступа менеджера. Обратитесь к администратору."
+        )
+        return False
+    if is_partner_user(user.id):
+        await message.answer(
+            "Административные функции недоступны в партнёрском режиме.",
+            reply_markup=partner_menu_keyboard(),
         )
         return False
     return True
@@ -1851,26 +1901,51 @@ async def partner_expenses(message: Message) -> None:
 
 async def ensure_finance_access(message: Message) -> bool:
     user = message.from_user
-    if user is not None and is_partner_user(user.id):
+    if user is None:
+        await message.answer("Не удалось определить пользователя.")
+        return False
+    try:
+        access = _manager_access_for_user(user.id)
+    except Exception:
+        logger.exception("Finance authorization check failed")
+        await message.answer("Не удалось проверить доступ. Попробуйте ещё раз позже.")
+        return False
+    if access is None:
+        await message.answer(f"У вас нет доступа к системе. Ваш ID: {str(user.id).strip()}")
+        return False
+    if not access["active"]:
+        await message.answer(
+            "У вас нет активного доступа менеджера. Обратитесь к администратору."
+        )
+        return False
+    if is_partner_user(user.id):
         await message.answer(
             "Финансовые операции недоступны в партнёрском режиме.",
             reply_markup=partner_menu_keyboard(),
         )
         return False
-    if user is None or user.id not in FINANCE_MANAGER_IDS:
+    if _normalized_role(access) not in {"администратор", "admin"}:
         await message.answer(
             "Финансовые операции доступны только уполномоченным менеджерам.",
-            reply_markup=get_main_keyboard(message.from_user.id),
+            reply_markup=get_main_keyboard(user.id, _normalized_role(access)),
         )
         return False
     return True
 
 
 def _callback_has_finance_access(callback: CallbackQuery) -> bool:
-    return (
-        callback.from_user is not None
-        and callback.from_user.id in FINANCE_MANAGER_IDS
-    )
+    if callback.from_user is None:
+        return False
+    try:
+        access = _manager_access_for_user(callback.from_user.id)
+        return bool(
+            access
+            and access["active"]
+            and _normalized_role(access) in {"администратор", "admin"}
+        )
+    except Exception:
+        logger.exception("Finance callback authorization check failed")
+        return False
 
 
 def _format_financial_report(report: dict) -> str:

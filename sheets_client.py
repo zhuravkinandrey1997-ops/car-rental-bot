@@ -270,29 +270,41 @@ for acceptance_header in ACCEPTANCE_ACT_HEADERS:
         )
 
 
-def is_manager_authorized(tg_id: int) -> bool:
-    managers = ws_managers.get_all_records()
-    for m in managers:
-        if str(m.get("Telegram ID")) == str(tg_id) and str(m.get("Доступ активен")).lower() in ["да", "yes", "true"]:
-            return True
-    return False
-
-
-def is_partner_authorized(tg_id: int) -> bool:
-    """Return whether an active manager row has the partner role."""
-    partner_roles = {"партнёр", "партнер", "partner"}
+def get_manager_access(tg_id: int) -> dict | None:
+    """Return normalized access data for a Telegram ID from Менеджеры."""
+    user_id = str(tg_id).strip()
     for manager in ws_managers.get_all_records():
-        if str(manager.get("Telegram ID", "")).strip() != str(tg_id):
+        cell_tg_id = str(manager.get("Telegram ID", "")).strip()
+        if cell_tg_id != user_id:
             continue
-        access = str(manager.get("Доступ активен", "")).strip().casefold()
-        role = str(
+        cell_role = (
             manager.get("Роль")
             or manager.get("Role")
             or manager.get("Тип доступа")
             or ""
-        ).strip().casefold()
-        return access in {"да", "yes", "true"} and role in partner_roles
-    return False
+        )
+        return {
+            "user_id": cell_tg_id,
+            "role": str(cell_role).strip().lower(),
+            "active": str(manager.get("Доступ активен", "")).strip().lower()
+            in ["да", "yes", "true"],
+        }
+    return None
+
+
+def is_manager_authorized(tg_id: int) -> bool:
+    access = get_manager_access(tg_id)
+    return bool(access and access["active"])
+
+
+def is_partner_authorized(tg_id: int) -> bool:
+    """Return whether an active manager row has the partner role."""
+    access = get_manager_access(tg_id)
+    return bool(
+        access
+        and access["active"]
+        and access["role"] in {"партнёр", "партнер", "partner"}
+    )
 
 
 def get_active_manager_ids() -> list[int]:
