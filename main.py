@@ -1735,6 +1735,7 @@ async def ensure_manager(message: Message) -> bool:
 
 
 async def cancel_flow(message: Message, state: FSMContext) -> None:
+    # Always discard any partially completed flow before returning to the menu.
     await state.clear()
     reply_markup = (
         partner_menu_keyboard()
@@ -1766,6 +1767,8 @@ async def show_menu(message: Message, state: FSMContext) -> None:
 
 
 async def start_handler(message: Message, state: FSMContext) -> None:
+    # /start must interrupt every active FSM flow, including stale states.
+    await state.clear()
     await show_menu(message, state)
 
 
