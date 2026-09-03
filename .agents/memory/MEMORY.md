@@ -7,3 +7,4 @@
 - [Financial report revenue](financial-report-revenue.md) — profit and Ksenia's 10% use actual received return income, not accrued rental cost.
 - [Partner car filtering](partner-car-filtering.md) — match partner expenses by make/model or plate, never numeric IDs embedded in vehicle text.
 - [Manager authorization normalization](manager-auth-normalization.md) — normalize ID, role, and active status before routing; active unknown roles default to manager access.
+- [Telegram ID formatting](telegram-id-formatting.md) — compare manager IDs after removing spaces and a Sheets-style `.0` suffix.

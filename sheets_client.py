@@ -327,7 +327,12 @@ def get_active_manager_ids() -> list[int]:
         access = str(manager.get("Доступ активен", "")).strip().lower()
         if access not in {"да", "yes", "true"}:
             continue
-        raw_id = str(manager.get("Telegram ID", "")).strip()
+        raw_id = (
+            str(manager.get("Telegram ID", ""))
+            .strip()
+            .replace(" ", "")
+            .replace(".0", "")
+        )
         try:
             manager_id = int(raw_id)
         except ValueError:
@@ -348,7 +353,12 @@ def get_pending_notification_manager_ids(
         if access not in {"да", "yes", "true"}:
             continue
         try:
-            manager_id = int(str(manager.get("Telegram ID", "")).strip())
+            manager_id = int(
+                str(manager.get("Telegram ID", ""))
+                .strip()
+                .replace(" ", "")
+                .replace(".0", "")
+            )
         except ValueError:
             continue
         already_sent = (
@@ -370,7 +380,13 @@ def mark_notification_sent(
     headers = _ensure_headers(ws_managers, ["Последний план на дату"])
     column = headers.index("Последний план на дату") + 1
     for row_number, manager in enumerate(records, start=2):
-        if str(manager.get("Telegram ID", "")).strip() == str(manager_id):
+        sheet_id = (
+            str(manager.get("Telegram ID", ""))
+            .strip()
+            .replace(" ", "")
+            .replace(".0", "")
+        )
+        if sheet_id == str(manager_id).strip():
             ws_managers.update_cell(
                 row_number,
                 column,

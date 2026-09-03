@@ -1694,7 +1694,16 @@ async def ensure_partner(message: Message) -> bool:
         return False
     if access is None:
         await message.answer(
-            f"У вас нет доступа к системе. Ваш ID: {str(user.id).strip()}"
+            "Доступ ограничен. "
+            f"Ваш Telegram ID: {str(user.id).strip()}. "
+            "Сообщите его администратору."
+        )
+        return False
+    if not access["active"]:
+        await message.answer(
+            "Доступ ограничен. "
+            f"Ваш Telegram ID: {str(user.id).strip()}. "
+            "Сообщите его администратору."
         )
         return False
     if is_partner_user(user.id):
@@ -1718,11 +1727,17 @@ async def ensure_manager(message: Message) -> bool:
         return False
     user_id = str(user.id).strip()
     if access is None:
-        await message.answer(f"У вас нет доступа к системе. Ваш ID: {user_id}")
+        await message.answer(
+            "Доступ ограничен. "
+            f"Ваш Telegram ID: {user_id}. "
+            "Сообщите его администратору."
+        )
         return False
     if not access["active"]:
         await message.answer(
-            "У вас нет активного доступа менеджера. Обратитесь к администратору."
+            "Доступ ограничен. "
+            f"Ваш Telegram ID: {user_id}. "
+            "Сообщите его администратору."
         )
         return False
     if is_partner_user(user.id):
@@ -1760,9 +1775,27 @@ async def show_menu(message: Message, state: FSMContext) -> None:
     if not await ensure_manager(message):
         return
     await state.clear()
+    access = _manager_access_for_user(message.from_user.id)
+    if (
+        access
+        and access["active"]
+        and _normalized_role(access) in {"менеджер", "manager"}
+        and str(message.from_user.id).strip() == "946721277"
+    ):
+        await message.answer(
+            "Добро пожаловать, Влад! Выберите действие:",
+            reply_markup=get_main_keyboard(
+                message.from_user.id,
+                _normalized_role(access),
+            ),
+        )
+        return
     await message.answer(
         "Панель управления автопрокатом готова. Выберите операцию:",
-        reply_markup=get_main_keyboard(message.from_user.id),
+        reply_markup=get_main_keyboard(
+            message.from_user.id,
+            _normalized_role(access),
+        ),
     )
 
 
@@ -1914,11 +1947,17 @@ async def ensure_finance_access(message: Message) -> bool:
         await message.answer("Не удалось проверить доступ. Попробуйте ещё раз позже.")
         return False
     if access is None:
-        await message.answer(f"У вас нет доступа к системе. Ваш ID: {str(user.id).strip()}")
+        await message.answer(
+            "Доступ ограничен. "
+            f"Ваш Telegram ID: {str(user.id).strip()}. "
+            "Сообщите его администратору."
+        )
         return False
     if not access["active"]:
         await message.answer(
-            "У вас нет активного доступа менеджера. Обратитесь к администратору."
+            "Доступ ограничен. "
+            f"Ваш Telegram ID: {str(user.id).strip()}. "
+            "Сообщите его администратору."
         )
         return False
     if is_partner_user(user.id):
