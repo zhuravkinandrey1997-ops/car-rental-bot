@@ -272,10 +272,16 @@ for acceptance_header in ACCEPTANCE_ACT_HEADERS:
 
 def get_manager_access(tg_id: int) -> dict | None:
     """Return normalized access data for a Telegram ID from Менеджеры."""
-    user_id = str(tg_id).strip()
+    clean_user_id = str(tg_id).strip()
+    role = ""
     for manager in ws_managers.get_all_records():
-        cell_tg_id = str(manager.get("Telegram ID", "")).strip()
-        if cell_tg_id != user_id:
+        sheet_id = (
+            str(manager.get("Telegram ID", ""))
+            .strip()
+            .replace(" ", "")
+            .replace(".0", "")
+        )
+        if clean_user_id != sheet_id:
             continue
         cell_role = (
             manager.get("Роль")
@@ -283,12 +289,19 @@ def get_manager_access(tg_id: int) -> dict | None:
             or manager.get("Тип доступа")
             or ""
         )
+        role = str(cell_role).strip().lower()
+        active = str(manager.get("Доступ активен", "")).strip().lower() in [
+            "да",
+            "yes",
+            "true",
+        ]
+        print(f"[AUTH] Запрос от ID: {clean_user_id}, найденная роль: {role}")
         return {
-            "user_id": cell_tg_id,
-            "role": str(cell_role).strip().lower(),
-            "active": str(manager.get("Доступ активен", "")).strip().lower()
-            in ["да", "yes", "true"],
+            "user_id": clean_user_id,
+            "role": role,
+            "active": active,
         }
+    print(f"[AUTH] Запрос от ID: {clean_user_id}, найденная роль: {role}")
     return None
 
 
