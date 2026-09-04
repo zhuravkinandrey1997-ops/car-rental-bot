@@ -3539,7 +3539,9 @@ async def start_occupancy(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     try:
-        cars = get_active_cars()
+        # Occupancy inspection must include every car, even currently rented
+        # or reserved ones, so managers can inspect their occupied dates.
+        cars = get_all_cars()
     except Exception:
         logger.exception("Could not load cars for occupancy calendar")
         await message.answer(
@@ -3549,7 +3551,7 @@ async def start_occupancy(message: Message, state: FSMContext) -> None:
         return
     if not cars:
         await message.answer(
-            "В листе Автомобили нет активных автомобилей.",
+            "В листе Автомобили нет автомобилей.",
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
