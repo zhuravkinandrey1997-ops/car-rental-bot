@@ -1329,6 +1329,53 @@ def _format_number(value: object) -> str:
     return f"{safe_int(value):,}".replace(",", " ")
 
 
+def build_issuance_notification(
+    data: dict,
+    booking_id: object,
+    car: dict,
+    manager_name: str,
+    *,
+    is_direct_issuance: bool = False,
+) -> str:
+    """Build the manager notification for a completed vehicle issuance."""
+    fuel_level = _value(
+        car,
+        "Уровень топлива",
+        "Топливо",
+        "Уровень топлива (%)",
+        "Топливо (%)",
+        "Топливо при выдаче",
+        default="—",
+    )
+    issuance_backdated_text = (
+        "⚠️ <b>Оформлено задним числом</b>\n"
+        if data.get("backdated")
+        else ""
+    )
+    rent_amount = data.get("price", 0)
+    payment_method = data.get("pay_type", "Без оплаты")
+    deposit_amount = data.get("deposit", 0)
+    deposit_payment_method = data.get("deposit_pay_type", "Без оплаты")
+    return (
+        "🚗 <b>Автомобиль выдан клиенту!</b>\n"
+        f"🧾 Основание: "
+        f"<b>{'срочная выдача без брони' if is_direct_issuance else f'бронь №{_html_value(booking_id)}'}</b>\n"
+        f"🚘 Авто: <b>{_html_value(_car_name(car))} "
+        f"({_html_value(_car_plate(car))})</b>\n"
+        f"👤 Клиент: <b>{_html_value(data.get('client_name'))}</b>\n"
+        f"💰 Аренда: <b>{_format_number(rent_amount)} ₽</b> "
+        f"({_html_value(payment_method, 'Без оплаты')})\n"
+        f"🛡 Залог: <b>{_format_number(deposit_amount)} ₽</b> "
+        f"({_html_value(deposit_payment_method, 'Без оплаты')})\n"
+        f"📍 Пробег на выезде: <b>"
+        f"{_html_value(data.get('start_mileage'))} км</b>\n"
+        f"⛽ Уровень топлива: <b>{_html_value(fuel_level)}</b>\n"
+        f"⏱ Период: <b>{_html_value(_issue_datetime_text(data.get('issued_at', ''), data.get('planned_end_at', '')))}</b>\n"
+        f"{issuance_backdated_text}"
+        f"👨‍💼 Выдал менеджер: <b>{_html_value(manager_name)}</b>"
+    )
+
+
 def _now_minsk() -> datetime.datetime:
     return datetime.datetime.now(MINSK_TZ).replace(second=0, microsecond=0)
 
@@ -4843,43 +4890,13 @@ async def booking_confirmation(
     else:
         booking = data.get("booking", {})
         car = data.get("car", {})
-        fuel_level = _value(
+        booking_notification = build_issuance_notification(
+            data,
+            booking_id,
             car,
-            "Уровень топлива",
-            "Топливо",
-            "Уровень топлива (%)",
-            "Топливо (%)",
-            "Топливо при выдаче",
-            default="—",
+            manager_name,
+            is_direct_issuance=is_direct_issuance,
         )
-        issuance_backdated_text = (
-            "⚠️ <b>Оформлено задним числом</b>\n"
-            if data.get("backdated")
-            else ""
-        )
-        rent_amount = data["price"]
-        payment_method = data["pay_type"]
-        deposit_amount = data["deposit"]
-        deposit_payment_method = data["deposit_pay_type"]
-        issuance_notification = (
-            "🚗 <b>Автомобиль выдан клиенту!</b>\n"
-            f"🧾 Основание: "
-            f"<b>{'срочная выдача без брони' if is_direct_issuance else f'бронь №{_html_value(booking_id)}'}</b>\n"
-            f"🚘 Авто: <b>{_html_value(_car_name(car))} "
-            f"({_html_value(_car_plate(car))})</b>\n"
-            f"👤 Клиент: <b>{_html_value(data.get('client_name'))}</b>\n"
-            f"💰 Аренда: <b>{_format_number(rent_amount)} ₽</b> "
-            f"({_html_value(payment_method)})\n"
-            f"🛡 Залог: <b>{_format_number(deposit_amount)} ₽</b> "
-            f"({_html_value(deposit_payment_method)})\n"
-            f"📍 Пробег на выезде: <b>"
-            f"{_html_value(data.get('start_mileage'))} км</b>\n"
-            f"⛽ Уровень топлива: <b>{_html_value(fuel_level)}</b>\n"
-            f"⏱ Период: <b>{_html_value(_issue_datetime_text(data.get('issued_at', ''), data.get('planned_end_at', '')))}</b>\n"
-            f"{issuance_backdated_text}"
-            f"👨‍💼 Выдал менеджер: <b>{_html_value(manager_name)}</b>"
-        )
-        booking_notification = issuance_notification
     notification_car_name = (
         data.get("car_name", "")
         if is_direct_issuance
