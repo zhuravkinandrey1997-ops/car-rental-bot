@@ -3588,6 +3588,20 @@ async def issuance_booking(message: Message, state: FSMContext) -> None:
             "Клиент",
         ),
         phone=_value(booking, "Телефон", "Телефон клиента"),
+        price=_value(
+            booking,
+            "Принятая сумма аренды (RUB)",
+            "Фактически оплачено за аренду (RUB)",
+            "Сумма брони (RUB)",
+            "Цена",
+            default="0",
+        ),
+        pay_type=_value(
+            booking,
+            "Способ оплаты аренды",
+            "Способ оплаты",
+            default="Без оплаты",
+        ),
         prepayment=prepayment or 0,
         prepayment_pay_type=_value(
             booking,
@@ -4813,6 +4827,10 @@ async def booking_confirmation(
             if data.get("backdated")
             else ""
         )
+        rent_amount = data["price"]
+        payment_method = data["pay_type"]
+        deposit_amount = data["deposit"]
+        deposit_payment_method = data["deposit_pay_type"]
         issuance_notification = (
             "🚗 <b>Автомобиль выдан клиенту!</b>\n"
             f"🧾 Основание: "
@@ -4820,9 +4838,10 @@ async def booking_confirmation(
             f"🚘 Авто: <b>{_html_value(_car_name(car))} "
             f"({_html_value(_car_plate(car))})</b>\n"
             f"👤 Клиент: <b>{_html_value(data.get('client_name'))}</b>\n"
-            f"💰 Аренда: <b>{_format_number(data.get('price', 0))} ₽</b> "
-            f"({_html_value(data.get('pay_type'), 'Без оплаты')})\n"
-            f"🛡 Залог: <b>{_format_number(data.get('deposit', 0))} ₽</b>\n"
+            f"💰 Аренда: <b>{_format_number(rent_amount)} ₽</b> "
+            f"({_html_value(payment_method)})\n"
+            f"🛡 Залог: <b>{_format_number(deposit_amount)} ₽</b> "
+            f"({_html_value(deposit_payment_method)})\n"
             f"📍 Пробег на выезде: <b>"
             f"{_html_value(data.get('start_mileage'))} км</b>\n"
             f"⛽ Уровень топлива: <b>{_html_value(fuel_level)}</b>\n"
