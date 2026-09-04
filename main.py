@@ -461,6 +461,25 @@ def confirmation_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def return_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить сохранение",
+                    callback_data="confirm_return_save",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="cancel_return",
+                ),
+            ],
+        ]
+    )
+
+
 def issuance_mode_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -5842,8 +5861,47 @@ async def return_notes(message: Message, state: FSMContext) -> None:
     )
     await message.answer(
         act_text,
-        reply_markup=confirmation_keyboard(),
+        reply_markup=return_confirmation_keyboard(),
     )
+
+
+async def confirm_return_save_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+) -> None:
+    if await state.get_state() != ReturnForm.confirmation.state:
+        await callback.answer(
+            "Этот шаг приёма уже завершён или устарел.",
+            show_alert=True,
+        )
+        return
+    await callback.answer()
+    if callback.message is not None:
+        await _save_return(
+            callback.message,
+            state,
+            bot,
+            manager_id=callback.from_user.id,
+        )
+
+
+async def cancel_return_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    await callback.answer()
+    await state.clear()
+    if callback.message is not None:
+        reply_markup = (
+            partner_menu_keyboard()
+            if is_partner_user(callback.from_user.id)
+            else get_main_keyboard(callback.from_user.id)
+        )
+        await callback.message.answer(
+            "Операция отменена.",
+            reply_markup=reply_markup,
+        )
 
 
 async def return_confirmation(
@@ -5851,13 +5909,36 @@ async def return_confirmation(
     state: FSMContext,
     bot: Bot,
 ) -> None:
-    if (message.text or "").strip() != "Подтвердить":
-        await cancel_flow(message, state)
+    confirmation = (message.text or "").strip().casefold()
+    if confirmation not in {
+        "да",
+        "подтвердить",
+        "подтвердить сохранение",
+    }:
+        await message.answer(
+            "Для сохранения приёма нажмите «✅ Подтвердить сохранение» "
+            "или отправьте «Да» / «Подтвердить». "
+            "Для отмены используйте кнопку «❌ Отмена» или отправьте «Отмена».",
+            reply_markup=return_confirmation_keyboard(),
+        )
         return
+    await _save_return(message, state, bot)
+
+
+async def _save_return(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    manager_id: int | None = None,
+) -> None:
     data = await state.get_data()
     booking = data["booking"]
     car = data["car"]
-    manager_id = message.from_user.id if message.from_user else 0
+    manager_id = (
+        manager_id
+        if manager_id is not None
+        else (message.from_user.id if message.from_user else 0)
+    )
     calculation = _return_calculation(data)
     issued_datetime = _booking_issued_datetime(booking)
     issued_at = (
@@ -5992,7 +6073,7 @@ async def return_confirmation(
                 "Бронь завершена, автомобиль освобождён, пробег обновлён."
             )
         ),
-        reply_markup=get_main_keyboard(message.from_user.id),
+        reply_markup=get_main_keyboard(manager_id),
     )
     rental_paid = int(data.get("rental_paid", 0))
     additional_paid = int(data.get("total_paid", 0))
@@ -6074,6 +6155,14 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(
         rental_total_callback,
         F.data.startswith("return_rental_total:"),
+    )
+    dispatcher.callback_query.register(
+        confirm_return_save_callback,
+        F.data == "confirm_return_save",
+    )
+    dispatcher.callback_query.register(
+        cancel_return_callback,
+        F.data == "cancel_return",
     )
     dispatcher.callback_query.register(
         expense_category_callback,
