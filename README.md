@@ -48,6 +48,10 @@ Booking rows include the following data:
 `Пробег при выдаче (км)`, `Задаток/Предоплата`, `Способ оплаты задатка`,
 `Страховой залог`, `Способ оплаты страхового залога`,
 `Плановое окончание`, `Причина отмены`, `Статус задатка при отмене`.
+При возврате менеджер подтверждает расчётную стоимость аренды или вводит
+согласованную стоимость со скидкой; итоговая сумма сохраняется в
+`Сумма брони (RUB)`. Если в брони указано `Оплачено при выдаче (RUB)`, эта
+сумма также вычитается вместе с предоплатой при расчёте остатка.
 
 The `Автомобили` sheet should include `ID`, `Статус`, a vehicle name, a plate column such as
 `Госномер`, and a mileage column such as `Пробег`. `Возвраты_Касса` receives the
@@ -58,7 +62,9 @@ At booking, the bot records the reservation prepayment separately as
 `Задаток/Предоплата`. Issuance selects that confirmed booking, changes its status
 to `В аренде`, uses the base insurance deposit from `Автомобили` as a hint, and stores
 the actual amount in `Страховой залог`. At return, rental cost is calculated as
-the daily rate multiplied by rental days and reduced by the prepayment. Mileage,
+the daily rate multiplied by rental days and can be replaced by a manager-approved
+discounted total. The rental balance is reduced by the prepayment and any amount
+paid at issuance. Mileage,
 lateness, washing, and additional penalties are offset only against the insurance
 deposit; an extra damage-payment step is shown only when those penalties exceed
 the deposit. The return records the actual rental payment and method separately

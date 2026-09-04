@@ -153,6 +153,8 @@ class ReturnForm(StatesGroup):
     extra_fee = State()
     penalty_decision = State()
     manual_penalty = State()
+    rental_total_decision = State()
+    rental_total_override = State()
     rental_paid = State()
     rental_pay_type = State()
     total_paid = State()
@@ -610,6 +612,25 @@ def time_mileage_penalty_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="✍️ Ввести сумму штрафа вручную",
                     callback_data="return_penalty:manual",
+                ),
+            ],
+        ]
+    )
+
+
+def rental_total_keyboard(total_price: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"✅ Оставить {_format_number(total_price)} RUB",
+                    callback_data="return_rental_total:keep",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✍️ Изменить общую стоимость (скидка)",
+                    callback_data="return_rental_total:discount",
                 ),
             ],
         ]
@@ -1750,7 +1771,14 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
     )
     daily_rate = daily_rate or 0
     rental_days = max(1, (end_date - start_date).days + 1)
-    rental_total = 0 if data.get("direct_return") else daily_rate * rental_days
+    calculated_rental_total = (
+        0 if data.get("direct_return") else daily_rate * rental_days
+    )
+    rental_total_override = data.get("rental_total_override")
+    if rental_total_override is not None and not data.get("direct_return"):
+        rental_total = max(0, int(rental_total_override))
+    else:
+        rental_total = calculated_rental_total
     prepayment, _ = _parse_int(
         _value(
             booking,
@@ -1763,7 +1791,11 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
         minimum=0,
     )
     prepayment = prepayment or 0
-    rental_balance = rental_total - prepayment
+    rental_paid_at_issuance = max(
+        0,
+        int(data.get("rental_paid_at_issuance", 0)),
+    )
+    rental_balance = rental_total - prepayment - rental_paid_at_issuance
     rental_due = max(rental_balance, 0)
     prepayment_overpayment = max(-rental_balance, 0)
     mileage_limit = rental_days * 250
@@ -1798,7 +1830,10 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
         "daily_rate": daily_rate,
         "rental_days": rental_days,
         "rental_total": rental_total,
+        "calculated_rental_total": calculated_rental_total,
+        "rental_total_override": rental_total_override,
         "prepayment": prepayment,
+        "rental_paid_at_issuance": rental_paid_at_issuance,
         "rental_balance": rental_balance,
         "rental_due": rental_due,
         "prepayment_overpayment": prepayment_overpayment,
@@ -5012,6 +5047,7 @@ async def _prepare_return(
         }
         base_price = 0
         prepayment = 0
+        rental_paid_at_issuance = 0
         deposit_pay_type = "Без оплаты"
     else:
         try:
@@ -5069,6 +5105,16 @@ async def _prepare_return(
                     default="0",
                 )
             )
+            rental_paid_at_issuance = safe_int(
+                _value(
+                    booking,
+                    "Оплачено при выдаче (RUB)",
+                    "Фактически оплачено при выдаче (RUB)",
+                    "Оплата при выдаче (RUB)",
+                    "Фактически оплачено за аренду (RUB)",
+                    default="0",
+                )
+            )
         except Exception:
             logger.exception("Could not prepare booking for return")
             await state.clear()
@@ -5087,6 +5133,7 @@ async def _prepare_return(
         deposit=deposit,
         deposit_pay_type=deposit_pay_type,
         prepayment=prepayment,
+        rental_paid_at_issuance=rental_paid_at_issuance,
         prepayment_pay_type=_value(
             booking,
             "Способ оплаты задатка",
@@ -5274,6 +5321,32 @@ async def _continue_after_time_mileage_penalty(
     state: FSMContext,
 ) -> None:
     data = await state.get_data()
+    if (
+        not data.get("direct_return")
+        and not data.get("rental_total_confirmed")
+    ):
+        calculation = _return_calculation(data)
+        await state.set_state(ReturnForm.rental_total_decision)
+        total_message = await message.answer(
+            f"Расчетная стоимость: "
+            f"{_format_number(calculation['calculated_rental_total'])} RUB\n\n"
+            "Итоговая стоимость аренды верна или была предоставлена скидка?",
+            reply_markup=rental_total_keyboard(
+                int(calculation["calculated_rental_total"])
+            ),
+        )
+        await state.update_data(
+            rental_total_decision_message_id=total_message.message_id,
+        )
+        return
+    await _continue_after_rental_total(message, state)
+
+
+async def _continue_after_rental_total(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
     calculation = _return_calculation(data)
     rental_due = int(calculation["rental_due"])
     if rental_due > 0:
@@ -5291,6 +5364,68 @@ async def _continue_after_time_mileage_penalty(
         rental_pay_type="Без оплаты",
     )
     await _continue_return_after_rental_payment(message, state)
+
+
+async def rental_total_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.data or not callback.message:
+        await callback.answer()
+        return
+    if await state.get_state() != ReturnForm.rental_total_decision.state:
+        await callback.answer(
+            "Этот выбор устарел. Продолжите текущую операцию.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if getattr(callback.message, "message_id", None) != data.get(
+        "rental_total_decision_message_id"
+    ):
+        await callback.answer(
+            "Это сообщение устарело. Используйте последнее предложение.",
+            show_alert=True,
+        )
+        return
+    decision = callback.data.removeprefix("return_rental_total:")
+    if decision not in {"keep", "discount"}:
+        await callback.answer("Этот вариант недоступен.", show_alert=True)
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
+    if decision == "keep":
+        await state.update_data(
+            rental_total_confirmed=True,
+            rental_total_override=None,
+        )
+        await callback.answer("Расчетную стоимость оставляем.")
+        await _continue_after_rental_total(callback.message, state)
+        return
+    await callback.answer("Введите согласованную стоимость со скидкой.")
+    await state.set_state(ReturnForm.rental_total_override)
+    await callback.message.answer(
+        "Введите согласованную общую стоимость аренды в RUB "
+        "(например, 42000):"
+    )
+
+
+async def rental_total_override_input(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    total_price, error = _parse_int(
+        message.text or "",
+        "итоговая стоимость аренды",
+        minimum=0,
+    )
+    if error:
+        await message.answer(error)
+        return
+    await state.update_data(
+        rental_total_confirmed=True,
+        rental_total_override=total_price,
+    )
+    await _continue_after_rental_total(message, state)
 
 
 async def time_mileage_penalty_callback(
@@ -5659,6 +5794,11 @@ async def return_notes(message: Message, state: FSMContext) -> None:
             f"\n⚠️ Опоздание на {int(calculation['late_hours'])} ч. "
             "Штраф удерживается только по решению менеджера.\n"
         )
+    rental_total_label = (
+        "Полная стоимость аренды (со скидкой)"
+        if calculation.get("rental_total_override") is not None
+        else "Полная стоимость аренды"
+    )
     act_text = (
         "🏁 АКТ ПРИЁМА АВТОМОБИЛЯ\n"
         f"• Бронь №: {_booking_id(data['booking'])}\n"
@@ -5669,9 +5809,11 @@ async def return_notes(message: Message, state: FSMContext) -> None:
         f"{_format_datetime_ru(data.get('returned_at', _timestamp()))}\n\n"
         f"{late_warning}"
         "\n💰 РАСЧЕТ АРЕНДЫ:\n"
-        f"• Полная стоимость аренды: {_format_number(rental_total)} RUB "
+        f"• {rental_total_label}: {_format_number(rental_total)} RUB "
         f"({_format_number(calculation['daily_rate'])} × "
         f"{_format_number(calculation['rental_days'])} сут.)\n"
+        f"• Оплачено при выдаче: "
+        f"{_format_number(calculation['rental_paid_at_issuance'])} RUB\n"
         f"• Учтен задаток (предоплата): -{_format_number(prepayment)} RUB\n"
         f"• Остаток к оплате за аренду: {_format_number(rental_due)} RUB\n"
         f"• Фактически оплачено за аренду: {_format_number(rental_paid)} RUB\n"
@@ -5791,6 +5933,9 @@ async def return_confirmation(
             prepayment_pay_type=data.get(
                 "prepayment_pay_type",
                 "Без оплаты",
+            ),
+            rental_paid_at_issuance=int(
+                calculation["rental_paid_at_issuance"]
             ),
             rental_paid=int(data.get("rental_paid", 0)),
             rental_pay_type=data.get(
@@ -5927,6 +6072,10 @@ def create_dispatcher() -> Dispatcher:
         F.data.startswith("return_penalty:"),
     )
     dispatcher.callback_query.register(
+        rental_total_callback,
+        F.data.startswith("return_rental_total:"),
+    )
+    dispatcher.callback_query.register(
         expense_category_callback,
         F.data.startswith("expense_category:"),
     )
@@ -6050,6 +6199,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(
         return_manual_penalty,
         ReturnForm.manual_penalty,
+    )
+    dispatcher.message.register(
+        rental_total_override_input,
+        ReturnForm.rental_total_override,
     )
     dispatcher.message.register(return_rental_paid, ReturnForm.rental_paid)
     dispatcher.message.register(
