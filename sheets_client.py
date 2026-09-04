@@ -121,7 +121,7 @@ def _is_transient_spreadsheet_error(error: Exception) -> bool:
         status_code = int(status_code)
     except (TypeError, ValueError):
         status_code = None
-    if status_code in {500, 502, 503}:
+    if status_code in {429, 500, 502, 503}:
         return True
     if isinstance(error, (TimeoutError, ConnectionError, socket.timeout)):
         return True
@@ -208,6 +208,16 @@ def migrate_sheet_titles(spreadsheet) -> list[tuple[str, str]]:
 migrate_sheet_titles(sh)
 
 
+def _column_letter(column_number: int) -> str:
+    """Convert a one-based column number to an A1 column label."""
+    result = ""
+    number = int(column_number)
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        result = chr(65 + remainder) + result
+    return result or "A"
+
+
 def _ensure_column_capacity(ws, required_columns: int) -> None:
     """Expand a worksheet before writing a cell outside its current grid."""
     required_columns = max(int(required_columns), 1)
@@ -269,15 +279,23 @@ except gspread.exceptions.WorksheetNotFound:
         rows=1000,
         cols=30,
     )
+_ensure_sheet_width(ws_acceptance_acts)
 acceptance_sheet_headers = ws_acceptance_acts.row_values(1)
-for acceptance_header in ACCEPTANCE_ACT_HEADERS:
-    if acceptance_header not in acceptance_sheet_headers:
-        acceptance_sheet_headers.append(acceptance_header)
-        ws_acceptance_acts.update_cell(
-            1,
-            len(acceptance_sheet_headers),
-            acceptance_header,
-        )
+missing_acceptance_headers = [
+    header
+    for header in ACCEPTANCE_ACT_HEADERS
+    if header not in acceptance_sheet_headers
+]
+if missing_acceptance_headers:
+    acceptance_sheet_headers.extend(missing_acceptance_headers)
+    _ensure_column_capacity(ws_acceptance_acts, len(acceptance_sheet_headers))
+    ws_acceptance_acts.update(
+        [acceptance_sheet_headers],
+        range_name=(
+            f"A1:{_column_letter(len(acceptance_sheet_headers))}1"
+        ),
+        value_input_option="USER_ENTERED",
+    )
 
 
 def get_manager_access(tg_id: int) -> dict | None:
@@ -480,10 +498,17 @@ def _ensure_headers(ws, required_headers: list[str]) -> list[str]:
         ws,
         max(TARGET_OPERATIONAL_COLUMNS, len(headers) + missing_headers),
     )
-    for header in required_headers:
-        if header not in headers:
-            headers.append(header)
-            ws.update_cell(1, len(headers), header)
+    missing_headers = [
+        header for header in required_headers if header not in headers
+    ]
+    if missing_headers:
+        headers.extend(missing_headers)
+        _ensure_column_capacity(ws, len(headers))
+        ws.update(
+            [headers],
+            range_name=f"A1:{_column_letter(len(headers))}1",
+            value_input_option="USER_ENTERED",
+        )
     return headers
 
 
@@ -499,12 +524,20 @@ def _ensure_header_aliases(
         for aliases in required_aliases
     )
     _ensure_column_capacity(ws, len(headers) + missing_aliases)
+    missing_headers: list[str] = []
     for aliases in required_aliases:
         if any(alias in headers for alias in aliases):
             continue
         header = aliases[0]
         headers.append(header)
-        ws.update_cell(1, len(headers), header)
+        missing_headers.append(header)
+    if missing_headers:
+        _ensure_column_capacity(ws, len(headers))
+        ws.update(
+            [headers],
+            range_name=f"A1:{_column_letter(len(headers))}1",
+            value_input_option="USER_ENTERED",
+        )
     return headers
 
 
@@ -542,7 +575,33 @@ def _update_existing_headers(
 
 def _append_record(ws, values: dict[str, object], required_headers: list[str]) -> None:
     headers = _ensure_headers(ws, required_headers)
-    ws.append_row([values.get(header, "") for header in headers])
+    row_values = [values.get(header, "") for header in headers]
+    _ensure_column_capacity(ws, len(row_values))
+    ws.append_row(row_values, value_input_option="USER_ENTERED")
+
+
+def _update_row_values(
+    ws,
+    row_number: int,
+    headers: list[str],
+    updates: dict[str, object],
+) -> None:
+    """Update several fields in one Sheets request without losing other cells."""
+    row_values = ws.row_values(row_number)
+    if len(row_values) < len(headers):
+        row_values.extend([""] * (len(headers) - len(row_values)))
+    for header, value in updates.items():
+        if header not in headers:
+            raise KeyError(f"Column {header!r} was not found")
+        row_values[headers.index(header)] = value
+    _ensure_column_capacity(ws, len(headers))
+    ws.update(
+        [row_values[: len(headers)]],
+        range_name=(
+            f"A{row_number}:{_column_letter(len(headers))}{row_number}"
+        ),
+        value_input_option="USER_ENTERED",
+    )
 
 
 def _get_or_create_sheet(title: str, headers: list[str]):
@@ -1187,6 +1246,7 @@ def update_car_status(
     mileage: int | None = None,
 ) -> None:
     """Update a car's status and, when provided, its current mileage."""
+    _ensure_headers(ws_cars, ["Статус"])
     values = ws_cars.get_all_values()
     if not values:
         raise ValueError("Автомобили sheet is empty")
@@ -1225,18 +1285,9 @@ def update_car_status(
             f"Car was not found (ID={car_id!r}, plate={plate!r})"
         )
 
-    status_column = next(
-        (
-            index + 1
-            for index, header in enumerate(headers)
-            if header == "Статус"
-        ),
-        None,
-    )
-    if status_column is None:
-        raise ValueError("Автомобили sheet has no Статус header")
-    ws_cars.update_cell(target_row, status_column, status)
-
+    if "Статус" not in headers:
+        raise ValueError("Автомобили sheet has no Статус header after repair")
+    car_updates = {"Статус": status}
     if mileage is not None:
         mileage_header = next(
             (
@@ -1252,11 +1303,8 @@ def update_car_status(
             None,
         )
         if mileage_header:
-            ws_cars.update_cell(
-                target_row,
-                headers.index(mileage_header) + 1,
-                mileage,
-            )
+            car_updates[mileage_header] = mileage
+    _update_row_values(ws_cars, target_row, headers, car_updates)
 
 
 def save_direct_issuance(
@@ -1967,12 +2015,12 @@ def save_actual_return(
             ws_bookings,
             [*booking_updates, "Статус"],
         )
-        for header, value in booking_updates.items():
-            ws_bookings.update_cell(
-                booking_row,
-                booking_headers.index(header) + 1,
-                value,
-            )
+        _update_row_values(
+            ws_bookings,
+            booking_row,
+            booking_headers,
+            booking_updates,
+        )
 
     acceptance_id = len(acceptance_records) + 1
     acceptance_values = {

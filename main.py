@@ -6051,15 +6051,30 @@ async def _save_return(
         await message.answer(
             "Эта аренда уже была завершена или её статус изменился. "
             "Данные повторно не записаны.",
-            reply_markup=get_main_keyboard(message.from_user.id),
+            reply_markup=get_main_keyboard(manager_id),
         )
         return
-    except Exception:
-        logger.exception("Could not save return")
-        await state.clear()
+    except Exception as error:
+        logging.error(
+            f"[RETURN_ERROR] Ошибка записи возврата: {error}",
+            exc_info=True,
+        )
+        error_text = str(error)
+        if "429" in error_text or "quota exceeded" in error_text.casefold():
+            reason = (
+                "Google Sheets временно отклонил запись из-за превышения "
+                "лимита запросов (429). Повторите сохранение через минуту."
+            )
+        elif isinstance(error, KeyError):
+            reason = f"Не найдена колонка Google Sheets: {error}"
+        else:
+            reason = f"{type(error).__name__}: {error}"
         await message.answer(
-            "Не удалось сохранить возврат в Google Sheets.",
-            reply_markup=get_main_keyboard(message.from_user.id),
+            "Не удалось сохранить возврат в Google Sheets.\n"
+            f"Причина: {reason}\n\n"
+            "Данные приёма сохранены в текущем шаге. "
+            "Исправьте причину и нажмите подтверждение ещё раз.",
+            reply_markup=return_confirmation_keyboard(),
         )
         return
     await state.clear()

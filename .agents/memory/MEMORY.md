@@ -10,3 +10,4 @@
 - [Manager authorization normalization](manager-auth-normalization.md) — normalize ID, role, and active status before routing; active unknown roles default to manager access.
 - [Telegram ID formatting](telegram-id-formatting.md) — compare manager IDs after removing spaces and a Sheets-style `.0` suffix.
 - [Manager-approved rental price](rental-price-adjustments.md) — confirm or discount the tariff total before calculating the remaining rent at return.
+- [Google Sheets write quota](google-sheets-write-quota.md) — batch return headers and row updates to avoid HTTP 429 per-minute write limits.
