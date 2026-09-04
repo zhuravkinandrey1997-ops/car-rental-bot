@@ -450,7 +450,7 @@ def _first_booking_date(booking: dict, *keys: str) -> datetime.date | None:
 
 def get_tomorrow_bookings(target_date: datetime.date) -> dict[str, list[dict]]:
     events = {"issuances": [], "returns": []}
-    for booking in ws_bookings.get_all_records():
+    for booking in _get_sheet_records_safely(ws_bookings, "Бронирования"):
         status = str(booking.get("Статус", "")).strip()
         if status == "Подтверждена" and _first_booking_date(
             booking,
@@ -473,7 +473,10 @@ def get_available_cars(start_date_str: str, end_date_str: str):
     req_start = datetime.datetime.strptime(start_date_str, "%Y-%m-%d").date()
     req_end = datetime.datetime.strptime(end_date_str, "%Y-%m-%d").date()
     all_cars = ws_cars.get_all_records()
-    all_bookings = ws_bookings.get_all_records()
+    all_bookings = _get_sheet_records_safely(
+        ws_bookings,
+        "Бронирования",
+    )
     busy_car_ids = set()
     for b in all_bookings:
         if b.get("Статус") in ["Подтверждена", "В аренде"]:
@@ -573,6 +576,62 @@ def _update_existing_headers(
         ws.update_cell(row_number, column_number, value)
 
 
+def _get_sheet_records_safely(ws, sheet_name: str) -> list[dict]:
+    """Read a worksheet without gspread's duplicate/blank-header validation."""
+    all_values = ws.get_all_values()
+    if not all_values:
+        return []
+
+    raw_headers = all_values[0]
+    headers: list[str] = []
+    header_bases: list[str] = []
+    occurrences: dict[str, int] = {}
+    duplicate_headers: list[str] = []
+    blank_headers = 0
+    for column_index, raw_header in enumerate(raw_headers, start=1):
+        base_header = str(raw_header or "").strip()
+        if not base_header:
+            blank_headers += 1
+            base_header = f"__column_{column_index}"
+        occurrences[base_header] = occurrences.get(base_header, 0) + 1
+        occurrence = occurrences[base_header]
+        if occurrence > 1:
+            duplicate_headers.append(base_header)
+            header = f"{base_header}__{occurrence}"
+        else:
+            header = base_header
+        headers.append(header)
+        header_bases.append(base_header)
+
+    if blank_headers or duplicate_headers:
+        logger.warning(
+            "Normalized malformed headers in %s: blank=%s duplicates=%s",
+            sheet_name,
+            blank_headers,
+            sorted(set(duplicate_headers)),
+        )
+
+    records: list[dict] = []
+    for row_number, row in enumerate(all_values[1:], start=2):
+        record: dict[str, object] = {
+            "__sheet_name__": sheet_name,
+            "__row_number__": row_number,
+        }
+        for column_index, header in enumerate(headers):
+            value = row[column_index] if column_index < len(row) else ""
+            record[header] = value
+            base_header = header_bases[column_index]
+            if (
+                base_header not in record
+                or not str(record[base_header] or "").strip()
+            ) and str(value or "").strip():
+                record[base_header] = value
+            elif base_header not in record:
+                record[base_header] = value
+        records.append(record)
+    return records
+
+
 def _append_record(ws, values: dict[str, object], required_headers: list[str]) -> None:
     headers = _ensure_headers(ws, required_headers)
     row_values = [values.get(header, "") for header in headers]
@@ -630,20 +689,36 @@ ws_car_profit_summary = _get_or_create_sheet(
 
 def safe_int(value: object) -> int:
     """Convert a Sheets number/currency value to an integer safely."""
-    if not value:
-        return 0
+    return int(safe_float(value))
+
+
+def safe_float(value: object) -> float:
+    """Convert a Sheets number/currency value to a float safely."""
+    if value is None:
+        return 0.0
     try:
         clean_value = (
             str(value)
             .replace(" ", "")
             .replace("\xa0", "")
             .replace("₽", "")
-            .replace(",", "")
+            .replace("RUB", "")
             .strip()
         )
-        return int(float(clean_value)) if clean_value else 0
+        if "," in clean_value and "." in clean_value:
+            if clean_value.rfind(",") > clean_value.rfind("."):
+                clean_value = clean_value.replace(".", "").replace(",", ".")
+            else:
+                clean_value = clean_value.replace(",", "")
+        elif "," in clean_value:
+            comma_parts = clean_value.split(",")
+            if len(comma_parts) == 2 and len(comma_parts[1]) <= 2:
+                clean_value = ".".join(comma_parts)
+            else:
+                clean_value = clean_value.replace(",", "")
+        return float(clean_value) if clean_value else 0.0
     except (ValueError, TypeError):
-        return 0
+        return 0.0
 
 
 def _number(value: object) -> int:
@@ -845,7 +920,7 @@ def get_available_financial_months(
     current_month = reference_date.strftime("%Y-%m")
     previous_month_date = reference_date.replace(day=1) - datetime.timedelta(days=1)
     months = {current_month, previous_month_date.strftime("%Y-%m")}
-    for record in ws_returns.get_all_records():
+    for record in _get_sheet_records_safely(ws_returns, "Возвраты_Касса"):
         month = _month_from_record(
             record,
             "Дата возврата",
@@ -861,63 +936,257 @@ def get_available_financial_months(
 
 
 def get_financial_report(month_key: str) -> dict:
-    returns = ws_returns.get_all_records()
-    expenses = ws_expenses.get_all_records()
-    cars = ws_cars.get_all_records()
+    context = {
+        "sheet": "—",
+        "row": "—",
+        "column": "—",
+        "value": "—",
+    }
+    try:
+        return _build_financial_report(month_key, context)
+    except Exception as error:
+        logger.exception(
+            "Financial report failed for %s at sheet=%s row=%s "
+            "column=%s value=%r: %s",
+            month_key,
+            context["sheet"],
+            context["row"],
+            context["column"],
+            context["value"],
+            error,
+        )
+        raise
+
+
+def _build_financial_report(
+    month_key: str,
+    context: dict[str, object],
+) -> dict:
+    bookings = _get_sheet_records_safely(ws_bookings, "Бронирования")
+    returns = _get_sheet_records_safely(ws_returns, "Возвраты_Касса")
+    expenses = _get_sheet_records_safely(ws_expenses, "Затраты")
+    cars = _get_sheet_records_safely(ws_cars, "Автомобили")
 
     def in_month(record: dict, *keys: str) -> bool:
         return _month_from_record(record, *keys) == month_key
 
-    def return_revenue(record: dict) -> int:
-        canonical_income = record.get("Итого приход (RUB)")
+    def cell(record: dict, *keys: str, default: object = "") -> object:
+        for key in keys:
+            if key not in record:
+                continue
+            value = record.get(key)
+            context.update(
+                sheet=record.get("__sheet_name__", "—"),
+                row=record.get("__row_number__", "—"),
+                column=key,
+                value=value,
+            )
+            if str(value if value is not None else "").strip():
+                return value
+        if keys:
+            context.update(
+                sheet=record.get("__sheet_name__", "—"),
+                row=record.get("__row_number__", "—"),
+                column=keys[0],
+                value=default,
+            )
+        return default
+
+    def normalize_payment_method(value: object) -> str:
+        normalized = str(value or "").strip().casefold()
+        if "сбп" in normalized:
+            return "СБП"
+        if "нал" in normalized or "cash" in normalized:
+            return "Наличные"
+        if (
+            "безнал" in normalized
+            or "карта" in normalized
+            or "перевод" in normalized
+        ):
+            return "Безнал"
+        return "Безнал"
+
+    def payment_parts(record: dict) -> list[tuple[float, str]]:
+        issuance_amount = safe_float(
+            cell(
+                record,
+                "Оплачено при выдаче (RUB)",
+                "Фактически оплачено при выдаче (RUB)",
+                default="",
+            )
+        )
+        issuance_method = normalize_payment_method(
+            cell(
+                record,
+                "Способ оплаты при выдаче",
+                "Способ оплаты аренды",
+                "Способ оплаты",
+                default="Без оплаты",
+            )
+        )
+        canonical_income = cell(
+            record,
+            "Итого приход (RUB)",
+            "Итого приход",
+            default="",
+        )
         if str(canonical_income if canonical_income is not None else "").strip():
-            return _number(canonical_income)
+            amount = safe_float(canonical_income)
+            method = normalize_payment_method(
+                cell(
+                    record,
+                    "Способ оплаты",
+                    "Способ оплаты доплаты",
+                    "Способ оплаты аренды",
+                    default="Без оплаты",
+                )
+            )
+            parts = [(amount, method)] if amount else []
+            if issuance_amount:
+                parts.append((issuance_amount, issuance_method))
+            return parts
+
         rental_keys = (
             "Фактически оплачено за аренду (RUB)",
             "Сумма аренды получена (RUB)",
+            "Принятая сумма аренды (RUB)",
         )
         top_up_keys = (
             "Полученная доплата (RUB)",
             "Полученная доплата",
         )
-        rental_paid = next(
-            (
-                record.get(key)
-                for key in rental_keys
-                if str(
-                    record.get(key)
-                    if record.get(key) is not None
-                    else ""
-                ).strip()
-            ),
-            0,
-        )
-        top_up = next(
-            (
-                record.get(key)
-                for key in top_up_keys
-                if str(
-                    record.get(key)
-                    if record.get(key) is not None
-                    else ""
-                ).strip()
-            ),
-            0,
-        )
+        rental_paid = cell(record, *rental_keys, default="")
+        top_up = cell(record, *top_up_keys, default="")
         has_actual_payment_fields = any(
             str(
-                record.get(key)
-                if record.get(key) is not None
-                else ""
+                cell(record, key, default="")
             ).strip()
             for key in (*rental_keys, *top_up_keys)
         )
         if has_actual_payment_fields:
-            return _number(rental_paid) + _number(top_up)
-        return _number(
-            record.get("Стоимость аренды (RUB)")
-            or record.get("Сумма аренды (RUB)")
+            parts: list[tuple[float, str]] = []
+            if issuance_amount:
+                parts.append((issuance_amount, issuance_method))
+            rental_amount = safe_float(rental_paid)
+            top_up_amount = safe_float(top_up)
+            if rental_amount:
+                parts.append(
+                    (
+                        rental_amount,
+                        normalize_payment_method(
+                            cell(
+                                record,
+                                "Способ оплаты аренды",
+                                "Способ оплаты",
+                                default="Без оплаты",
+                            )
+                        ),
+                    )
+                )
+            if top_up_amount:
+                parts.append(
+                    (
+                        top_up_amount,
+                        normalize_payment_method(
+                            cell(
+                                record,
+                                "Способ оплаты доплаты",
+                                "Способ оплаты",
+                                default="Без оплаты",
+                            )
+                        ),
+                    )
+                )
+            return parts
+
+        accepted_amount = safe_float(
+            cell(
+                record,
+                "Принятая сумма аренды (RUB)",
+                "Сумма брони (RUB)",
+                "Стоимость аренды (RUB)",
+                "Сумма аренды (RUB)",
+                default="",
+            )
         )
+        if not accepted_amount:
+            accepted_amount = safe_float(
+                cell(
+                    record,
+                    "Задаток/Предоплата",
+                    "Задаток (RUB)",
+                    "Предоплата",
+                    default="",
+                )
+            )
+        return [
+            (
+                accepted_amount,
+                normalize_payment_method(
+                    cell(
+                        record,
+                        "Способ оплаты",
+                        "Способ оплаты аренды",
+                        "Способ оплаты задатка",
+                        default="Без оплаты",
+                    )
+                ),
+            )
+        ] if accepted_amount else []
+
+    def return_revenue(record: dict) -> float:
+        return sum(amount for amount, _ in payment_parts(record))
+
+    def booking_payment_parts(record: dict) -> list[tuple[float, str]]:
+        actual_value = cell(
+            record,
+            "Фактически оплачено за аренду (RUB)",
+            "Сумма аренды получена (RUB)",
+            default="",
+        )
+        if str(actual_value if actual_value is not None else "").strip():
+            actual_amount = safe_float(actual_value)
+            if actual_amount:
+                return [
+                    (
+                        actual_amount,
+                        normalize_payment_method(
+                            cell(
+                                record,
+                                "Способ оплаты аренды",
+                                "Способ оплаты",
+                                default="Без оплаты",
+                            )
+                        ),
+                    )
+                ]
+            return []
+
+        prepayment = safe_float(
+            cell(
+                record,
+                "Задаток/Предоплата",
+                "Задаток (RUB)",
+                "Предоплата",
+                default="",
+            )
+        )
+        if not prepayment:
+            return []
+        return [
+            (
+                prepayment,
+                normalize_payment_method(
+                    cell(
+                        record,
+                        "Способ оплаты задатка",
+                        "Тип оплаты залога",
+                        "Способ оплаты",
+                        default="Без оплаты",
+                    )
+                ),
+            )
+        ]
 
     def car_id(car: dict) -> str:
         return str(
@@ -989,22 +1258,51 @@ def get_financial_report(month_key: str) -> dict:
         for record in expenses
         if in_month(record, "Дата")
     ]
-    gross_income = sum(return_revenue(record) for record in month_returns)
-    direct_expenses = sum(
-        _number(record.get("Сумма (RUB)"))
+    month_bookings = [
+        record
+        for record in bookings
+        if str(cell(record, "Статус", default="")).strip().casefold()
+        in {"подтверждена", "в аренде"}
+        and in_month(
+            record,
+            "Дата и время выдачи",
+            "Дата выдачи",
+            "Дата начала",
+        )
+    ]
+    payment_breakdown = {
+        "Наличные": 0.0,
+        "Безнал": 0.0,
+        "СБП": 0.0,
+    }
+    gross_income = 0.0
+    for record in month_returns:
+        for amount, method in payment_parts(record):
+            gross_income += amount
+            payment_breakdown[method] = (
+                payment_breakdown.get(method, 0.0) + amount
+            )
+    for record in month_bookings:
+        for amount, method in booking_payment_parts(record):
+            gross_income += amount
+            payment_breakdown[method] = (
+                payment_breakdown.get(method, 0.0) + amount
+            )
+    direct_expenses = int(round(sum(
+        safe_float(cell(record, "Сумма (RUB)", default=""))
         for record in month_expenses
         if not is_general_expense(record)
-    )
-    general_expenses = sum(
-        _number(record.get("Сумма (RUB)"))
+    )))
+    general_expenses = int(round(sum(
+        safe_float(cell(record, "Сумма (RUB)", default=""))
         for record in month_expenses
         if is_general_expense(record)
-    )
+    )))
     ksenia_salary = round(gross_income * 0.10)
     total_expenses = direct_expenses + general_expenses + ksenia_salary
     company_profit = gross_income - total_expenses
 
-    car_income: dict[str, int] = {}
+    car_income: dict[str, float] = {}
     car_mileage: dict[str, int] = {}
     for record in month_returns:
         plate = return_plate(record)
@@ -1014,6 +1312,12 @@ def get_financial_report(month_key: str) -> dict:
                 record.get("Пробег за аренду (км)")
                 or record.get("Пройденный пробег (км)")
                 or record.get("Пробег за период (км)")
+            )
+    for record in month_bookings:
+        plate = return_plate(record)
+        if plate:
+            car_income[plate] = car_income.get(plate, 0) + sum(
+                amount for amount, _ in booking_payment_parts(record)
             )
 
     car_expenses: dict[str, int] = {}
@@ -1077,12 +1381,16 @@ def get_financial_report(month_key: str) -> dict:
         )
     return {
         "month": month_key,
-        "gross_income": gross_income,
+        "gross_income": int(round(gross_income)),
         "direct_expenses": direct_expenses,
         "general_expenses": general_expenses,
         "ksenia_salary": ksenia_salary,
         "total_expenses": total_expenses,
         "company_profit": company_profit,
+        "payment_breakdown": {
+            method: int(round(amount))
+            for method, amount in payment_breakdown.items()
+        },
         "cars": car_rows,
     }
 
@@ -1110,7 +1418,10 @@ def add_new_booking(
 ):
     try:
         bookings_sheet = _get_bookings_sheet()
-        records = bookings_sheet.get_all_records()
+        records = _get_sheet_records_safely(
+            bookings_sheet,
+            "Бронирования",
+        )
         booking_ids = []
         for record in records:
             raw_booking_id = record.get("ID Брони", record.get("ID", 0))
@@ -1327,7 +1638,10 @@ def save_direct_issuance(
     """Create an immediately active booking and mark its car as rented."""
     with BOOKINGS_LOCK:
         bookings_sheet = _get_bookings_sheet()
-        records = bookings_sheet.get_all_records()
+        records = _get_sheet_records_safely(
+            bookings_sheet,
+            "Бронирования",
+        )
         booking_ids = []
         for record in records:
             try:
@@ -1442,17 +1756,26 @@ def save_direct_issuance(
 
 
 def get_active_rentals():
-    all_bookings = ws_bookings.get_all_records()
+    all_bookings = _get_sheet_records_safely(
+        ws_bookings,
+        "Бронирования",
+    )
     return [b for b in all_bookings if b.get("Статус") in ["В аренде", "Подтверждена"]]
 
 
 def get_returnable_rentals():
-    all_bookings = ws_bookings.get_all_records()
+    all_bookings = _get_sheet_records_safely(
+        ws_bookings,
+        "Бронирования",
+    )
     return [b for b in all_bookings if b.get("Статус") == "В аренде"]
 
 
 def get_confirmed_bookings():
-    all_bookings = ws_bookings.get_all_records()
+    all_bookings = _get_sheet_records_safely(
+        ws_bookings,
+        "Бронирования",
+    )
     return [b for b in all_bookings if b.get("Статус") == "Подтверждена"]
 
 
@@ -1465,7 +1788,7 @@ def issue_booking(
     issued_at: str,
     planned_end_at: str = "",
 ) -> None:
-    records = ws_bookings.get_all_records()
+    records = _get_sheet_records_safely(ws_bookings, "Бронирования")
     booking_row = None
     current_status = ""
     for row_number, booking in enumerate(records, start=2):
@@ -1597,7 +1920,10 @@ def get_partner_bookings(keyword: str) -> list[dict]:
     """Return bookings whose car name contains the partner keyword."""
     return [
         dict(booking)
-        for booking in ws_bookings.get_all_records()
+        for booking in _get_sheet_records_safely(
+            ws_bookings,
+            "Бронирования",
+        )
         if _contains_car_keyword(
             booking,
             keyword,
@@ -1655,7 +1981,10 @@ def get_active_bookings_for_car(car_id: str, plate: str = ""):
     active_statuses = ["В аренде", "Подтверждена"]
     bookings = [
         booking
-        for booking in ws_bookings.get_all_records()
+        for booking in _get_sheet_records_safely(
+            ws_bookings,
+            "Бронирования",
+        )
         if booking.get("Статус") in active_statuses
     ]
     matching_bookings = []
@@ -1804,7 +2133,7 @@ def save_actual_return(
     current_status = ""
     if not allow_unlinked:
         for row_number, booking in enumerate(
-            ws_bookings.get_all_records(),
+            _get_sheet_records_safely(ws_bookings, "Бронирования"),
             start=2,
         ):
             current_id = (
@@ -1819,7 +2148,7 @@ def save_actual_return(
                 break
         if booking_row is None:
             raise ValueError(f"Booking {booking_id} was not found")
-    returns_records = ws_returns.get_all_records()
+    returns_records = _get_sheet_records_safely(ws_returns, "Возвраты_Касса")
     return_key = str(idempotency_key or booking_id or "").strip()
     return_already_saved = any(
         str(

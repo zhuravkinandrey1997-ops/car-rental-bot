@@ -2258,6 +2258,7 @@ def _callback_has_finance_access(callback: CallbackQuery) -> bool:
 
 
 def _format_financial_report(report: dict) -> str:
+    payment_breakdown = report.get("payment_breakdown", {})
     lines = [
         f"📈 ФИНАНСОВЫЙ ОТЧЁТ ЗА {report['month']}",
         "",
@@ -2270,6 +2271,11 @@ def _format_financial_report(report: dict) -> str:
         f"🔻 Итого расходов: {_format_number(report['total_expenses'])} RUB",
         f"💎 Чистая прибыль организации: "
         f"{_format_number(report['company_profit'])} RUB",
+        "",
+        "💳 ВЫРУЧКА ПО СПОСОБАМ ОПЛАТЫ:",
+        f"  Наличные: {_format_number(payment_breakdown.get('Наличные', 0))} RUB",
+        f"  Безнал: {_format_number(payment_breakdown.get('Безнал', 0))} RUB",
+        f"  СБП: {_format_number(payment_breakdown.get('СБП', 0))} RUB",
         "",
         "🚗 ЧИСТАЯ ПРИБЫЛЬ ПО АВТО:",
     ]

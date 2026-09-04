@@ -11,3 +11,4 @@
 - [Telegram ID formatting](telegram-id-formatting.md) — compare manager IDs after removing spaces and a Sheets-style `.0` suffix.
 - [Manager-approved rental price](rental-price-adjustments.md) — confirm or discount the tariff total before calculating the remaining rent at return.
 - [Google Sheets write quota](google-sheets-write-quota.md) — batch return headers and row updates to avoid HTTP 429 per-minute write limits.
+- [Google Sheets safe reader](google-sheets-safe-reader.md) — read legacy sheets with blank or duplicate headers through normalized get_all_values rows.
