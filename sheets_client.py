@@ -63,6 +63,7 @@ ACCEPTANCE_ACT_HEADERS = [
     "Штраф за перепробег (RUB)",
     "Просрочка по времени (часов)",
     "Штраф за просрочку (RUB)",
+    "Штраф за опоздание / перепробег (RUB)",
     "Состояние чистоты (Чистая/Грязная)",
     "Стоимость мойки (RUB)",
     "Дополнительные штрафы (RUB)",
@@ -1722,6 +1723,7 @@ def save_actual_return(
     over_mileage_fee: int = 0,
     late_hours: int = 0,
     late_fee: int = 0,
+    time_mileage_penalty: int = 0,
     cleanliness: str = "",
     wash_fee: int = 0,
     deposit: int = 0,
@@ -1744,7 +1746,11 @@ def save_actual_return(
     idempotency_key: str = "",
 ):
     returned_at = returned_at or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    total_penalties = over_mileage_fee + late_fee + wash_fee + extra_fee
+    total_penalties = (
+        time_mileage_penalty
+        + wash_fee
+        + extra_fee
+    )
     booking_row = None
     current_status = ""
     if not allow_unlinked:
@@ -1834,6 +1840,7 @@ def save_actual_return(
         "Штраф за перепробег (RUB)": over_mileage_fee,
         "Просрочка (ч)": late_hours,
         "Штраф за просрочку (RUB)": late_fee,
+        "Штраф за опоздание / перепробег (RUB)": time_mileage_penalty,
         "Состояние чистоты": cleanliness,
         "Мойка (RUB)": wash_fee,
         "Доп. штрафы/удержания (RUB)": extra_fee,
@@ -1891,6 +1898,7 @@ def save_actual_return(
             "Штраф за перепробег (RUB)",
             "Просрочка (ч)",
             "Штраф за просрочку (RUB)",
+            "Штраф за опоздание / перепробег (RUB)",
             "Состояние чистоты",
             "Мойка (RUB)",
             "Доп. штрафы/удержания (RUB)",
@@ -1925,6 +1933,7 @@ def save_actual_return(
         "Штраф за перепробег (RUB)": over_mileage_fee,
         "Просрочка (ч)": late_hours,
         "Штраф за просрочку (RUB)": late_fee,
+        "Штраф за опоздание / перепробег (RUB)": time_mileage_penalty,
         "Состояние чистоты": cleanliness,
         "Мойка (RUB)": wash_fee,
         "Доп. штрафы/удержания (RUB)": extra_fee,
@@ -1976,6 +1985,7 @@ def save_actual_return(
         "Штраф за перепробег (RUB)": over_mileage_fee,
         "Просрочка по времени (часов)": late_hours,
         "Штраф за просрочку (RUB)": late_fee,
+        "Штраф за опоздание / перепробег (RUB)": time_mileage_penalty,
         "Состояние чистоты (Чистая/Грязная)": cleanliness,
         "Стоимость мойки (RUB)": wash_fee,
         "Дополнительные штрафы (RUB)": extra_fee,

@@ -151,6 +151,8 @@ class ReturnForm(StatesGroup):
     cleanliness = State()
     wash_fee = State()
     extra_fee = State()
+    penalty_decision = State()
+    manual_penalty = State()
     rental_paid = State()
     rental_pay_type = State()
     total_paid = State()
@@ -591,6 +593,25 @@ def cleanliness_keyboard() -> InlineKeyboardMarkup:
                     callback_data="cleanliness:dirty",
                 ),
             ]
+        ]
+    )
+
+
+def time_mileage_penalty_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Нет, без штрафа",
+                    callback_data="return_penalty:none",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✍️ Ввести сумму штрафа вручную",
+                    callback_data="return_penalty:manual",
+                ),
+            ],
         ]
     )
 
@@ -1681,8 +1702,6 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
         minimum=0,
     )
     daily_rate = daily_rate or 0
-    late_fee = round(daily_rate * 0.10 * late_hours)
-
     rental_days = max(1, (end_date - start_date).days + 1)
     rental_total = 0 if data.get("direct_return") else daily_rate * rental_days
     prepayment, _ = _parse_int(
@@ -1703,16 +1722,26 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
     mileage_limit = rental_days * 250
     delta_mileage = int(data["end_mileage"]) - int(data["start_mileage"])
     over_mileage = max(0, delta_mileage - mileage_limit)
-    over_mileage_fee = over_mileage * 50
+    time_mileage_penalty = max(
+        0,
+        int(data.get("time_mileage_penalty", 0)),
+    )
+    late_fee = 0
+    over_mileage_fee = 0
     wash_fee = int(data.get("wash_fee", 0))
     extra_fee = int(data.get("extra_fee", 0))
     deposit = int(data.get("deposit", 0))
-    total_penalties = late_fee + over_mileage_fee + wash_fee + extra_fee
+    total_penalties = (
+        time_mileage_penalty
+        + wash_fee
+        + extra_fee
+    )
     deposit_balance = deposit - total_penalties
     if data.get("direct_return"):
         direct_deposit_status = data.get("direct_deposit_status")
         total_penalties = deposit if direct_deposit_status == "retained" else 0
         deposit_balance = 0 if direct_deposit_status == "retained" else deposit
+        time_mileage_penalty = 0
         late_fee = 0
         over_mileage_fee = 0
         late_hours = 0
@@ -1733,6 +1762,7 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
         "late_hours": late_hours,
         "late_seconds": late_seconds,
         "late_fee": late_fee,
+        "time_mileage_penalty": time_mileage_penalty,
         "wash_fee": wash_fee,
         "extra_fee": extra_fee,
         "total_penalties": total_penalties,
@@ -5200,6 +5230,34 @@ async def return_extra_fee(message: Message, state: FSMContext) -> None:
     await state.update_data(extra_fee=extra_fee)
     data = await state.get_data()
     calculation = _return_calculation(data)
+    if (
+        not data.get("direct_return")
+        and (
+            int(calculation["late_hours"]) > 0
+            or int(calculation["over_mileage"]) > 0
+        )
+    ):
+        await state.set_state(ReturnForm.penalty_decision)
+        warning_message = await message.answer(
+            "⚠️ Обнаружено опоздание на "
+            f"{int(calculation['late_hours'])} ч. и перепробег "
+            f"{int(calculation['over_mileage'])} км.\n\n"
+            "Удерживать штраф за опоздание / перепробег?",
+            reply_markup=time_mileage_penalty_keyboard(),
+        )
+        await state.update_data(
+            penalty_decision_message_id=warning_message.message_id,
+        )
+        return
+    await _continue_after_time_mileage_penalty(message, state)
+
+
+async def _continue_after_time_mileage_penalty(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    calculation = _return_calculation(data)
     rental_due = int(calculation["rental_due"])
     if rental_due > 0:
         await state.set_state(ReturnForm.rental_paid)
@@ -5216,6 +5274,62 @@ async def return_extra_fee(message: Message, state: FSMContext) -> None:
         rental_pay_type="Без оплаты",
     )
     await _continue_return_after_rental_payment(message, state)
+
+
+async def time_mileage_penalty_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.data or not callback.message:
+        await callback.answer()
+        return
+    if await state.get_state() != ReturnForm.penalty_decision.state:
+        await callback.answer(
+            "Этот выбор устарел. Продолжите текущую операцию.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if getattr(callback.message, "message_id", None) != data.get(
+        "penalty_decision_message_id"
+    ):
+        await callback.answer(
+            "Это предупреждение устарело. Используйте последнее сообщение.",
+            show_alert=True,
+        )
+        return
+    decision = callback.data.removeprefix("return_penalty:")
+    if decision not in {"none", "manual"}:
+        await callback.answer("Этот вариант недоступен.", show_alert=True)
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
+    if decision == "none":
+        await state.update_data(time_mileage_penalty=0)
+        await callback.answer("Штраф за время и перепробег не удерживается.")
+        await _continue_after_time_mileage_penalty(callback.message, state)
+        return
+    await callback.answer("Введите сумму штрафа вручную.")
+    await state.set_state(ReturnForm.manual_penalty)
+    await callback.message.answer(
+        "Введите общую сумму штрафа за опоздание / перепробег в RUB "
+        "(0, если удерживать штраф не нужно):"
+    )
+
+
+async def return_manual_penalty(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    penalty, error = _parse_int(
+        message.text or "",
+        "штраф за опоздание / перепробег",
+        minimum=0,
+    )
+    if error:
+        await message.answer(error)
+        return
+    await state.update_data(time_mileage_penalty=penalty)
+    await _continue_after_time_mileage_penalty(message, state)
 
 
 async def return_rental_paid(message: Message, state: FSMContext) -> None:
@@ -5526,7 +5640,7 @@ async def return_notes(message: Message, state: FSMContext) -> None:
     if int(calculation.get("late_seconds", 0)) > 3600:
         late_warning = (
             f"\n⚠️ Опоздание на {int(calculation['late_hours'])} ч. "
-            "Проверьте необходимость доплаты за перекат.\n"
+            "Штраф удерживается только по решению менеджера.\n"
         )
     act_text = (
         "🏁 АКТ ПРИЁМА АВТОМОБИЛЯ\n"
@@ -5553,10 +5667,10 @@ async def return_notes(message: Message, state: FSMContext) -> None:
         f"Возврат {_format_number(data['end_mileage'])} км "
         f"(Итого: {_format_number(delta)} км, "
         f"Лимит: {_format_number(calculation['mileage_limit'])} км)\n"
-        f"• Перепробег: {_format_number(calculation['over_mileage'])} км -> "
-        f"Штраф: {_format_number(calculation['over_mileage_fee'])} RUB\n"
-        f"• Просрочка по времени: {int(calculation['late_hours'])} ч. -> "
-        f"Штраф: {_format_number(calculation['late_fee'])} RUB\n"
+        f"• Обнаружено опоздание: {int(calculation['late_hours'])} ч. и "
+        f"перепробег: {_format_number(calculation['over_mileage'])} км\n"
+        f"• Удержание за опоздание / перепробег: "
+        f"{_format_number(calculation['time_mileage_penalty'])} RUB\n"
         f"• Чистота: {calculation['cleanliness']} -> "
         f"Мойка: {_format_number(calculation['wash_fee'])} RUB\n"
         f"• Доп. штрафы / удержания: {_format_number(data['extra_fee'])} RUB\n"
@@ -5640,6 +5754,9 @@ async def return_confirmation(
             over_mileage_fee=int(calculation["over_mileage_fee"]),
             late_hours=int(calculation["late_hours"]),
             late_fee=int(calculation["late_fee"]),
+            time_mileage_penalty=int(
+                calculation["time_mileage_penalty"]
+            ),
             cleanliness=str(calculation["cleanliness"]),
             wash_fee=int(calculation["wash_fee"]),
             deposit=int(calculation["deposit"]),
@@ -5789,6 +5906,10 @@ def create_dispatcher() -> Dispatcher:
         F.data.startswith("direct_deposit:"),
     )
     dispatcher.callback_query.register(
+        time_mileage_penalty_callback,
+        F.data.startswith("return_penalty:"),
+    )
+    dispatcher.callback_query.register(
         expense_category_callback,
         F.data.startswith("expense_category:"),
     )
@@ -5909,6 +6030,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(return_end_mileage, ReturnForm.end_mileage)
     dispatcher.message.register(return_wash_fee, ReturnForm.wash_fee)
     dispatcher.message.register(return_extra_fee, ReturnForm.extra_fee)
+    dispatcher.message.register(
+        return_manual_penalty,
+        ReturnForm.manual_penalty,
+    )
     dispatcher.message.register(return_rental_paid, ReturnForm.rental_paid)
     dispatcher.message.register(
         return_rental_pay_type,
