@@ -3,8 +3,11 @@ name: Rental return timing
 description: Default planned return time used when a booking has an end date but no explicit end time.
 ---
 
-Date-only rental bookings treat 23:59 on the booking end date as the planned return time.
+Issuances store an exact planned return date/time derived from the actual issue time;
+date-only legacy bookings treat 23:59 on the booking end date as the fallback.
 
-**Why:** The existing booking flow collects dates rather than planned clock times, while late fees still need a deterministic comparison point.
+**Why:** Late-fee calculations need an exact comparison point, while older rows do
+not contain an issue time and must remain safe to process.
 
-**How to apply:** If a future change adds explicit planned return times, prefer those values and retain 23:59 only as the fallback for legacy date-only bookings.
+**How to apply:** Prefer explicit planned return values and the actual issue
+date/time when calculating periods; retain 23:59 only for legacy date-only rows.

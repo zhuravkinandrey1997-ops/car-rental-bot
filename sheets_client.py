@@ -41,6 +41,10 @@ BOOKING_HEADERS = [
     "Статус",
     "Адрес доставки",
     "Стоимость доставки (RUB)",
+    "Дата выдачи",
+    "Время выдачи",
+    "Время возврата",
+    "Плановое окончание",
 ]
 ACCEPTANCE_ACT_HEADERS = [
     "ID Акта",
@@ -432,6 +436,8 @@ def get_tomorrow_bookings(target_date: datetime.date) -> dict[str, list[dict]]:
             events["issuances"].append(booking)
         elif status == "В аренде" and _first_booking_date(
             booking,
+            "Плановое окончание",
+            "Плановая дата и время окончания",
             "Дата окончания (ГГГГ-ММ-ДД)",
             "Дата окончания",
         ) == target_date:
@@ -1084,6 +1090,10 @@ def add_new_booking(
             str(status or "Подтверждена"),
             delivery_address_value,
             delivery_price_value,
+            "",
+            "",
+            "",
+            f"{str(end_date or '')} 23:59",
         ]
         headers = _ensure_headers(bookings_sheet, BOOKING_HEADERS)
 
@@ -1134,6 +1144,9 @@ def add_new_booking(
                     deposit_pay_type or "Без оплаты"
                 ),
                 "Плановое окончание": f"{str(end_date or '')} 23:59",
+                "Дата выдачи": "",
+                "Время выдачи": "",
+                "Время возврата": "",
             }
             row_to_append = [
                 legacy_values.get(header, "")
@@ -1248,6 +1261,7 @@ def save_direct_issuance(
     manager_id: int,
     manager_name: str,
     issued_at: str,
+    planned_end_at: str = "",
 ) -> int:
     """Create an immediately active booking and mark its car as rented."""
     with BOOKINGS_LOCK:
@@ -1280,15 +1294,24 @@ def save_direct_issuance(
             ("Сумма брони (RUB)", "Цена", "Стоимость"),
             ("Telegram ID Менеджера", "ID Менеджера"),
             ("Статус",),
-            ("Дата и время выдачи", "Дата выдачи"),
+            ("Дата и время выдачи",),
+            ("Дата выдачи",),
             ("Пробег при выдаче (км)", "Начальный пробег"),
             ("Принятая сумма аренды (RUB)", "Фактически оплачено за аренду (RUB)"),
             ("Залог (RUB)", "Внесенный залог", "Страховой залог"),
             ("Способ оплаты", "Способ оплаты аренды"),
             ("Способ оплаты залога", "Способ оплаты страхового залога"),
             ("Плановое окончание", "Плановая дата и время окончания"),
+            ("Время выдачи",),
+            ("Время возврата",),
         ]
         headers = _ensure_header_aliases(bookings_sheet, required_headers)
+        issued_parts = str(issued_at or "").replace("T", " ").split()
+        issue_date = issued_parts[0] if issued_parts else today
+        issue_time = issued_parts[1][:5] if len(issued_parts) > 1 else "23:59"
+        planned_end_at = planned_end_at or f"{end_date} 23:59"
+        planned_parts = str(planned_end_at).replace("T", " ").split()
+        return_time = planned_parts[1][:5] if len(planned_parts) > 1 else "23:59"
         values = {
             "ID Брони": booking_id,
             "ID": booking_id,
@@ -1298,8 +1321,8 @@ def save_direct_issuance(
             "Автомобиль": car_name,
             "Авто": car_name,
             "Название авто": car_name,
-            "Дата начала (ГГГГ-ММ-ДД)": today,
-            "Дата начала": today,
+            "Дата начала (ГГГГ-ММ-ДД)": issue_date,
+            "Дата начала": issue_date,
             "Дата окончания (ГГГГ-ММ-ДД)": end_date,
             "Дата окончания": end_date,
             "ФИО Клиента": client_name,
@@ -1317,7 +1340,9 @@ def save_direct_issuance(
             "Менеджер": manager_name,
             "Статус": "В аренде",
             "Дата и время выдачи": issued_at,
-            "Дата выдачи": issued_at,
+            "Дата выдачи": issue_date,
+            "Время выдачи": issue_time,
+            "Время возврата": return_time,
             "Пробег при выдаче (км)": start_mileage,
             "Начальный пробег": start_mileage,
             "Принятая сумма аренды (RUB)": price,
@@ -1332,8 +1357,8 @@ def save_direct_issuance(
             "Задаток/Предоплата": 0,
             "Задаток (RUB)": 0,
             "Способ оплаты задатка": "Без оплаты",
-            "Плановое окончание": f"{end_date} 23:59",
-            "Плановая дата и время окончания": f"{end_date} 23:59",
+            "Плановое окончание": planned_end_at,
+            "Плановая дата и время окончания": planned_end_at,
         }
         bookings_sheet.append_row(
             [values.get(header, "") for header in headers],
@@ -1376,6 +1401,7 @@ def issue_booking(
     insurance_deposit_pay_type: str,
     manager_id: int,
     issued_at: str,
+    planned_end_at: str = "",
 ) -> None:
     records = ws_bookings.get_all_records()
     booking_row = None
@@ -1398,12 +1424,36 @@ def issue_booking(
             f"Booking {booking_id} cannot be issued from status {current_status}"
         )
 
+    issued_parts = str(issued_at or "").replace("T", " ").split()
+    issue_date = issued_parts[0] if issued_parts else ""
+    issue_time = issued_parts[1][:5] if len(issued_parts) > 1 else ""
+    planned_end_at = planned_end_at or ""
+    planned_parts = str(planned_end_at).replace("T", " ").split()
+    return_time = planned_parts[1][:5] if len(planned_parts) > 1 else ""
+    _ensure_header_aliases(
+        ws_bookings,
+        [
+            ("Дата и время выдачи",),
+            ("Дата выдачи",),
+            ("Время выдачи",),
+            ("Время возврата",),
+            ("Плановое окончание", "Плановая дата и время окончания"),
+        ],
+    )
     _update_existing_headers(
         ws_bookings,
         booking_row,
         [
             (("Статус",), "В аренде", True),
-            (("Дата и время выдачи",), issued_at, True),
+            (("Дата и время выдачи", "Дата выдачи"), issued_at, True),
+            (("Дата выдачи",), issue_date, True),
+            (("Время выдачи",), issue_time, True),
+            (("Время возврата",), return_time, True),
+            (
+                ("Плановое окончание", "Плановая дата и время окончания"),
+                planned_end_at,
+                True,
+            ),
             (("Пробег при выдаче (км)",), start_mileage, True),
             (
                 (

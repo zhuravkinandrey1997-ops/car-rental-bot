@@ -111,6 +111,9 @@ class BookingForm(StatesGroup):
     issuance_mode = State()
     issuance_booking = State()
     direct_car_confirmation = State()
+    issue_date = State()
+    issue_custom_date = State()
+    issue_time = State()
     start_date = State()
     end_date = State()
     direct_end_date = State()
@@ -500,6 +503,29 @@ def delivery_choice_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def issuance_date_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📅 Сегодня",
+                    callback_data="issue_date_today",
+                ),
+                InlineKeyboardButton(
+                    text="📅 Вчера",
+                    callback_data="issue_date_yesterday",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗓 Другая дата",
+                    callback_data="issue_date_custom",
+                )
+            ],
+        ]
+    )
+
+
 PAYMENT_METHODS = {
     "cash": "Наличные",
     "card": "Банковская карта",
@@ -510,6 +536,7 @@ PAYMENT_METHODS = {
 
 DEFAULT_WASH_FEE = 1000
 MINSK_TZ = ZoneInfo("Europe/Minsk")
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 NOTIFICATION_TIMEZONE_NAME = os.getenv("RENTAL_TIMEZONE", "Europe/Moscow")
 try:
     NOTIFICATION_TZ = ZoneInfo(NOTIFICATION_TIMEZONE_NAME)
@@ -948,6 +975,90 @@ def _format_datetime_ru(date_time_str: str) -> str:
     )
 
 
+def _parse_datetime_text(raw: object) -> datetime.datetime | None:
+    text = str(raw or "").strip().replace("T", " ")
+    if not text:
+        return None
+    for date_format in (
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%Y-%m-%d",
+        "%d.%m.%Y",
+    ):
+        try:
+            return datetime.datetime.strptime(text, date_format).replace(
+                tzinfo=MINSK_TZ
+            )
+        except ValueError:
+            continue
+    return None
+
+
+def _booking_issued_datetime(
+    booking: dict,
+    default: datetime.datetime | None = None,
+) -> datetime.datetime | None:
+    full_value = _value(
+        booking,
+        "Дата и время выдачи",
+        default="",
+    )
+    if full_value:
+        parsed = _parse_datetime_text(full_value)
+        if parsed:
+            return parsed
+    issue_date = _value(booking, "Дата выдачи", default="")
+    issue_time = _value(booking, "Время выдачи", default="")
+    if issue_date and issue_time:
+        parsed = _parse_datetime_text(f"{issue_date} {issue_time}")
+        if parsed:
+            return parsed
+    if issue_date:
+        return _parse_datetime_text(issue_date) or default
+    return default
+
+
+def _booking_planned_end_datetime(
+    booking: dict,
+    default: datetime.datetime | None = None,
+) -> datetime.datetime | None:
+    raw = _value(
+        booking,
+        "Плановое окончание",
+        "Плановая дата и время окончания",
+        default="",
+    )
+    return _parse_datetime_text(raw) or default
+
+
+def _booking_period_text(booking: dict) -> str:
+    start = _booking_issued_datetime(booking)
+    end = _booking_planned_end_datetime(booking)
+    if start and end:
+        return f"{_format_datetime_ru(_timestamp(start))} — {_format_datetime_ru(_timestamp(end))}"
+    start_date = _value(
+        booking,
+        "Дата начала (ГГГГ-ММ-ДД)",
+        "Дата начала",
+        default="",
+    )
+    end_date = _value(
+        booking,
+        "Дата окончания (ГГГГ-ММ-ДД)",
+        "Дата окончания",
+        default="",
+    )
+    return f"{format_date_ru(start_date)} — {format_date_ru(end_date)}"
+
+
+def _issue_datetime_text(issued_at: str, planned_end_at: str = "") -> str:
+    period = _format_datetime_ru(issued_at)
+    if planned_end_at:
+        period += f" — {_format_datetime_ru(planned_end_at)}"
+    return period
+
+
 def _html_value(value: object, default: str = "—") -> str:
     text = str(value).strip() if value is not None else ""
     return html.escape(text or default)
@@ -1130,10 +1241,7 @@ def _booking_label(booking: dict) -> str:
         )
         saved_plate = _value(booking, "Госномер", "Номер авто", "Номер", "Plate")
         car = f"{saved_name} ({saved_plate})"
-    dates = (
-        f"{format_date_ru(_value(booking, 'Дата начала (ГГГГ-ММ-ДД)', 'Дата начала'))} — "
-        f"{format_date_ru(_value(booking, 'Дата окончания (ГГГГ-ММ-ДД)', 'Дата окончания'))}"
-    )
+    dates = _booking_period_text(booking)
     return f"{car} · {dates}"
 
 
@@ -1199,6 +1307,10 @@ def _now_minsk() -> datetime.datetime:
     return datetime.datetime.now(MINSK_TZ).replace(second=0, microsecond=0)
 
 
+def _now_moscow() -> datetime.datetime:
+    return datetime.datetime.now(MOSCOW_TZ).replace(second=0, microsecond=0)
+
+
 def _timestamp(value: datetime.datetime | None = None) -> str:
     return (value or _now_minsk()).strftime("%Y-%m-%d %H:%M")
 
@@ -1219,7 +1331,14 @@ def _record_datetime(
     default: datetime.datetime | None = None,
 ) -> datetime.datetime:
     raw = _value(record, *keys, default="")
-    for date_format in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+    for date_format in (
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%Y-%m-%d",
+        "%d.%m.%Y",
+    ):
         try:
             parsed = datetime.datetime.strptime(raw, date_format)
             return parsed.replace(tzinfo=MINSK_TZ)
@@ -1304,10 +1423,12 @@ def _notification_booking_line(
         default="не указан",
     )
     phone = _value(booking, "Телефон", "Телефон клиента", default="не указан")
-    scheduled_time = _notification_time(booking, *time_keys)
+    scheduled_time = _booking_period_text(booking)
+    if scheduled_time == " — ":
+        scheduled_time = _notification_time(booking, *time_keys)
     return (
         f"• {_notification_car_label(booking, car_lookup)} — "
-        f"Клиент: {client}/{phone} — Время: {scheduled_time}"
+        f"Клиент: {client}/{phone} — Период: {scheduled_time}"
     )
 
 
@@ -1516,22 +1637,31 @@ def create_notification_scheduler(bot: Bot) -> AsyncIOScheduler:
 def _return_calculation(data: dict) -> dict[str, int | str]:
     booking = data["booking"]
     car = data["car"]
-    start_date = _record_date(
+    legacy_start_date = _record_date(
         booking,
         "Дата начала (ГГГГ-ММ-ДД)",
         "Дата начала",
     ) or _now_minsk().date()
+    start_datetime = _booking_issued_datetime(booking)
+    start_date = start_datetime.date() if start_datetime else legacy_start_date
     end_date = _record_date(
         booking,
         "Дата окончания (ГГГГ-ММ-ДД)",
         "Дата окончания",
     ) or start_date
-    planned_end = _record_datetime(
+    planned_end_raw = _value(
         booking,
         "Плановое окончание",
         "Плановая дата и время окончания",
-        default=datetime.datetime.combine(end_date, datetime.time(23, 59), MINSK_TZ),
+        default="",
     )
+    planned_end = _parse_datetime_text(planned_end_raw) or datetime.datetime.combine(
+        end_date,
+        datetime.time(23, 59),
+        MINSK_TZ,
+    )
+    if planned_end_raw and _parse_datetime_text(planned_end_raw):
+        end_date = planned_end.date()
     returned_at = _record_datetime(
         {"Дата и время приёма": data.get("returned_at", "")},
         "Дата и время приёма",
@@ -1596,6 +1726,7 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
         "over_mileage": over_mileage,
         "over_mileage_fee": over_mileage_fee,
         "late_hours": late_hours,
+        "late_seconds": late_seconds,
         "late_fee": late_fee,
         "wash_fee": wash_fee,
         "extra_fee": extra_fee,
@@ -3459,14 +3590,24 @@ async def issuance_booking(message: Message, state: FSMContext) -> None:
             "Тип оплаты залога",
             default="Без оплаты",
         ),
+        original_start_date=_value(
+            booking,
+            "Дата начала (ГГГГ-ММ-ДД)",
+            "Дата начала",
+        ),
+        original_end_date=_value(
+            booking,
+            "Дата окончания (ГГГГ-ММ-ДД)",
+            "Дата окончания",
+        ),
     )
-    await state.set_state(BookingForm.start_mileage)
+    await state.set_state(BookingForm.issue_date)
     await message.answer(
         f"Бронь №{_booking_id(booking)} выбрана.\n"
         f"Автомобиль: {_car_name(car)} ({_car_plate(car)})\n"
         f"Задаток: {prepayment or 0:,} RUB.\n\n"
-        "Введите начальный пробег автомобиля в км:".replace(",", " "),
-        reply_markup=ReplyKeyboardRemove(),
+        "Укажите фактическую дату выдачи:",
+        reply_markup=issuance_date_keyboard(),
     )
 
 
@@ -4036,6 +4177,166 @@ async def booking_car(message: Message, state: FSMContext) -> None:
     await message.answer("Введите ФИО клиента:")
 
 
+def _parse_issue_time(value: str) -> datetime.time | None:
+    try:
+        return datetime.datetime.strptime(value.strip(), "%H:%M").time()
+    except ValueError:
+        return None
+
+
+def _issue_planned_end(
+    issued_at: datetime.datetime,
+    original_start_date: str,
+    original_end_date: str,
+) -> datetime.datetime:
+    start_date = datetime.date.fromisoformat(original_start_date)
+    end_date = datetime.date.fromisoformat(original_end_date)
+    duration_days = max(0, (end_date - start_date).days)
+    return issued_at + datetime.timedelta(days=duration_days)
+
+
+async def _complete_issue_datetime(
+    message: Message,
+    state: FSMContext,
+    issued_at: datetime.datetime,
+) -> None:
+    now = _now_moscow()
+    if issued_at > now:
+        await message.answer(
+            "Дата и время выдачи не могут быть в будущем. "
+            "Введите время ещё раз:"
+        )
+        return
+    data = await state.get_data()
+    issued_at = issued_at.replace(second=0, microsecond=0)
+    issued_at_text = _timestamp(issued_at)
+    if data.get("booking_mode") == "issuance":
+        try:
+            planned_end = _issue_planned_end(
+                issued_at,
+                data["original_start_date"],
+                data["original_end_date"],
+            )
+        except (KeyError, ValueError):
+            await state.clear()
+            await message.answer(
+                "Не удалось определить длительность брони. "
+                "Начните выдачу заново.",
+                reply_markup=get_main_keyboard(message.from_user.id),
+            )
+            return
+        await state.update_data(
+            issued_at=issued_at_text,
+            issue_date=issued_at.date().isoformat(),
+            issue_time=issued_at.strftime("%H:%M"),
+            planned_end_at=_timestamp(planned_end),
+            return_time=planned_end.strftime("%H:%M"),
+            start_date=issued_at.date().isoformat(),
+            end_date=planned_end.date().isoformat(),
+            backdated=issued_at < now,
+        )
+        await state.set_state(BookingForm.start_mileage)
+        backdated_text = (
+            "\n⚠️ Оформлено задним числом."
+            if issued_at < now
+            else ""
+        )
+        await message.answer(
+            "Фактическая выдача: "
+            f"{_format_datetime_ru(issued_at_text)}{backdated_text}\n"
+            f"Плановый возврат: {_format_datetime_ru(_timestamp(planned_end))}\n\n"
+            "Введите начальный пробег автомобиля в км:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+    await state.update_data(
+        issued_at=issued_at_text,
+        issue_date=issued_at.date().isoformat(),
+        issue_time=issued_at.strftime("%H:%M"),
+        start_date=issued_at.date().isoformat(),
+        backdated=issued_at < now,
+    )
+    await state.set_state(BookingForm.direct_end_date)
+    await message.answer(
+        "Фактическая выдача: "
+        f"{_format_datetime_ru(issued_at_text)}"
+        f"{' (Оформлено задним числом)' if issued_at < now else ''}\n\n"
+        "Введите дату окончания аренды в формате ГГГГ-ММ-ДД:"
+    )
+
+
+async def issuance_date_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or callback.data not in {
+        "issue_date_today",
+        "issue_date_yesterday",
+        "issue_date_custom",
+    }:
+        await callback.answer()
+        return
+    if await state.get_state() != BookingForm.issue_date.state:
+        await callback.answer(
+            "Этот выбор даты устарел. Начните выдачу заново.",
+            show_alert=True,
+        )
+        return
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    if callback.data == "issue_date_today":
+        await _complete_issue_datetime(callback.message, state, _now_moscow())
+        return
+    if callback.data == "issue_date_yesterday":
+        yesterday = _now_moscow().date() - datetime.timedelta(days=1)
+        await state.update_data(issue_date=yesterday.isoformat())
+        await state.set_state(BookingForm.issue_time)
+        await callback.message.answer(
+            "Введите время выдачи за вчера в формате ЧЧ:ММ:"
+        )
+        return
+    await state.set_state(BookingForm.issue_custom_date)
+    await callback.message.answer(
+        "Введите дату выдачи в формате ДД.ММ.ГГГГ:"
+    )
+
+
+async def issue_custom_date(message: Message, state: FSMContext) -> None:
+    try:
+        selected_date = datetime.datetime.strptime(
+            (message.text or "").strip(),
+            "%d.%m.%Y",
+        ).date()
+    except ValueError:
+        await message.answer("Неверный формат. Пример: 03.09.2026.")
+        return
+    if selected_date > _now_moscow().date():
+        await message.answer("Дата выдачи не может быть в будущем.")
+        return
+    await state.update_data(issue_date=selected_date.isoformat())
+    await state.set_state(BookingForm.issue_time)
+    await message.answer("Введите время выдачи в формате ЧЧ:ММ:")
+
+
+async def issue_time(message: Message, state: FSMContext) -> None:
+    selected_time = _parse_issue_time(message.text or "")
+    if selected_time is None:
+        await message.answer("Неверный формат. Пример: 14:30.")
+        return
+    data = await state.get_data()
+    try:
+        issue_date = datetime.date.fromisoformat(data["issue_date"])
+    except (KeyError, ValueError):
+        await message.answer("Дата выдачи потеряна. Начните выдачу заново.")
+        await state.clear()
+        return
+    await _complete_issue_datetime(
+        message,
+        state,
+        datetime.datetime.combine(issue_date, selected_time, MOSCOW_TZ),
+    )
+
+
 async def direct_issuance_car_confirmation(
     callback: CallbackQuery,
     state: FSMContext,
@@ -4110,9 +4411,10 @@ async def booking_phone(message: Message, state: FSMContext) -> None:
     await state.update_data(phone=value)
     data = await state.get_data()
     if data.get("booking_mode") == "direct_issuance":
-        await state.set_state(BookingForm.direct_end_date)
+        await state.set_state(BookingForm.issue_date)
         await message.answer(
-            "Введите дату окончания аренды в формате ГГГГ-ММ-ДД:"
+            "Укажите фактическую дату выдачи:",
+            reply_markup=issuance_date_keyboard(),
         )
         return
     if data.get("booking_mode") == "reservation":
@@ -4198,12 +4500,15 @@ async def direct_end_date(message: Message, state: FSMContext) -> None:
         await message.answer("Неверный формат. Пример: 2026-09-20.")
         return
     selected_date = datetime.date.fromisoformat(value)
-    if selected_date < datetime.date.today():
-        await message.answer("Дата окончания не может быть в прошлом.")
+    data = await state.get_data()
+    start_date = datetime.date.fromisoformat(data["start_date"])
+    if selected_date < start_date:
+        await message.answer("Дата окончания не может быть раньше даты выдачи.")
         return
     await state.update_data(
-        start_date=datetime.date.today().isoformat(),
         end_date=value,
+        planned_end_at=f"{value} {data.get('issue_time', '23:59')}",
+        return_time=data.get("issue_time", "23:59"),
     )
     await state.set_state(BookingForm.price)
     await message.answer("Введите фактическую сумму аренды в RUB:")
@@ -4311,7 +4616,14 @@ async def booking_deposit(message: Message, state: FSMContext) -> None:
 async def _send_booking_confirmation(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     issued_at = data.get("issued_at") or _timestamp()
+    planned_end_at = data.get("planned_end_at", "")
     await state.set_state(BookingForm.confirmation)
+    backdated_text = (
+        "Фактическая выдача: "
+        f"{_format_datetime_ru(issued_at)} (Оформлено задним числом)\n"
+        if data.get("backdated")
+        else ""
+    )
     direct_payment_text = ""
     if data.get("booking_mode") == "direct_issuance":
         direct_payment_text = (
@@ -4321,8 +4633,8 @@ async def _send_booking_confirmation(message: Message, state: FSMContext) -> Non
     await message.answer(
         "Проверьте акт выдачи авто:\n\n"
         f"Авто: {data['car_name']}\n"
-        f"Период: {format_date_ru(data['start_date'])} — "
-        f"{format_date_ru(data['end_date'])}\n"
+        f"Период: {_issue_datetime_text(issued_at, planned_end_at)}\n"
+        f"{backdated_text}"
         f"Клиент: {data['client_name']}\n"
         f"Телефон: {data['phone']}\n"
         f"{direct_payment_text}"
@@ -4415,7 +4727,8 @@ async def booking_confirmation(
                 ),
                 manager_id=manager_id,
                 manager_name=manager_name,
-                issued_at=_timestamp(),
+                issued_at=data.get("issued_at", _timestamp()),
+                planned_end_at=data.get("planned_end_at", ""),
             )
         else:
             booking_id = int(_booking_id(data["booking"]))
@@ -4425,7 +4738,8 @@ async def booking_confirmation(
                 insurance_deposit=int(data["deposit"]),
                 insurance_deposit_pay_type=data["deposit_pay_type"],
                 manager_id=manager_id,
-                issued_at=_timestamp(),
+                issued_at=data.get("issued_at", _timestamp()),
+                planned_end_at=data.get("planned_end_at", ""),
             )
     except Exception as e:
         import html
@@ -4489,6 +4803,11 @@ async def booking_confirmation(
             "Топливо при выдаче",
             default="—",
         )
+        issuance_backdated_text = (
+            "⚠️ <b>Оформлено задним числом</b>\n"
+            if data.get("backdated")
+            else ""
+        )
         issuance_notification = (
             "🚗 <b>Автомобиль выдан клиенту!</b>\n"
             f"🧾 Основание: "
@@ -4502,6 +4821,8 @@ async def booking_confirmation(
             f"📍 Пробег на выезде: <b>"
             f"{_html_value(data.get('start_mileage'))} км</b>\n"
             f"⛽ Уровень топлива: <b>{_html_value(fuel_level)}</b>\n"
+            f"⏱ Период: <b>{_html_value(_issue_datetime_text(data.get('issued_at', ''), data.get('planned_end_at', '')))}</b>\n"
+            f"{issuance_backdated_text}"
             f"👨‍💼 Выдал менеджер: <b>{_html_value(manager_name)}</b>"
         )
         booking_notification = issuance_notification
@@ -5164,13 +5485,24 @@ async def return_notes(message: Message, state: FSMContext) -> None:
         "Телефон клиента",
         default="—",
     )
-    issued_at = _value(
-        data["booking"],
-        "Дата и время выдачи",
-        "Дата выдачи",
-        "Дата начала",
-        default="—",
+    issued_datetime = _booking_issued_datetime(data["booking"])
+    issued_at = (
+        _timestamp(issued_datetime)
+        if issued_datetime
+        else _value(
+            data["booking"],
+            "Дата и время выдачи",
+            "Дата выдачи",
+            "Дата начала",
+            default="—",
+        )
     )
+    late_warning = ""
+    if int(calculation.get("late_seconds", 0)) > 3600:
+        late_warning = (
+            f"\n⚠️ Опоздание на {int(calculation['late_hours'])} ч. "
+            "Проверьте необходимость доплаты за перекат.\n"
+        )
     act_text = (
         "🏁 АКТ ПРИЁМА АВТОМОБИЛЯ\n"
         f"• Бронь №: {_booking_id(data['booking'])}\n"
@@ -5179,6 +5511,7 @@ async def return_notes(message: Message, state: FSMContext) -> None:
         f"• Менеджер приёмки: {manager_name}\n"
         f"• Фактический период: {_format_datetime_ru(issued_at)} — "
         f"{_format_datetime_ru(data.get('returned_at', _timestamp()))}\n\n"
+        f"{late_warning}"
         "\n💰 РАСЧЕТ АРЕНДЫ:\n"
         f"• Полная стоимость аренды: {_format_number(rental_total)} RUB "
         f"({_format_number(calculation['daily_rate'])} × "
@@ -5228,6 +5561,18 @@ async def return_confirmation(
     car = data["car"]
     manager_id = message.from_user.id if message.from_user else 0
     calculation = _return_calculation(data)
+    issued_datetime = _booking_issued_datetime(booking)
+    issued_at = (
+        _timestamp(issued_datetime)
+        if issued_datetime
+        else _value(
+            booking,
+            "Дата и время выдачи",
+            "Дата выдачи",
+            "Дата начала",
+            default="—",
+        )
+    )
     direct_return = bool(data.get("direct_return"))
     return_id = (
         _booking_id(booking)
@@ -5304,13 +5649,7 @@ async def return_confirmation(
                 "Телефон клиента",
                 default="—",
             ),
-            issued_at=_value(
-                booking,
-                "Дата и время выдачи",
-                "Дата выдачи",
-                "Дата начала",
-                default="—",
-            ),
+            issued_at=issued_at,
             act_created_at=_timestamp(),
             allow_unlinked=direct_return,
             car_id=_car_id(car),
@@ -5372,6 +5711,8 @@ async def return_confirmation(
         f"🚘 Авто: <b>{_html_value(_car_name(car))} "
         f"({_html_value(_car_plate(car))})</b>\n"
         f"👤 Клиент: <b>{_html_value(_value(booking, 'ФИО Клиента', 'Клиент'))}</b>\n"
+        f"⏱ Фактический период: <b>{_html_value(issued_at)} — "
+        f"{_html_value(data.get('returned_at', _timestamp()))}</b>\n"
         f"📈 Пробег за поездку: <b>+{_html_value(delta_mileage)} км</b> "
         f"(текущий: {_html_value(end_mileage)} км)\n"
         f"💰 Оплачено: <b>{_format_number(total_received)} ₽</b> "
@@ -5406,6 +5747,12 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(
         booking_delivery_callback,
         F.data.in_({"delivery_yes", "delivery_no"}),
+    )
+    dispatcher.callback_query.register(
+        issuance_date_callback,
+        F.data.in_(
+            {"issue_date_today", "issue_date_yesterday", "issue_date_custom"}
+        ),
     )
     dispatcher.callback_query.register(
         direct_issuance_car_confirmation,
@@ -5503,6 +5850,8 @@ def create_dispatcher() -> Dispatcher:
         issuance_mode_selection,
         BookingForm.issuance_mode,
     )
+    dispatcher.message.register(issue_custom_date, BookingForm.issue_custom_date)
+    dispatcher.message.register(issue_time, BookingForm.issue_time)
     dispatcher.message.register(direct_end_date, BookingForm.direct_end_date)
     dispatcher.message.register(
         issuance_booking,
