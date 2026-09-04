@@ -1,4 +1,5 @@
 - [Google Sheets identifier](google-sheets-connection.md) — use gspread's key-based open when configuration contains a Sheets ID rather than a title.
+- [Google Sheets grid capacity](google-sheets-grid-capacity.md) — expand the worksheet before appending dynamic headers or writing by computed column index.
 - [Rental return timing](rental-return-timing.md) — date-only bookings use 23:59 on the end date as the planned return time for late-fee calculations.
 - [Booking status transitions](booking-status-transitions.md) — only confirmed reservations may be cancelled; issued rentals must stay in the return workflow.
 - [Evening notification delivery](evening-notification-delivery.md) — use one scheduler process, persisted per-recipient dates, and at-least-once delivery with evening retries.

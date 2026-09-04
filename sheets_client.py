@@ -107,6 +107,7 @@ EXPENSES_LOCK = threading.Lock()
 BOOKINGS_LOCK = threading.Lock()
 MIN_OPERATIONAL_COLUMNS = 35
 TARGET_OPERATIONAL_COLUMNS = 35
+COLUMN_EXPANSION_STEP = 5
 
 
 def _is_transient_spreadsheet_error(error: Exception) -> bool:
@@ -206,24 +207,28 @@ def migrate_sheet_titles(spreadsheet) -> list[tuple[str, str]]:
 migrate_sheet_titles(sh)
 
 
+def _ensure_column_capacity(ws, required_columns: int) -> None:
+    """Expand a worksheet before writing a cell outside its current grid."""
+    required_columns = max(int(required_columns), 1)
+    current_columns = int(getattr(ws, "col_count", 0) or 0)
+    if current_columns >= required_columns:
+        return
+    columns_to_add = max(
+        COLUMN_EXPANSION_STEP,
+        required_columns - current_columns,
+    )
+    ws.add_cols(columns_to_add)
+
+
 def _ensure_sheet_width(ws) -> None:
     """Keep operational worksheets wide enough for optional legacy fields."""
-    current_columns = int(getattr(ws, "col_count", 0) or 0)
-    if current_columns < MIN_OPERATIONAL_COLUMNS:
-        ws.resize(
-            rows=ws.row_count,
-            cols=TARGET_OPERATIONAL_COLUMNS,
-        )
+    _ensure_column_capacity(ws, TARGET_OPERATIONAL_COLUMNS)
 
 
 def _ensure_all_sheet_widths(spreadsheet) -> None:
     """Expand every worksheet before any header or data update is attempted."""
     for worksheet in spreadsheet.worksheets():
-        if worksheet.col_count < MIN_OPERATIONAL_COLUMNS:
-            worksheet.resize(
-                rows=worksheet.row_count,
-                cols=MIN_OPERATIONAL_COLUMNS,
-            )
+        _ensure_column_capacity(worksheet, MIN_OPERATIONAL_COLUMNS)
 
 
 _ensure_all_sheet_widths(sh)
@@ -466,13 +471,14 @@ def get_available_cars(start_date_str: str, end_date_str: str):
 def _ensure_headers(ws, required_headers: list[str]) -> list[str]:
     _ensure_sheet_width(ws)
     headers = ws.row_values(1)
-    required_columns = max(
-        TARGET_OPERATIONAL_COLUMNS,
-        len(headers),
-        len(required_headers),
+    missing_headers = sum(
+        header not in headers
+        for header in required_headers
     )
-    if int(getattr(ws, "col_count", 0) or 0) < required_columns:
-        ws.resize(rows=ws.row_count, cols=required_columns)
+    _ensure_column_capacity(
+        ws,
+        max(TARGET_OPERATIONAL_COLUMNS, len(headers) + missing_headers),
+    )
     for header in required_headers:
         if header not in headers:
             headers.append(header)
@@ -487,6 +493,11 @@ def _ensure_header_aliases(
     """Ensure one header from each alias group exists without duplicating it."""
     _ensure_sheet_width(ws)
     headers = ws.row_values(1)
+    missing_aliases = sum(
+        not any(alias in headers for alias in aliases)
+        for aliases in required_aliases
+    )
+    _ensure_column_capacity(ws, len(headers) + missing_aliases)
     for aliases in required_aliases:
         if any(alias in headers for alias in aliases):
             continue
@@ -503,6 +514,7 @@ def _update_existing_headers(
 ) -> None:
     """Update only columns that are already present in the worksheet."""
     headers = ws.row_values(1)
+    _ensure_column_capacity(ws, len(headers))
     resolved_updates: list[tuple[int, object]] = []
     missing_required: list[str] = []
     for aliases, value, required in fields:
@@ -1295,7 +1307,7 @@ def save_direct_issuance(
             ("Telegram ID Менеджера", "ID Менеджера"),
             ("Статус",),
             ("Дата и время выдачи",),
-            ("Дата выдачи",),
+            ("Фактическая дата выдачи", "Дата выдачи"),
             ("Пробег при выдаче (км)", "Начальный пробег"),
             ("Принятая сумма аренды (RUB)", "Фактически оплачено за аренду (RUB)"),
             ("Залог (RUB)", "Внесенный залог", "Страховой залог"),
@@ -1340,6 +1352,7 @@ def save_direct_issuance(
             "Менеджер": manager_name,
             "Статус": "В аренде",
             "Дата и время выдачи": issued_at,
+            "Фактическая дата выдачи": issue_date,
             "Дата выдачи": issue_date,
             "Время выдачи": issue_time,
             "Время возврата": return_time,
@@ -1434,7 +1447,7 @@ def issue_booking(
         ws_bookings,
         [
             ("Дата и время выдачи",),
-            ("Дата выдачи",),
+            ("Фактическая дата выдачи", "Дата выдачи"),
             ("Время выдачи",),
             ("Время возврата",),
             ("Плановое окончание", "Плановая дата и время окончания"),
@@ -1445,8 +1458,16 @@ def issue_booking(
         booking_row,
         [
             (("Статус",), "В аренде", True),
-            (("Дата и время выдачи", "Дата выдачи"), issued_at, True),
-            (("Дата выдачи",), issue_date, True),
+            (
+                ("Дата и время выдачи", "Фактическая дата выдачи", "Дата выдачи"),
+                issued_at,
+                True,
+            ),
+            (
+                ("Фактическая дата выдачи", "Дата выдачи"),
+                issue_date,
+                True,
+            ),
             (("Время выдачи",), issue_time, True),
             (("Время возврата",), return_time, True),
             (

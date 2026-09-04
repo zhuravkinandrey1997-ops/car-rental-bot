@@ -1008,7 +1008,12 @@ def _booking_issued_datetime(
         parsed = _parse_datetime_text(full_value)
         if parsed:
             return parsed
-    issue_date = _value(booking, "Дата выдачи", default="")
+    issue_date = _value(
+        booking,
+        "Фактическая дата выдачи",
+        "Дата выдачи",
+        default="",
+    )
     issue_time = _value(booking, "Время выдачи", default="")
     if issue_date and issue_time:
         parsed = _parse_datetime_text(f"{issue_date} {issue_time}")
@@ -5492,6 +5497,7 @@ async def return_notes(message: Message, state: FSMContext) -> None:
         else _value(
             data["booking"],
             "Дата и время выдачи",
+            "Фактическая дата выдачи",
             "Дата выдачи",
             "Дата начала",
             default="—",
@@ -5568,6 +5574,7 @@ async def return_confirmation(
         else _value(
             booking,
             "Дата и время выдачи",
+            "Фактическая дата выдачи",
             "Дата выдачи",
             "Дата начала",
             default="—",
