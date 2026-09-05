@@ -45,6 +45,7 @@ BOOKING_HEADERS = [
     "Время выдачи",
     "Время возврата",
     "Плановое окончание",
+    "Источник",
 ]
 ACCEPTANCE_ACT_HEADERS = [
     "ID Акта",
@@ -1434,6 +1435,7 @@ def add_new_booking(
     manager_name: str = "",
     delivery_address: str = "Самовывоз",
     delivery_price: int = 0,
+    source: str = "",
 ):
     try:
         bookings_sheet = _get_bookings_sheet()
@@ -1496,6 +1498,7 @@ def add_new_booking(
             "",
             "",
             f"{str(end_date or '')} 23:59",
+            str(source or ""),
         ]
         headers = _ensure_headers(bookings_sheet, BOOKING_HEADERS)
 
@@ -1549,6 +1552,7 @@ def add_new_booking(
                 "Дата выдачи": "",
                 "Время выдачи": "",
                 "Время возврата": "",
+                "Источник": str(source or ""),
             }
             row_to_append = [
                 legacy_values.get(header, "")

@@ -397,7 +397,11 @@ def partner_menu_keyboard(heavy_lux: bool = False) -> ReplyKeyboardMarkup:
                     KeyboardButton(text="🚗 Выдача авто"),
                 ],
                 [
+                    KeyboardButton(text="Доступные авто"),
                     KeyboardButton(text="Активные аренды"),
+                ],
+                [
+                    KeyboardButton(text="🔎 Проверка броней"),
                     KeyboardButton(text="🏁 Приём авто"),
                 ],
                 [KeyboardButton(text="🔎 Брони heavy_lux_cr")],
@@ -3764,9 +3768,15 @@ async def financial_car_calculate_callback(
 
 
 async def start_availability(message: Message, state: FSMContext) -> None:
-    if not await ensure_manager(message):
+    if not await ensure_operational_user(message):
         return
     await state.clear()
+    await state.update_data(
+        partner_mode=(
+            bool(message.from_user)
+            and is_heavy_lux_partner_user(message.from_user.id)
+        )
+    )
     await state.set_state(AvailabilityForm.start_date)
     calendar_message = await message.answer(
         _calendar_prompt("availability", "start"),
@@ -3817,6 +3827,9 @@ async def _finish_availability(
 ) -> None:
     try:
         cars = get_available_cars(start_date, end_date)
+        data = await state.get_data()
+        if data.get("partner_mode"):
+            cars = [car for car in cars if _is_heavy_lux_car(car)]
     except Exception:
         logger.exception("Could not load available cars")
         await state.clear()
@@ -3825,17 +3838,24 @@ async def _finish_availability(
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    await state.clear()
     if not cars:
+        await state.clear()
         await message.answer(
             "На выбранный период свободных авто нет.",
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    lines = [
-        f"{index}. {_car_label(car)}"
-        for index, car in enumerate(cars, start=1)
-    ]
+    await state.clear()
+    if data.get("partner_mode"):
+        lines = [
+            f"{index}. {_car_name(car)} ({_car_plate(car) or 'Без номера'})"
+            for index, car in enumerate(cars, start=1)
+        ]
+    else:
+        lines = [
+            f"{index}. {_car_label(car)}"
+            for index, car in enumerate(cars, start=1)
+        ]
     await message.answer(
         "Свободные автомобили:\n\n" + "\n".join(lines),
         reply_markup=get_main_keyboard(message.from_user.id),
@@ -4123,13 +4143,15 @@ async def _finish_booking_dates(
 
 
 async def start_occupancy(message: Message, state: FSMContext) -> None:
-    if not await ensure_manager(message):
+    if not await ensure_operational_user(message):
         return
     await state.clear()
     try:
         # Occupancy inspection must include every car, even currently rented
         # or reserved ones, so managers can inspect their occupied dates.
         cars = get_all_cars()
+        if is_heavy_lux_partner_user(message.from_user.id):
+            cars = [car for car in cars if _is_heavy_lux_car(car)]
     except Exception:
         logger.exception("Could not load cars for occupancy calendar")
         await message.answer(
@@ -4143,7 +4165,13 @@ async def start_occupancy(message: Message, state: FSMContext) -> None:
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    await state.update_data(cars=cars)
+    await state.update_data(
+        cars=cars,
+        partner_mode=(
+            bool(message.from_user)
+            and is_heavy_lux_partner_user(message.from_user.id)
+        ),
+    )
     await state.set_state(OccupancyForm.car)
     await message.answer(
         "Выберите автомобиль для проверки занятости:",
@@ -4483,11 +4511,22 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
                 _booking_id(booking): booking
                 for booking in data.get("occupancy_bookings", [])
             }
-            details = [
-                _booking_card_text(bookings_by_id[booking_id])
-                for booking_id in booking_ids
-                if booking_id in bookings_by_id
-            ]
+            if data.get("partner_mode"):
+                details = [
+                    _partner_booking_card_text(
+                        bookings_by_id[booking_id],
+                        data.get("selected_car", {}),
+                        source=HEAVY_LUX_PARTNER_SOURCE,
+                    )
+                    for booking_id in booking_ids
+                    if booking_id in bookings_by_id
+                ]
+            else:
+                details = [
+                    _booking_card_text(bookings_by_id[booking_id])
+                    for booking_id in booking_ids
+                    if booking_id in bookings_by_id
+                ]
             if details:
                 await callback.answer("Детали брони отправлены ниже.")
                 await message.answer(
@@ -5242,6 +5281,11 @@ async def booking_confirmation(
                     "Без оплаты",
                 ),
                 manager_name=manager_name,
+                source=(
+                    HEAVY_LUX_PARTNER_SOURCE
+                    if data.get("partner_mode")
+                    else ""
+                ),
             )
         elif is_direct_issuance:
             booking_id = save_direct_issuance(
