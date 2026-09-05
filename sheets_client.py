@@ -970,6 +970,12 @@ def _build_financial_report(
     def in_month(record: dict, *keys: str) -> bool:
         return _month_from_record(record, *keys) == month_key
 
+    def contains_month(record: dict, *keys: str) -> bool:
+        return any(
+            month_key in str(record.get(key) or "")
+            for key in keys
+        )
+
     def cell(record: dict, *keys: str, default: object = "") -> object:
         for key in keys:
             if key not in record:
@@ -1005,6 +1011,22 @@ def _build_financial_report(
         ):
             return "Безнал"
         return "Безнал"
+
+    def first_matching_value(record: dict, fragment: str) -> object:
+        fragment = fragment.casefold()
+        for key, value in record.items():
+            if key.startswith("__"):
+                continue
+            if fragment in str(key).casefold():
+                context.update(
+                    sheet=record.get("__sheet_name__", "—"),
+                    row=record.get("__row_number__", "—"),
+                    column=key,
+                    value=value,
+                )
+                if str(value if value is not None else "").strip():
+                    return value
+        return ""
 
     def payment_parts(record: dict) -> list[tuple[float, str]]:
         issuance_amount = safe_float(
@@ -1138,6 +1160,36 @@ def _build_financial_report(
         return sum(amount for amount, _ in payment_parts(record))
 
     def booking_payment_parts(record: dict) -> list[tuple[float, str]]:
+        accepted_value = first_matching_value(record, "Принятая сумма")
+        if not str(accepted_value if accepted_value is not None else "").strip():
+            accepted_value = cell(
+                record,
+                "Сумма брони (RUB)",
+                default="",
+            )
+        accepted_amount = safe_float(accepted_value)
+        if not accepted_amount:
+            fallback_value = cell(
+                record,
+                "Сумма брони (RUB)",
+                default="",
+            )
+            accepted_amount = safe_float(fallback_value)
+        if not accepted_amount:
+            return []
+        return [
+            (
+                accepted_amount,
+                normalize_payment_method(
+                    cell(
+                        record,
+                        "Способ оплаты",
+                        default="Без оплаты",
+                    )
+                ),
+            )
+        ]
+
         actual_value = cell(
             record,
             "Фактически оплачено за аренду (RUB)",
@@ -1262,12 +1314,13 @@ def _build_financial_report(
         record
         for record in bookings
         if str(cell(record, "Статус", default="")).strip().casefold()
-        in {"подтверждена", "в аренде"}
-        and in_month(
+        in {"в аренде", "завершена"}
+        and contains_month(
             record,
-            "Дата и время выдачи",
             "Дата выдачи",
+            "Дата выдачи (ГГГГ-ММ-ДД)",
             "Дата начала",
+            "Дата начала (ГГГГ-ММ-ДД)",
         )
     ]
     payment_breakdown = {
@@ -1276,12 +1329,6 @@ def _build_financial_report(
         "СБП": 0.0,
     }
     gross_income = 0.0
-    for record in month_returns:
-        for amount, method in payment_parts(record):
-            gross_income += amount
-            payment_breakdown[method] = (
-                payment_breakdown.get(method, 0.0) + amount
-            )
     for record in month_bookings:
         for amount, method in booking_payment_parts(record):
             gross_income += amount
@@ -1298,21 +1345,12 @@ def _build_financial_report(
         for record in month_expenses
         if is_general_expense(record)
     )))
-    ksenia_salary = round(gross_income * 0.10)
-    total_expenses = direct_expenses + general_expenses + ksenia_salary
+    ksenia_salary = 0
+    total_expenses = direct_expenses + general_expenses
     company_profit = gross_income - total_expenses
 
     car_income: dict[str, float] = {}
     car_mileage: dict[str, int] = {}
-    for record in month_returns:
-        plate = return_plate(record)
-        if plate:
-            car_income[plate] = car_income.get(plate, 0) + return_revenue(record)
-            car_mileage[plate] = car_mileage.get(plate, 0) + _number(
-                record.get("Пробег за аренду (км)")
-                or record.get("Пройденный пробег (км)")
-                or record.get("Пробег за период (км)")
-            )
     for record in month_bookings:
         plate = return_plate(record)
         if plate:
