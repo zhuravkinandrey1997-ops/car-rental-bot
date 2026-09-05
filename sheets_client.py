@@ -1201,6 +1201,20 @@ def _build_financial_report(
             or ""
         ).strip()
 
+    def normalized_identifier(value: object) -> str:
+        normalized = str(value or "").strip().casefold()
+        if normalized.endswith(".0"):
+            normalized = normalized[:-2]
+        return normalized
+
+    def booking_car_id(record: dict) -> str:
+        return normalized_identifier(
+            record.get("ID Авто")
+            or record.get("ID")
+            or record.get("Car ID")
+            or ""
+        )
+
     def car_plate(car: dict) -> str:
         return str(
             car.get("Госномер")
@@ -1233,6 +1247,8 @@ def _build_financial_report(
     def expense_vehicle(record: dict) -> str:
         return str(
             record.get("Автомобиль (Госномер / Общие)")
+            or record.get("Госномер")
+            or record.get("Номер авто")
             or record.get("Автомобиль")
             or ""
         ).strip().casefold()
@@ -1305,9 +1321,9 @@ def _build_financial_report(
     car_income: dict[str, float] = {}
     car_mileage: dict[str, int] = {}
     for record in month_bookings:
-        plate = return_plate(record)
-        if plate:
-            car_income[plate] = car_income.get(plate, 0) + sum(
+        car_key = booking_car_id(record)
+        if car_key:
+            car_income[car_key] = car_income.get(car_key, 0) + sum(
                 amount for amount, _ in booking_payment_parts(record)
             )
 
@@ -1328,8 +1344,9 @@ def _build_financial_report(
         plate_display = car_plate(car)
         plate_key = plate_display.casefold()
         stable_car_id = car_id(car) or plate_display
+        car_key = normalized_identifier(stable_car_id)
         display_name = car_name(car)
-        income = car_income.get(plate_key, 0)
+        income = car_income.get(car_key, 0)
         costs = car_expenses.get(plate_key, 0)
         car_rows.append(
             {
