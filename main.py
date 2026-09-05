@@ -2263,12 +2263,8 @@ def _format_financial_report(report: dict) -> str:
         f"📈 ФИНАНСОВЫЙ ОТЧЁТ ЗА {report['month']}",
         "",
         f"🟢 Общий приход: {_format_number(report['gross_income'])} RUB",
-        f"🔴 Прямые расходы по машинам: "
-        f"{_format_number(report['direct_expenses'])} RUB",
-        f"🏢 Общие расходы компании: "
-        f"{_format_number(report['general_expenses'])} RUB",
-        f"👩‍💼 ЗП Ксении (10%): {_format_number(report['ksenia_salary'])} RUB",
-        f"🔻 Итого расходов: {_format_number(report['total_expenses'])} RUB",
+        f"🔴 Расходы за месяц: "
+        f"{_format_number(report['total_expenses'])} RUB",
         f"💎 Чистая прибыль организации: "
         f"{_format_number(report['company_profit'])} RUB",
         "",

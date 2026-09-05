@@ -823,10 +823,13 @@ def _upsert_record_by_keys(
     if target_row is None:
         ws.append_row([values.get(header, "") for header in headers])
         return
-    for header, value in values.items():
-        if header not in headers:
-            continue
-        ws.update_cell(target_row, headers.index(header) + 1, value)
+    updates = {
+        header: value
+        for header, value in values.items()
+        if header in headers
+    }
+    if updates:
+        _update_row_values(ws, target_row, headers, updates)
 
 
 def add_expense(
@@ -1190,56 +1193,6 @@ def _build_financial_report(
             )
         ]
 
-        actual_value = cell(
-            record,
-            "Фактически оплачено за аренду (RUB)",
-            "Сумма аренды получена (RUB)",
-            default="",
-        )
-        if str(actual_value if actual_value is not None else "").strip():
-            actual_amount = safe_float(actual_value)
-            if actual_amount:
-                return [
-                    (
-                        actual_amount,
-                        normalize_payment_method(
-                            cell(
-                                record,
-                                "Способ оплаты аренды",
-                                "Способ оплаты",
-                                default="Без оплаты",
-                            )
-                        ),
-                    )
-                ]
-            return []
-
-        prepayment = safe_float(
-            cell(
-                record,
-                "Задаток/Предоплата",
-                "Задаток (RUB)",
-                "Предоплата",
-                default="",
-            )
-        )
-        if not prepayment:
-            return []
-        return [
-            (
-                prepayment,
-                normalize_payment_method(
-                    cell(
-                        record,
-                        "Способ оплаты задатка",
-                        "Тип оплаты залога",
-                        "Способ оплаты",
-                        default="Без оплаты",
-                    )
-                ),
-            )
-        ]
-
     def car_id(car: dict) -> str:
         return str(
             car.get("ID Авто")
@@ -1308,7 +1261,7 @@ def _build_financial_report(
     month_expenses = [
         record
         for record in expenses
-        if in_month(record, "Дата")
+        if contains_month(record, "Дата")
     ]
     month_bookings = [
         record
@@ -1394,28 +1347,39 @@ def _build_financial_report(
             }
         )
 
-    _upsert_record(
-        ws_monthly_summary,
-        "Месяц (ГГГГ-ММ)",
-        month_key,
-        {
-            "Месяц (ГГГГ-ММ)": month_key,
-            "Общий приход (RUB)": gross_income,
-            "Прямые расходы (RUB)": direct_expenses,
-            "Общие расходы компании (RUB)": general_expenses,
-            "ЗП Ксении (10%) (RUB)": ksenia_salary,
-            "Итого расходы (RUB)": total_expenses,
-            "Чистая прибыль компании (RUB)": company_profit,
-        },
-        MONTHLY_SUMMARY_HEADERS,
-    )
-    for row in car_rows:
-        _upsert_record_by_keys(
-            ws_car_profit_summary,
-            ("Месяц (ГГГГ-ММ)", "ID Авто"),
-            (month_key, row["ID Авто"]),
-            row,
-            CAR_PROFIT_SUMMARY_HEADERS,
+    try:
+        _upsert_record(
+            ws_monthly_summary,
+            "Месяц (ГГГГ-ММ)",
+            month_key,
+            {
+                "Месяц (ГГГГ-ММ)": month_key,
+                "Общий приход (RUB)": gross_income,
+                "Прямые расходы (RUB)": direct_expenses,
+                "Общие расходы компании (RUB)": general_expenses,
+                "ЗП Ксении (10%) (RUB)": ksenia_salary,
+                "Итого расходы (RUB)": total_expenses,
+                "Чистая прибыль компании (RUB)": company_profit,
+            },
+            MONTHLY_SUMMARY_HEADERS,
+        )
+        for row in car_rows:
+            _upsert_record_by_keys(
+                ws_car_profit_summary,
+                ("Месяц (ГГГГ-ММ)", "ID Авто"),
+                (month_key, row["ID Авто"]),
+                row,
+                CAR_PROFIT_SUMMARY_HEADERS,
+            )
+    except gspread.exceptions.APIError as error:
+        if "429" not in str(error):
+            raise
+        logger.warning(
+            "Financial report %s calculated successfully, but summary "
+            "persistence was skipped because Google Sheets write quota "
+            "was exceeded: %s",
+            month_key,
+            error,
         )
     return {
         "month": month_key,
