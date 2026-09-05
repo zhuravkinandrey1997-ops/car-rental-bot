@@ -388,29 +388,7 @@ def _period_selection_text(start_date: str, end_date: str) -> str:
     )
 
 
-def partner_menu_keyboard(heavy_lux: bool = False) -> ReplyKeyboardMarkup:
-    if heavy_lux:
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [
-                    KeyboardButton(text="📝 Новая бронь"),
-                    KeyboardButton(text="🚗 Выдача авто"),
-                ],
-                [
-                    KeyboardButton(text="Доступные авто"),
-                    KeyboardButton(text="Активные аренды"),
-                ],
-                [
-                    KeyboardButton(text="🔎 Проверка броней"),
-                    KeyboardButton(text="🏁 Приём авто"),
-                ],
-                [KeyboardButton(text="🔎 Брони heavy_lux_cr")],
-                [KeyboardButton(text="🚗 Статус heavy_lux_cr")],
-                [KeyboardButton(text="Отмена")],
-            ],
-            resize_keyboard=True,
-            is_persistent=True,
-        )
+def partner_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔎 Брони Dodge")],
@@ -435,13 +413,33 @@ def get_main_keyboard(
         except Exception:
             logger.exception("Could not resolve role for menu")
     normalized_role = str(role or "").strip().lower()
+    if normalized_role == HEAVY_LUX_PARTNER_ROLE:
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [
+                    KeyboardButton(text="Доступные авто"),
+                    KeyboardButton(text="Новая бронь"),
+                ],
+                [
+                    KeyboardButton(text="🚗 Выдача авто"),
+                    KeyboardButton(text="Активные аренды"),
+                ],
+                [
+                    KeyboardButton(text="🏁 Приём авто"),
+                    KeyboardButton(text="🔎 Проверка броней"),
+                ],
+                [KeyboardButton(text="Отмена")],
+            ],
+            resize_keyboard=True,
+            is_persistent=True,
+        )
     if uid == PARTNER_ID or normalized_role in {
         "партнёр",
         "партнер",
         "partner",
         HEAVY_LUX_PARTNER_ROLE,
     }:
-        return partner_menu_keyboard(normalized_role == HEAVY_LUX_PARTNER_ROLE)
+        return partner_menu_keyboard()
     buttons = [
         [
             KeyboardButton(text="Доступные авто"),
@@ -2319,7 +2317,7 @@ async def show_menu(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
             (
-                "Партнёрский кабинет heavy_lux_cr. Выберите раздел:"
+                "Панель управления автопрокатом готова. Выберите операцию:"
                 if is_heavy_lux_partner_user(user.id)
                 else "Партнёрский кабинет Dodge. Выберите раздел:"
             ),
@@ -3842,8 +3840,6 @@ async def _finish_availability(
     try:
         cars = get_available_cars(start_date, end_date)
         data = await state.get_data()
-        if data.get("partner_mode"):
-            cars = [car for car in cars if _is_heavy_lux_car(car)]
     except Exception:
         logger.exception("Could not load available cars")
         await state.clear()
@@ -3926,8 +3922,6 @@ async def issuance_mode_selection(message: Message, state: FSMContext) -> None:
     if choice == "⚡ Срочная выдача (без брони)":
         try:
             cars = get_available_cars_for_direct_issuance()
-            if (await state.get_data()).get("partner_mode"):
-                cars = [car for car in cars if _is_heavy_lux_car(car)]
         except Exception:
             logger.exception("Could not load cars for direct issuance")
             await state.clear()
@@ -3967,8 +3961,6 @@ async def _start_existing_issuance(
 ) -> None:
     try:
         bookings = get_confirmed_bookings()
-        if (await state.get_data()).get("partner_mode"):
-            bookings = [booking for booking in bookings if _is_heavy_lux_booking(booking)]
     except Exception:
         logger.exception("Could not load confirmed bookings for issuance")
         await message.answer(
@@ -4134,8 +4126,6 @@ async def _finish_booking_dates(
 ) -> None:
     try:
         cars = get_available_cars(start_date, end_date)
-        if (await state.get_data()).get("partner_mode"):
-            cars = [car for car in cars if _is_heavy_lux_car(car)]
     except Exception:
         logger.exception("Could not load cars for booking")
         await state.clear()
@@ -4164,8 +4154,6 @@ async def start_occupancy(message: Message, state: FSMContext) -> None:
         # Occupancy inspection must include every car, even currently rented
         # or reserved ones, so managers can inspect their occupied dates.
         cars = get_all_cars()
-        if is_heavy_lux_partner_user(message.from_user.id):
-            cars = [car for car in cars if _is_heavy_lux_car(car)]
     except Exception:
         logger.exception("Could not load cars for occupancy calendar")
         await message.answer(
@@ -5444,8 +5432,6 @@ async def start_return(message: Message, state: FSMContext) -> None:
     await state.clear()
     try:
         cars = get_all_cars()
-        if is_heavy_lux_partner_user(message.from_user.id):
-            cars = [car for car in cars if _is_heavy_lux_car(car)]
     except Exception:
         logger.exception("Could not load cars for return")
         await message.answer(
@@ -6754,9 +6740,7 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(cancel_flow, F.text.casefold() == "отмена")
 
     dispatcher.message.register(partner_bookings, F.text == "🔎 Брони Dodge")
-    dispatcher.message.register(partner_bookings, F.text == "🔎 Брони heavy_lux_cr")
     dispatcher.message.register(partner_status, F.text == "🚗 Статус Dodge")
-    dispatcher.message.register(partner_status, F.text == "🚗 Статус heavy_lux_cr")
     dispatcher.message.register(partner_expenses, F.text == "📑 Расходы Dodge")
 
     dispatcher.message.register(start_availability, F.text == "Доступные авто")
