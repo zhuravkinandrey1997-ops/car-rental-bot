@@ -1774,12 +1774,39 @@ def save_direct_issuance(
         return booking_id
 
 
+def _attach_car_references(bookings: list[dict]) -> list[dict]:
+    """Attach справочник values once for a list of booking records."""
+    cars = ws_cars.get_all_records()
+    enriched_bookings = []
+    for booking in bookings:
+        enriched = dict(booking)
+        fallback_name = str(booking.get("Автомобиль") or "—").strip() or "—"
+        enriched["__car_name__"] = fallback_name
+        enriched["__car_plate__"] = ""
+        for car in cars:
+            if str(booking.get("ID Авто")).strip() == str(car.get("ID")).strip():
+                enriched["__car_name__"] = (
+                    car.get("Марка и Модель") or fallback_name
+                )
+                enriched["__car_plate__"] = (
+                    str(car.get("Госномер", "Без номера") or "").strip()
+                )
+                break
+        enriched_bookings.append(enriched)
+    return enriched_bookings
+
+
 def get_active_rentals():
     all_bookings = _get_sheet_records_safely(
         ws_bookings,
         "Бронирования",
     )
-    return [b for b in all_bookings if b.get("Статус") in ["В аренде", "Подтверждена"]]
+    active_bookings = [
+        booking
+        for booking in all_bookings
+        if booking.get("Статус") in ["В аренде", "Подтверждена"]
+    ]
+    return _attach_car_references(active_bookings)
 
 
 def get_returnable_rentals():
@@ -1941,7 +1968,7 @@ def get_partner_cars(keyword: str) -> list[dict]:
 
 def get_partner_bookings(keyword: str) -> list[dict]:
     """Return bookings whose car name or source contains the partner keyword."""
-    return [
+    bookings = [
         dict(booking)
         for booking in _get_sheet_records_safely(
             ws_bookings,
@@ -1963,6 +1990,7 @@ def get_partner_bookings(keyword: str) -> list[dict]:
             ),
         )
     ]
+    return _attach_car_references(bookings)
 
 
 def get_partner_expenses(keyword: str) -> list[dict]:

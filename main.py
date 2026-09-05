@@ -1259,22 +1259,30 @@ def _partner_booking_card_text(
 ) -> str:
     """Render only operational booking data for a restricted partner."""
     car = car or {}
-    car_name = _car_name(car) or _value(
-        booking,
-        "Автомобиль",
-        "Авто",
-        "Название авто",
-        "Марка и Модель",
-        "Модель",
-        default="—",
+    car_name = (
+        str(booking.get("__car_name__") or "").strip()
+        or _car_name(car)
+        or _value(
+            booking,
+            "Автомобиль",
+            "Авто",
+            "Название авто",
+            "Марка и Модель",
+            "Модель",
+            default="—",
+        )
     )
-    plate = _car_plate(car) or _value(
-        booking,
-        "Госномер",
-        "Номер авто",
-        "Номер",
-        "Plate",
-        default="—",
+    plate = (
+        str(booking.get("__car_plate__") or "").strip()
+        or _car_plate(car)
+        or _value(
+            booking,
+            "Госномер",
+            "Номер авто",
+            "Номер",
+            "Plate",
+            default="",
+        )
     )
     client_name = _value(
         booking,
@@ -1327,11 +1335,16 @@ def _partner_booking_card_text(
         technical_lines.append("Пробег: " + " / ".join(mileage_parts))
     if fuel:
         technical_lines.append(f"Топливо: {fuel}")
+    vehicle_line = (
+        f"Автомобиль: {car_name} ({plate})"
+        if plate and plate not in {"—", "Без номера"}
+        else f"Автомобиль: {car_name}"
+    )
     return "\n".join(
         [
             f"Источник: {source}",
             f"Бронь №{_booking_id(booking)}",
-            f"Автомобиль: {car_name} ({plate})",
+            vehicle_line,
             f"Клиент: {client_name} ({phone})",
             f"Период: {format_date_ru(start_date)} — "
             f"{format_date_ru(end_date)}",
