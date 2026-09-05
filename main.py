@@ -1164,6 +1164,20 @@ def _booking_id(record: dict) -> str:
     return _value(record, "ID Брони", "ID", "Booking ID")
 
 
+def _booking_status_text(booking: dict) -> str:
+    status = _value(booking, "Статус", default="—").strip()
+    normalized = status.casefold()
+    if normalized in {"подтверждена", "подтверждено"}:
+        return "🔘 Статус: Подтверждена"
+    if normalized in {"запланирована", "запланировано", "забронирована"}:
+        return "⚪️ Бронь"
+    if normalized == "в аренде":
+        return "🟢 Статус: В аренде"
+    if normalized == "завершена":
+        return "🏁 Статус: Завершена"
+    return f"Статус: {status or '—'}"
+
+
 def _manager_display_name(user) -> str:
     return (
         getattr(user, "full_name", "")
@@ -1251,7 +1265,7 @@ def _booking_card_text(booking: dict) -> str:
         f"Задаток: {_booking_prepayment_text(booking)}\n"
         f"Период: {format_date_ru(start_date)} — "
         f"{format_date_ru(end_date)}\n"
-        f"Статус: {_value(booking, 'Статус', default='—')}"
+        + _booking_status_text(booking)
     )
 
 
@@ -1353,7 +1367,7 @@ def _partner_booking_card_text(
             f"Период: {format_date_ru(start_date)} — "
             f"{format_date_ru(end_date)}",
             *technical_lines,
-            f"Статус: {_value(booking, 'Статус', default='—')}",
+            _booking_status_text(booking),
         ]
     )
 
@@ -5418,7 +5432,7 @@ async def list_active_rentals(message: Message, state: FSMContext) -> None:
         text = "Активные аренды:\n\n" + "\n\n".join(
             f"Бронь №{_booking_id(item)}\n{_booking_label(item)}\n"
             f"Телефон: {_value(item, 'Телефон', 'Телефон клиента')}\n"
-            f"Статус: {_value(item, 'Статус')}"
+            f"{_booking_status_text(item)}"
             for item in rentals
         )
     await message.answer(text, reply_markup=get_main_keyboard(message.from_user.id))
