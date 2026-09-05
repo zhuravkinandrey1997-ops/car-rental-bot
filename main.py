@@ -6645,6 +6645,12 @@ async def _save_return(
 
 
 async def unknown_message(message: Message) -> None:
+    if message.from_user and is_partner_user(message.from_user.id):
+        await message.answer(
+            "Выберите действие кнопками меню.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
+        return
     if await ensure_manager(message):
         await message.answer(
             "Выберите действие кнопками меню.",
@@ -6755,6 +6761,7 @@ def create_dispatcher() -> Dispatcher:
 
     dispatcher.message.register(start_availability, F.text == "Доступные авто")
     dispatcher.message.register(start_booking, F.text == "Новая бронь")
+    dispatcher.message.register(start_booking, F.text == "📝 Новая бронь")
     dispatcher.message.register(start_issuance, F.text == "🚗 Выдача авто")
     dispatcher.message.register(list_active_rentals, F.text == "Активные аренды")
     dispatcher.message.register(start_return, F.text == "🏁 Приём авто")
