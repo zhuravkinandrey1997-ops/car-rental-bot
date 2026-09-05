@@ -12,3 +12,4 @@
 - [Manager-approved rental price](rental-price-adjustments.md) — confirm or discount the tariff total before calculating the remaining rent at return.
 - [Google Sheets write quota](google-sheets-write-quota.md) — batch return headers and row updates to avoid HTTP 429 per-minute write limits.
 - [Google Sheets safe reader](google-sheets-safe-reader.md) — read legacy sheets with blank or duplicate headers through normalized get_all_values rows.
+- [Heavy Lux partner boundary](heavy-lux-partner-mode.md) — partner_heavy_lux uses heavy_lux_cr and sees only operational data and FSM steps.

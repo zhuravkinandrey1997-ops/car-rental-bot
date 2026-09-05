@@ -84,6 +84,8 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 NOTIFY_MANAGERS = [661842368, 952125424, 1574781782]
 PARTNER_ID = 226694751
 PARTNER_CAR_KEYWORD = "Dodge"
+HEAVY_LUX_PARTNER_ROLE = "partner_heavy_lux"
+HEAVY_LUX_PARTNER_SOURCE = "heavy_lux_cr"
 
 MONTH_NAMES = (
     "Январь",
@@ -149,6 +151,7 @@ class ReturnForm(StatesGroup):
     end_mileage = State()
     direct_deposit = State()
     cleanliness = State()
+    fuel_level = State()
     wash_fee = State()
     extra_fee = State()
     penalty_decision = State()
@@ -385,7 +388,25 @@ def _period_selection_text(start_date: str, end_date: str) -> str:
     )
 
 
-def partner_menu_keyboard() -> ReplyKeyboardMarkup:
+def partner_menu_keyboard(heavy_lux: bool = False) -> ReplyKeyboardMarkup:
+    if heavy_lux:
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [
+                    KeyboardButton(text="📝 Новая бронь"),
+                    KeyboardButton(text="🚗 Выдача авто"),
+                ],
+                [
+                    KeyboardButton(text="Активные аренды"),
+                    KeyboardButton(text="🏁 Приём авто"),
+                ],
+                [KeyboardButton(text="🔎 Брони heavy_lux_cr")],
+                [KeyboardButton(text="🚗 Статус heavy_lux_cr")],
+                [KeyboardButton(text="Отмена")],
+            ],
+            resize_keyboard=True,
+            is_persistent=True,
+        )
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔎 Брони Dodge")],
@@ -410,8 +431,13 @@ def get_main_keyboard(
         except Exception:
             logger.exception("Could not resolve role for menu")
     normalized_role = str(role or "").strip().lower()
-    if uid == PARTNER_ID or normalized_role in {"партнёр", "партнер", "partner"}:
-        return partner_menu_keyboard()
+    if uid == PARTNER_ID or normalized_role in {
+        "партнёр",
+        "партнер",
+        "partner",
+        HEAVY_LUX_PARTNER_ROLE,
+    }:
+        return partner_menu_keyboard(normalized_role == HEAVY_LUX_PARTNER_ROLE)
     buttons = [
         [
             KeyboardButton(text="Доступные авто"),
@@ -1225,6 +1251,196 @@ def _booking_card_text(booking: dict) -> str:
     )
 
 
+def _partner_booking_card_text(
+    booking: dict,
+    car: dict | None = None,
+    *,
+    source: str = HEAVY_LUX_PARTNER_SOURCE,
+) -> str:
+    """Render only operational booking data for a restricted partner."""
+    car = car or {}
+    car_name = _car_name(car) or _value(
+        booking,
+        "Автомобиль",
+        "Авто",
+        "Название авто",
+        "Марка и Модель",
+        "Модель",
+        default="—",
+    )
+    plate = _car_plate(car) or _value(
+        booking,
+        "Госномер",
+        "Номер авто",
+        "Номер",
+        "Plate",
+        default="—",
+    )
+    client_name = _value(
+        booking,
+        "ФИО Клиента",
+        "Клиент",
+        "Клиент ФИО",
+        "Имя клиента",
+        default="—",
+    )
+    phone = _value(booking, "Телефон", "Телефон клиента", default="—")
+    start_date = _value(
+        booking,
+        "Дата начала (ГГГГ-ММ-ДД)",
+        "Дата начала",
+        default="—",
+    )
+    end_date = _value(
+        booking,
+        "Дата окончания (ГГГГ-ММ-ДД)",
+        "Дата окончания",
+        default="—",
+    )
+    start_mileage = _value(
+        booking,
+        "Пробег при выдаче (км)",
+        "Начальный пробег",
+        default="",
+    )
+    end_mileage = _value(
+        booking,
+        "Пробег при возврате (км)",
+        "Конечный пробег",
+        default="",
+    )
+    fuel = _value(
+        booking,
+        "Уровень топлива",
+        "Топливо",
+        "Топливо при выдаче",
+        "Топливо при возврате",
+        default="",
+    )
+    mileage_parts = []
+    if start_mileage:
+        mileage_parts.append(f"выдача: {start_mileage} км")
+    if end_mileage:
+        mileage_parts.append(f"возврат: {end_mileage} км")
+    technical_lines = []
+    if mileage_parts:
+        technical_lines.append("Пробег: " + " / ".join(mileage_parts))
+    if fuel:
+        technical_lines.append(f"Топливо: {fuel}")
+    return "\n".join(
+        [
+            f"Источник: {source}",
+            f"Бронь №{_booking_id(booking)}",
+            f"Автомобиль: {car_name} ({plate})",
+            f"Клиент: {client_name} ({phone})",
+            f"Период: {format_date_ru(start_date)} — "
+            f"{format_date_ru(end_date)}",
+            *technical_lines,
+            f"Статус: {_value(booking, 'Статус', default='—')}",
+        ]
+    )
+
+
+def _is_heavy_lux_car(car: dict) -> bool:
+    source = _value(
+        car,
+        "Источник",
+        "Партнёр",
+        "Партнер",
+        "Канал",
+        default="",
+    ).casefold()
+    if source:
+        return HEAVY_LUX_PARTNER_SOURCE.casefold() in source
+    return PARTNER_CAR_KEYWORD.casefold() in _car_name(car).casefold()
+
+
+def _is_heavy_lux_booking(booking: dict) -> bool:
+    source = _value(
+        booking,
+        "Источник",
+        "Партнёр",
+        "Партнер",
+        "Канал",
+        default="",
+    ).casefold()
+    if source:
+        return HEAVY_LUX_PARTNER_SOURCE.casefold() in source
+    car_name = _value(
+        booking,
+        "Автомобиль",
+        "Авто",
+        "Название авто",
+        "Марка и Модель",
+        "Модель",
+        default="",
+    )
+    return PARTNER_CAR_KEYWORD.casefold() in car_name.casefold()
+
+
+def _partner_issuance_card_text(data: dict) -> str:
+    car = data.get("car", {})
+    booking = data.get("booking", {})
+    booking_id = _booking_id(booking) if booking else "без брони"
+    fuel = _value(
+        car,
+        "Уровень топлива",
+        "Топливо",
+        "Уровень топлива (%)",
+        "Топливо (%)",
+        "Топливо при выдаче",
+        default="—",
+    )
+    return (
+        "Проверьте акт выдачи авто:\n\n"
+        f"Источник: {HEAVY_LUX_PARTNER_SOURCE}\n"
+        f"Бронь №{booking_id}\n"
+        f"Автомобиль: {_car_name(car) or data.get('car_name', '—')} "
+        f"({_car_plate(car) or '—'})\n"
+        f"Период: {_issue_datetime_text(data.get('issued_at', ''), data.get('planned_end_at', ''))}\n"
+        f"Клиент: {data.get('client_name', '—')}\n"
+        f"Телефон: {data.get('phone', '—')}\n"
+        f"Пробег при выдаче: {data.get('start_mileage', '—')} км\n"
+        f"Топливо: {fuel}\n\n"
+        "Сохранить выдачу авто?"
+    )
+
+
+def _partner_return_card_text(data: dict) -> str:
+    booking = data.get("booking", {})
+    car = data.get("car", {})
+    phone = _value(booking, "Телефон", "Телефон клиента", default="—")
+    issued_datetime = _booking_issued_datetime(booking)
+    issued_at = (
+        _timestamp(issued_datetime)
+        if issued_datetime
+        else _value(
+            booking,
+            "Дата и время выдачи",
+            "Фактическая дата выдачи",
+            "Дата выдачи",
+            "Дата начала",
+            default="—",
+        )
+    )
+    return (
+        "🏁 АКТ ПРИЁМА АВТОМОБИЛЯ\n"
+        f"Источник: {HEAVY_LUX_PARTNER_SOURCE}\n"
+        f"Бронь №{_booking_id(booking)}\n"
+        f"Автомобиль: {_car_name(car)} ({_car_plate(car)})\n"
+        f"Клиент: {_value(booking, 'ФИО Клиента', 'Клиент', default='—')} / {phone}\n"
+        f"Период: {_format_datetime_ru(issued_at)} — "
+        f"{_format_datetime_ru(data.get('returned_at', _timestamp()))}\n"
+        f"Пробег: выдача {data.get('start_mileage', '—')} км / "
+        f"возврат {data.get('end_mileage', '—')} км\n"
+        f"Топливо: {data.get('fuel_level', '—')}\n"
+        f"Состояние: {data.get('cleanliness', '—')}\n"
+        f"Статус: готов к сохранению\n"
+        f"Примечание: {data.get('notes') or '—'}\n\n"
+        "Сохранить приём автомобиля?"
+    )
+
+
 def _car_id(record: dict) -> str:
     return _value(record, "ID Авто", "ID", "Car ID")
 
@@ -1275,6 +1491,20 @@ def _car_base_deposit(car: dict) -> int | None:
 
 def _car_label(car: dict) -> str:
     return f"{_car_name(car)} ({_car_plate(car)}) — {_car_daily_rate(car)} RUB/сутки"
+
+
+def _partner_auto_booking_price(data: dict) -> int | None:
+    """Calculate a partner booking amount from the car's daily tariff."""
+    try:
+        daily_rate = safe_int(_car_daily_rate(data.get("car", {})))
+        start_date = datetime.date.fromisoformat(str(data["start_date"]))
+        end_date = datetime.date.fromisoformat(str(data["end_date"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    days = (end_date - start_date).days + 1
+    if daily_rate <= 0 or days <= 0:
+        return None
+    return daily_rate * days
 
 
 def _booking_car(booking: dict) -> dict:
@@ -1932,12 +2162,38 @@ def is_partner_user(user_id: int) -> bool:
             and (
                 str(user_id).strip() == str(PARTNER_ID)
                 or _normalized_role(access)
-                in {"партнёр", "партнер", "partner"}
+                in {
+                    "партнёр",
+                    "партнер",
+                    "partner",
+                    HEAVY_LUX_PARTNER_ROLE,
+                }
             )
         )
     except Exception:
         logger.exception("Partner authorization check failed")
         return False
+
+
+def is_heavy_lux_partner_user(user_id: int) -> bool:
+    try:
+        access = _manager_access_for_user(user_id)
+        return bool(
+            access
+            and access["active"]
+            and _normalized_role(access) == HEAVY_LUX_PARTNER_ROLE
+        )
+    except Exception:
+        logger.exception("Heavy Lux partner authorization check failed")
+        return False
+
+
+async def ensure_operational_user(message: Message) -> bool:
+    """Allow managers and the restricted Heavy Lux partner to run operations."""
+    user = message.from_user
+    if user is not None and is_heavy_lux_partner_user(user.id):
+        return True
+    return await ensure_manager(message)
 
 
 def _partner_car_status(car: dict) -> str:
@@ -1975,10 +2231,10 @@ async def ensure_partner(message: Message) -> bool:
         return False
     if is_partner_user(user.id):
         return True
-    await message.answer(
-        "Эта функция доступна только партнёру по автомобилю Dodge.",
-        reply_markup=get_main_keyboard(user.id, _normalized_role(access)),
-    )
+        await message.answer(
+            "Эта функция доступна только партнёру по автомобилю.",
+            reply_markup=get_main_keyboard(user.id, _normalized_role(access)),
+        )
     return False
 
 
@@ -2010,7 +2266,7 @@ async def ensure_manager(message: Message) -> bool:
     if is_partner_user(user.id):
         await message.answer(
             "Административные функции недоступны в партнёрском режиме.",
-            reply_markup=partner_menu_keyboard(),
+            reply_markup=get_main_keyboard(user.id, _normalized_role(access)),
         )
         return False
     return True
@@ -2019,11 +2275,7 @@ async def ensure_manager(message: Message) -> bool:
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     # Always discard any partially completed flow before returning to the menu.
     await state.clear()
-    reply_markup = (
-        partner_menu_keyboard()
-        if message.from_user and is_partner_user(message.from_user.id)
-        else get_main_keyboard(message.from_user.id)
-    )
+    reply_markup = get_main_keyboard(message.from_user.id)
     await message.answer(
         "Операция отменена.",
         reply_markup=reply_markup,
@@ -2035,8 +2287,12 @@ async def show_menu(message: Message, state: FSMContext) -> None:
     if user and is_partner_user(user.id):
         await state.clear()
         await message.answer(
-            "Партнёрский кабинет Dodge. Выберите раздел:",
-            reply_markup=partner_menu_keyboard(),
+            (
+                "Партнёрский кабинет heavy_lux_cr. Выберите раздел:"
+                if is_heavy_lux_partner_user(user.id)
+                else "Партнёрский кабинет Dodge. Выберите раздел:"
+            ),
+            reply_markup=get_main_keyboard(user.id),
         )
         return
     if not await ensure_manager(message):
@@ -2075,51 +2331,45 @@ async def start_handler(message: Message, state: FSMContext) -> None:
 async def partner_bookings(message: Message) -> None:
     if not await ensure_partner(message):
         return
+    partner_keyword = (
+        HEAVY_LUX_PARTNER_SOURCE
+        if is_heavy_lux_partner_user(message.from_user.id)
+        else PARTNER_CAR_KEYWORD
+    )
     try:
         bookings = await asyncio.to_thread(
             get_partner_bookings,
-            PARTNER_CAR_KEYWORD,
+            partner_keyword,
         )
     except Exception:
         logger.exception("Could not load partner bookings")
-        await message.answer("Не удалось загрузить брони Dodge.")
+        await message.answer("Не удалось загрузить партнёрские брони.")
         return
     if not bookings:
         await message.answer(
-            "Брони Dodge не найдены.",
-            reply_markup=partner_menu_keyboard(),
+            "Партнёрские брони не найдены.",
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    lines = ["🔎 БРОНИ DODGE", ""]
+    lines = [
+        f"🔎 БРОНИ {HEAVY_LUX_PARTNER_SOURCE if is_heavy_lux_partner_user(message.from_user.id) else 'DODGE'}",
+        "",
+    ]
+    partner_source = (
+        HEAVY_LUX_PARTNER_SOURCE
+        if is_heavy_lux_partner_user(message.from_user.id)
+        else "Dodge"
+    )
     for booking in bookings:
-        amount = _format_number(
-            _value(
-                booking,
-                "Сумма брони (RUB)",
-                "Цена",
-                "Стоимость",
-                default="0",
-            )
-        )
         lines.extend(
-            [
-                f"Бронь №{_booking_id(booking)}",
-                f"Автомобиль: {_value(booking, 'Автомобиль', 'Авто', default='—')}",
-                "Период: "
-                f"{format_date_ru(_value(booking, 'Дата начала', default='—'))} — "
-                f"{format_date_ru(_value(booking, 'Дата окончания', default='—'))}",
-                f"Клиент: {_value(booking, 'ФИО Клиента', 'Клиент', default='—')}",
-                f"Статус: {_value(booking, 'Статус', default='—')}",
-                f"Сумма: {amount} RUB",
-                "",
-            ]
+            [_partner_booking_card_text(booking, source=partner_source), ""]
         )
     chunks = split_telegram_message("\n".join(lines).rstrip())
     for index, chunk in enumerate(chunks):
         await message.answer(
             chunk,
             reply_markup=(
-                partner_menu_keyboard()
+                get_main_keyboard(message.from_user.id)
                 if index == len(chunks) - 1
                 else None
             ),
@@ -2129,22 +2379,30 @@ async def partner_bookings(message: Message) -> None:
 async def partner_status(message: Message) -> None:
     if not await ensure_partner(message):
         return
+    partner_keyword = (
+        HEAVY_LUX_PARTNER_SOURCE
+        if is_heavy_lux_partner_user(message.from_user.id)
+        else PARTNER_CAR_KEYWORD
+    )
     try:
         cars = await asyncio.to_thread(
             get_partner_cars,
-            PARTNER_CAR_KEYWORD,
+            partner_keyword,
         )
     except Exception:
         logger.exception("Could not load partner car status")
-        await message.answer("Не удалось загрузить статус Dodge.")
+        await message.answer("Не удалось загрузить статус партнёрских авто.")
         return
     if not cars:
         await message.answer(
-            "Автомобиль Dodge не найден.",
-            reply_markup=partner_menu_keyboard(),
+            "Партнёрские автомобили не найдены.",
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    lines = ["🚗 СТАТУС DODGE", ""]
+    lines = [
+        f"🚗 СТАТУС {HEAVY_LUX_PARTNER_SOURCE if is_heavy_lux_partner_user(message.from_user.id) else 'DODGE'}",
+        "",
+    ]
     for car in cars:
         lines.extend(
             [
@@ -2157,12 +2415,18 @@ async def partner_status(message: Message) -> None:
         )
     await message.answer(
         "\n".join(lines).rstrip(),
-        reply_markup=partner_menu_keyboard(),
+        reply_markup=get_main_keyboard(message.from_user.id),
     )
 
 
 async def partner_expenses(message: Message) -> None:
     if not await ensure_partner(message):
+        return
+    if is_heavy_lux_partner_user(message.from_user.id):
+        await message.answer(
+            "Раздел расходов недоступен в партнёрском режиме.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
         return
     try:
         expenses = await asyncio.to_thread(
@@ -2176,7 +2440,7 @@ async def partner_expenses(message: Message) -> None:
     if not expenses:
         await message.answer(
             "Расходы Dodge не найдены.",
-            reply_markup=partner_menu_keyboard(),
+            reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
     lines = ["📑 РАСХОДЫ DODGE", ""]
@@ -2195,7 +2459,7 @@ async def partner_expenses(message: Message) -> None:
         await message.answer(
             chunk,
             reply_markup=(
-                partner_menu_keyboard()
+                get_main_keyboard(message.from_user.id)
                 if index == len(chunks) - 1
                 else None
             ),
@@ -2230,7 +2494,7 @@ async def ensure_finance_access(message: Message) -> bool:
     if is_partner_user(user.id):
         await message.answer(
             "Финансовые операции недоступны в партнёрском режиме.",
-            reply_markup=partner_menu_keyboard(),
+            reply_markup=get_main_keyboard(user.id, _normalized_role(access)),
         )
         return False
     if _normalized_role(access) not in {"администратор", "admin"}:
@@ -3571,10 +3835,16 @@ async def _start_booking_flow(
     mode: str,
     title: str,
 ) -> None:
-    if not await ensure_manager(message):
+    if not await ensure_operational_user(message):
         return
     await state.clear()
-    await state.update_data(booking_mode=mode)
+    await state.update_data(
+        booking_mode=mode,
+        partner_mode=(
+            bool(message.from_user)
+            and is_heavy_lux_partner_user(message.from_user.id)
+        ),
+    )
     await state.set_state(BookingForm.start_date)
     calendar_message = await message.answer(
         f"{title}.\n\n" + _calendar_prompt("booking", "start"),
@@ -3588,9 +3858,15 @@ async def start_booking(message: Message, state: FSMContext) -> None:
 
 
 async def start_issuance(message: Message, state: FSMContext) -> None:
-    if not await ensure_manager(message):
+    if not await ensure_operational_user(message):
         return
     await state.clear()
+    await state.update_data(
+        partner_mode=(
+            bool(message.from_user)
+            and is_heavy_lux_partner_user(message.from_user.id)
+        )
+    )
     await state.set_state(BookingForm.issuance_mode)
     await message.answer(
         "🚗 Выдача авто.\n\nВыберите способ оформления:",
@@ -3603,6 +3879,8 @@ async def issuance_mode_selection(message: Message, state: FSMContext) -> None:
     if choice == "⚡ Срочная выдача (без брони)":
         try:
             cars = get_available_cars_for_direct_issuance()
+            if (await state.get_data()).get("partner_mode"):
+                cars = [car for car in cars if _is_heavy_lux_car(car)]
         except Exception:
             logger.exception("Could not load cars for direct issuance")
             await state.clear()
@@ -3642,6 +3920,8 @@ async def _start_existing_issuance(
 ) -> None:
     try:
         bookings = get_confirmed_bookings()
+        if (await state.get_data()).get("partner_mode"):
+            bookings = [booking for booking in bookings if _is_heavy_lux_booking(booking)]
     except Exception:
         logger.exception("Could not load confirmed bookings for issuance")
         await message.answer(
@@ -3807,6 +4087,8 @@ async def _finish_booking_dates(
 ) -> None:
     try:
         cars = get_available_cars(start_date, end_date)
+        if (await state.get_data()).get("partner_mode"):
+            cars = [car for car in cars if _is_heavy_lux_car(car)]
     except Exception:
         logger.exception("Could not load cars for booking")
         await state.clear()
@@ -4570,6 +4852,24 @@ async def booking_phone(message: Message, state: FSMContext) -> None:
         )
         return
     if data.get("booking_mode") == "reservation":
+        if data.get("partner_mode"):
+            auto_price = _partner_auto_booking_price(data)
+            await state.update_data(
+                delivery_address="Самовывоз",
+                delivery_price=0,
+                prepayment=0,
+                prepayment_pay_type="Без оплаты",
+            )
+            if auto_price is not None:
+                await state.update_data(price=auto_price)
+                await _send_reservation_confirmation(message, state)
+                return
+            await state.set_state(BookingForm.price)
+            await message.answer(
+                "Не удалось определить суточный тариф автомобиля. "
+                "Введите сумму брони только для внутренней таблицы в RUB:"
+            )
+            return
         await state.set_state(BookingForm.delivery)
         await message.answer(
             "Нужна ли доставка автомобиля?",
@@ -4662,6 +4962,18 @@ async def direct_end_date(message: Message, state: FSMContext) -> None:
         planned_end_at=f"{value} {data.get('issue_time', '23:59')}",
         return_time=data.get("issue_time", "23:59"),
     )
+    data = await state.get_data()
+    if data.get("partner_mode"):
+        auto_price = _partner_auto_booking_price(data) or 0
+        await state.update_data(
+            price=auto_price,
+            pay_type="Без оплаты",
+            deposit=0,
+            deposit_pay_type="Без оплаты",
+        )
+        await state.set_state(BookingForm.start_mileage)
+        await message.answer("Введите пробег автомобиля на момент выдачи в км:")
+        return
     await state.set_state(BookingForm.price)
     await message.answer("Введите фактическую сумму аренды в RUB:")
 
@@ -4677,6 +4989,25 @@ async def booking_price(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(price=price)
     data = await state.get_data()
+    if data.get("partner_mode"):
+        if data.get("booking_mode") == "reservation":
+            await state.update_data(
+                delivery_address="Самовывоз",
+                delivery_price=0,
+                prepayment=0,
+                prepayment_pay_type="Без оплаты",
+            )
+            await _send_reservation_confirmation(message, state)
+            return
+        if data.get("booking_mode") == "direct_issuance":
+            await state.update_data(
+                pay_type="Без оплаты",
+                deposit=0,
+                deposit_pay_type="Без оплаты",
+            )
+            await state.set_state(BookingForm.start_mileage)
+            await message.answer("Введите пробег автомобиля на момент выдачи в км:")
+            return
     if data.get("booking_mode") == "reservation":
         await state.set_state(BookingForm.prepayment)
         await message.answer(
@@ -4728,6 +5059,17 @@ async def booking_start_mileage(message: Message, state: FSMContext) -> None:
         await message.answer(error)
         return
     await state.update_data(start_mileage=start_mileage)
+    data = await state.get_data()
+    if data.get("partner_mode"):
+        await state.update_data(
+            deposit=0,
+            deposit_pay_type="Без оплаты",
+            prepayment=0,
+            prepayment_pay_type="Без оплаты",
+            pay_type="Без оплаты",
+        )
+        await _send_booking_confirmation(message, state)
+        return
     await state.set_state(BookingForm.deposit)
     data = await state.get_data()
     base_deposit = _car_base_deposit(data.get("car", {}))
@@ -4770,6 +5112,12 @@ async def _send_booking_confirmation(message: Message, state: FSMContext) -> Non
     issued_at = data.get("issued_at") or _timestamp()
     planned_end_at = data.get("planned_end_at", "")
     await state.set_state(BookingForm.confirmation)
+    if data.get("partner_mode"):
+        await message.answer(
+            _partner_issuance_card_text(data),
+            reply_markup=confirmation_keyboard(),
+        )
+        return
     backdated_text = (
         "Фактическая выдача: "
         f"{_format_datetime_ru(issued_at)} (Оформлено задним числом)\n"
@@ -4809,6 +5157,27 @@ async def _send_reservation_confirmation(
     delivery_price = int(data.get("delivery_price", 0))
     total_price = rent_price + delivery_price
     await state.set_state(BookingForm.confirmation)
+    if data.get("partner_mode"):
+        await message.answer(
+            "\n".join(
+                [
+                    "Проверьте новую бронь:",
+                    "",
+                    f"Источник: {HEAVY_LUX_PARTNER_SOURCE}",
+                    "Автомобиль: "
+                    f"{data.get('car_name', '—')} "
+                    f"({_car_plate(data.get('car', {})) or '—'})",
+                    f"Период: {format_date_ru(data['start_date'])} — "
+                    f"{format_date_ru(data['end_date'])}",
+                    f"Клиент: {data.get('client_name', '—')}",
+                    f"Телефон: {data.get('phone', '—')}",
+                    "",
+                    "Сохранить бронь?",
+                ]
+            ),
+            reply_markup=confirmation_keyboard(),
+        )
+        return
     await message.answer(
         "Проверьте новую бронь:\n\n"
         f"Авто: {data['car_name']}\n"
@@ -4966,7 +5335,7 @@ async def booking_confirmation(
 
 
 async def list_active_rentals(message: Message, state: FSMContext) -> None:
-    if not await ensure_manager(message):
+    if not await ensure_operational_user(message):
         return
     await state.clear()
     try:
@@ -4984,24 +5353,28 @@ async def list_active_rentals(message: Message, state: FSMContext) -> None:
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    await message.answer(
-        "Активные аренды:\n\n"
-        + "\n\n".join(
+    if is_heavy_lux_partner_user(message.from_user.id):
+        text = "Активные аренды:\n\n" + "\n\n".join(
+            _partner_booking_card_text(item) for item in rentals
+        )
+    else:
+        text = "Активные аренды:\n\n" + "\n\n".join(
             f"Бронь №{_booking_id(item)}\n{_booking_label(item)}\n"
             f"Телефон: {_value(item, 'Телефон', 'Телефон клиента')}\n"
             f"Статус: {_value(item, 'Статус')}"
             for item in rentals
-        ),
-        reply_markup=get_main_keyboard(message.from_user.id),
-    )
+        )
+    await message.answer(text, reply_markup=get_main_keyboard(message.from_user.id))
 
 
 async def start_return(message: Message, state: FSMContext) -> None:
-    if not await ensure_manager(message):
+    if not await ensure_operational_user(message):
         return
     await state.clear()
     try:
         cars = get_all_cars()
+        if is_heavy_lux_partner_user(message.from_user.id):
+            cars = [car for car in cars if _is_heavy_lux_car(car)]
     except Exception:
         logger.exception("Could not load cars for return")
         await message.answer(
@@ -5015,7 +5388,13 @@ async def start_return(message: Message, state: FSMContext) -> None:
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    await state.update_data(return_cars=cars)
+    await state.update_data(
+        return_cars=cars,
+        partner_mode=(
+            bool(message.from_user)
+            and is_heavy_lux_partner_user(message.from_user.id)
+        ),
+    )
     await state.set_state(ReturnForm.booking)
     await message.answer(
         "🏁 Приём авто.\n\nВыберите автомобиль из автопарка:",
@@ -5030,6 +5409,8 @@ async def _prepare_return(
     booking: dict | None,
 ) -> None:
     direct_return = booking is None
+    current_state_data = await state.get_data()
+    partner_mode = bool(current_state_data.get("partner_mode"))
     if direct_return:
         current_mileage = _value(
             car,
@@ -5168,11 +5549,26 @@ async def _prepare_return(
         direct_return_id=booking.get("ID Брони") if direct_return else None,
     )
     await state.set_state(ReturnForm.end_mileage)
-    if direct_return:
+    if direct_return and partner_mode:
+        prompt = (
+            f"Источник: {HEAVY_LUX_PARTNER_SOURCE}\n"
+            f"Автомобиль: {_car_name(car)} ({_car_plate(car)}).\n"
+            f"Начальный пробег: {start_mileage} км.\n\n"
+            "Введите конечный пробег в км:"
+        )
+    elif direct_return:
         prompt = (
             f"Автомобиль: {_car_name(car)} ({_car_plate(car)}).\n"
             f"Начальный пробег: {start_mileage} км.\n"
             f"Базовый залог: {deposit} RUB.\n\n"
+            "Введите конечный пробег в км:"
+        )
+    elif partner_mode:
+        prompt = (
+            f"Источник: {HEAVY_LUX_PARTNER_SOURCE}\n"
+            f"Возврат брони №{_booking_id(booking)}.\n"
+            f"Автомобиль: {_car_name(car)} ({_car_plate(car)}).\n"
+            f"Начальный пробег: {start_mileage} км.\n\n"
             "Введите конечный пробег в км:"
         )
     else:
@@ -5229,6 +5625,17 @@ async def return_end_mileage(message: Message, state: FSMContext) -> None:
         await message.answer("Конечный пробег не может быть меньше начального.")
         return
     await state.update_data(end_mileage=end_mileage)
+    data = await state.get_data()
+    if data.get("partner_mode"):
+        await state.set_state(ReturnForm.cleanliness)
+        cleanliness_message = await message.answer(
+            "Укажите состояние автомобиля при приёме:",
+            reply_markup=cleanliness_keyboard(),
+        )
+        await state.update_data(
+            cleanliness_message_id=cleanliness_message.message_id
+        )
+        return
     if data.get("direct_return"):
         await state.set_state(ReturnForm.rental_paid)
         await message.answer(
@@ -5275,6 +5682,25 @@ async def cleanliness_callback(callback: CallbackQuery, state: FSMContext) -> No
     await state.update_data(cleanliness=cleanliness)
     await callback.answer(f"Выбрано: {cleanliness}")
     await callback.message.edit_reply_markup(reply_markup=None)
+    data = await state.get_data()
+    if data.get("partner_mode"):
+        await state.update_data(
+            wash_fee=0,
+            extra_fee=0,
+            time_mileage_penalty=0,
+            rental_paid=0,
+            rental_pay_type="Без оплаты",
+            total_paid=0,
+            pay_type="Без оплаты",
+            rental_total_confirmed=True,
+            rental_total_override=None,
+        )
+        await state.set_state(ReturnForm.fuel_level)
+        await callback.message.answer(
+            "Укажите уровень топлива при приёме "
+            "(например: 75% или полный бак):"
+        )
+        return
     if cleanliness == "Чистая":
         await state.update_data(wash_fee=0)
         await state.set_state(ReturnForm.extra_fee)
@@ -5304,6 +5730,18 @@ async def return_wash_fee(message: Message, state: FSMContext) -> None:
     await state.set_state(ReturnForm.extra_fee)
     await message.answer(
         "Введите сумму дополнительных штрафов/удержаний в RUB (0, если нет):"
+    )
+
+
+async def return_fuel_level(message: Message, state: FSMContext) -> None:
+    fuel_level = (message.text or "").strip()
+    if len(fuel_level) < 1:
+        await message.answer("Укажите уровень топлива текстом.")
+        return
+    await state.update_data(fuel_level=fuel_level)
+    await state.set_state(ReturnForm.notes)
+    await message.answer(
+        "Введите комментарий о состоянии автомобиля или отправьте «нет»:"
     )
 
 
@@ -5750,6 +6188,16 @@ async def return_notes(message: Message, state: FSMContext) -> None:
     await state.update_data(notes=notes)
     data = await state.get_data()
     await state.set_state(ReturnForm.confirmation)
+    if data.get("partner_mode"):
+        await state.update_data(
+            manager_name=_manager_display_name(message.from_user),
+        )
+        data = await state.get_data()
+        await message.answer(
+            _partner_return_card_text(data),
+            reply_markup=return_confirmation_keyboard(),
+        )
+        return
     delta = int(data["end_mileage"]) - int(data["start_mileage"])
     calculation = _return_calculation(data)
     deposit_balance = int(calculation["deposit_balance"])
@@ -5895,14 +6343,9 @@ async def cancel_return_callback(
     await callback.answer()
     await state.clear()
     if callback.message is not None:
-        reply_markup = (
-            partner_menu_keyboard()
-            if is_partner_user(callback.from_user.id)
-            else get_main_keyboard(callback.from_user.id)
-        )
         await callback.message.answer(
             "Операция отменена.",
-            reply_markup=reply_markup,
+            reply_markup=get_main_keyboard(callback.from_user.id),
         )
 
 
@@ -6234,7 +6677,9 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(cancel_flow, F.text.casefold() == "отмена")
 
     dispatcher.message.register(partner_bookings, F.text == "🔎 Брони Dodge")
+    dispatcher.message.register(partner_bookings, F.text == "🔎 Брони heavy_lux_cr")
     dispatcher.message.register(partner_status, F.text == "🚗 Статус Dodge")
+    dispatcher.message.register(partner_status, F.text == "🚗 Статус heavy_lux_cr")
     dispatcher.message.register(partner_expenses, F.text == "📑 Расходы Dodge")
 
     dispatcher.message.register(start_availability, F.text == "Доступные авто")
@@ -6300,6 +6745,7 @@ def create_dispatcher() -> Dispatcher:
 
     dispatcher.message.register(return_booking, ReturnForm.booking)
     dispatcher.message.register(return_end_mileage, ReturnForm.end_mileage)
+    dispatcher.message.register(return_fuel_level, ReturnForm.fuel_level)
     dispatcher.message.register(return_wash_fee, ReturnForm.wash_fee)
     dispatcher.message.register(return_extra_fee, ReturnForm.extra_fee)
     dispatcher.message.register(

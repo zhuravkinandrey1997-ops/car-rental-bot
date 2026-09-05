@@ -1916,7 +1916,7 @@ def _contains_car_keyword(
 
 
 def get_partner_cars(keyword: str) -> list[dict]:
-    """Return cars matching the partner's make/model keyword."""
+    """Return cars matching a partner make/model keyword or source."""
     return [
         dict(car)
         for car in ws_cars.get_all_records()
@@ -1930,13 +1930,17 @@ def get_partner_cars(keyword: str) -> list[dict]:
                 "Название",
                 "Авто",
                 "Модель",
+                "Источник",
+                "Партнёр",
+                "Партнер",
+                "Канал",
             ),
         )
     ]
 
 
 def get_partner_bookings(keyword: str) -> list[dict]:
-    """Return bookings whose car name contains the partner keyword."""
+    """Return bookings whose car name or source contains the partner keyword."""
     return [
         dict(booking)
         for booking in _get_sheet_records_safely(
@@ -1952,6 +1956,10 @@ def get_partner_bookings(keyword: str) -> list[dict]:
                 "Название авто",
                 "Марка и Модель",
                 "Модель",
+                "Источник",
+                "Партнёр",
+                "Партнер",
+                "Канал",
             ),
         )
     ]
