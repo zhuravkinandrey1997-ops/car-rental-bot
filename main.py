@@ -34,6 +34,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 
 from sheets_client import (
@@ -596,6 +597,7 @@ except ZoneInfoNotFoundError as exc:
         f"Unknown RENTAL_TIMEZONE: {NOTIFICATION_TIMEZONE_NAME}"
     ) from exc
 NOTIFICATION_SEND_LOCK = asyncio.Lock()
+EXPIRING_RENTAL_ALERTED_BOOKING_IDS: set[str] = set()
 
 
 def payment_methods_keyboard(flow: str = "return") -> InlineKeyboardMarkup:
@@ -1987,8 +1989,157 @@ async def send_missed_tomorrow_notifications(bot: Bot) -> None:
         await send_tomorrow_notifications(bot, now)
 
 
+def build_expiring_rental_notification(booking: dict) -> str:
+    """Build a non-financial one-hour rental expiry alert."""
+    booking_id = _booking_id(booking)
+    car_name = _value(
+        booking,
+        "__car_name__",
+        "Автомобиль",
+        "Авто",
+        "Название авто",
+        default="Авто",
+    )
+    car_plate = _value(
+        booking,
+        "__car_plate__",
+        "Госномер",
+        "Номер авто",
+        "Номер",
+        default="—",
+    )
+    client_name = _value(
+        booking,
+        "ФИО Клиента",
+        "Клиент",
+        "Клиент ФИО",
+        "Имя клиента",
+        default="не указан",
+    )
+    client_phone = _value(
+        booking,
+        "Телефон",
+        "Телефон клиента",
+        default="не указан",
+    )
+    planned_end_raw = _value(
+        booking,
+        "Плановое окончание",
+        "Плановая дата и время окончания",
+        default="не указано",
+    )
+    planned_end = _parse_datetime_text(planned_end_raw)
+    end_time = (
+        _format_datetime_ru(_timestamp(planned_end))
+        if planned_end
+        else planned_end_raw
+    )
+    return (
+        "⚠️ Внимание! До конца аренды остался 1 час!\n"
+        f"📋 Бронь: №{booking_id}\n"
+        f"🚘 Авто: {car_name} ({car_plate})\n"
+        f"👤 Клиент: {client_name} ({client_phone})\n"
+        f"⏰ Окончание: {end_time}\n"
+        "📍 Подготовьтесь к приёму автомобиля."
+    )
+
+
+def _expiring_rental_recipient_ids(booking: dict) -> list[int]:
+    recipients = list(dict.fromkeys(NOTIFY_MANAGERS))
+    source = _value(booking, "Источник", default="").casefold()
+    if source == HEAVY_LUX_PARTNER_SOURCE.casefold():
+        if PARTNER_ID not in recipients:
+            recipients.append(PARTNER_ID)
+    return recipients
+
+
+async def check_expiring_rentals(
+    bot: Bot,
+    now: datetime.datetime | None = None,
+) -> None:
+    """Notify internal recipients about rentals ending in roughly one hour."""
+    current = now or datetime.datetime.now(NOTIFICATION_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=NOTIFICATION_TZ)
+    else:
+        current = current.astimezone(NOTIFICATION_TZ)
+
+    async with NOTIFICATION_SEND_LOCK:
+        try:
+            rentals = await asyncio.to_thread(get_active_rentals)
+        except Exception:
+            logger.exception("Could not collect rentals expiring in one hour")
+            return
+
+        active_booking_ids = {
+            _booking_id(booking)
+            for booking in rentals
+            if _booking_id(booking) not in {"", "—"}
+        }
+        EXPIRING_RENTAL_ALERTED_BOOKING_IDS.intersection_update(
+            active_booking_ids
+        )
+
+        for booking in rentals:
+            if str(booking.get("Статус", "")).strip() != "В аренде":
+                continue
+            booking_id = _booking_id(booking)
+            if (
+                booking_id in {"", "—"}
+                or booking_id in EXPIRING_RENTAL_ALERTED_BOOKING_IDS
+            ):
+                continue
+            planned_end = _booking_planned_end_datetime(booking)
+            if planned_end is None:
+                logger.warning(
+                    "Skipping expiring-rental alert for booking %s: "
+                    "planned end is missing or invalid",
+                    booking_id,
+                )
+                continue
+            minutes_left = (
+                planned_end.astimezone(NOTIFICATION_TZ) - current
+            ).total_seconds() / 60
+            if not 50 <= minutes_left <= 70:
+                continue
+
+            notification = build_expiring_rental_notification(booking)
+            delivery_succeeded = True
+            for recipient_id in _expiring_rental_recipient_ids(booking):
+                try:
+                    await _send_notification_chunks(
+                        bot,
+                        recipient_id,
+                        [notification],
+                    )
+                except Exception:
+                    delivery_succeeded = False
+                    logger.exception(
+                        "Could not send one-hour expiry alert for booking %s "
+                        "to chat %s",
+                        booking_id,
+                        recipient_id,
+                    )
+            if delivery_succeeded:
+                EXPIRING_RENTAL_ALERTED_BOOKING_IDS.add(booking_id)
+                logger.info(
+                    "Sent one-hour expiry alert for booking %s",
+                    booking_id,
+                )
+
+
 def create_notification_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=NOTIFICATION_TZ)
+    scheduler.add_job(
+        check_expiring_rentals,
+        IntervalTrigger(minutes=5, timezone=NOTIFICATION_TZ),
+        args=[bot],
+        id="expiring_rental_alerts",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
     scheduler.add_job(
         send_tomorrow_notifications,
         CronTrigger(
@@ -6872,6 +7023,10 @@ async def run_bot() -> None:
         )
         logger.info(
             "Daily tomorrow plan scheduled for 20:00 (%s)",
+            NOTIFICATION_TIMEZONE_NAME,
+        )
+        logger.info(
+            "Expiring-rental alerts scheduled every 5 minutes (%s)",
             NOTIFICATION_TIMEZONE_NAME,
         )
         logger.info("Car rental bot started")
