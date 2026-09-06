@@ -587,6 +587,7 @@ PAYMENT_METHODS = {
 
 
 DEFAULT_WASH_FEE = 1000
+RENTAL_GRACE_PERIOD_MINUTES = 120
 MINSK_TZ = ZoneInfo("Europe/Minsk")
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 NOTIFICATION_TIMEZONE_NAME = os.getenv("RENTAL_TIMEZONE", "Europe/Moscow")
@@ -1126,6 +1127,25 @@ def _booking_planned_end_datetime(
         default="",
     )
     return _parse_datetime_text(raw) or default
+
+
+def _booked_rental_days(
+    start_datetime: datetime.datetime | None,
+    planned_end: datetime.datetime,
+    start_date: datetime.date,
+) -> int:
+    """Calculate paid days from the booked period, not the actual late return."""
+    start_at = start_datetime or datetime.datetime.combine(
+        start_date,
+        datetime.time.min,
+        MINSK_TZ,
+    )
+    booked_seconds = max(0, int((planned_end - start_at).total_seconds()))
+    billable_seconds = max(
+        0,
+        booked_seconds - RENTAL_GRACE_PERIOD_MINUTES * 60,
+    )
+    return max(1, math.ceil(billable_seconds / (24 * 60 * 60)))
 
 
 def _booking_period_text(booking: dict) -> str:
@@ -2192,6 +2212,15 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
     )
     late_seconds = max(0, int((returned_at - planned_end).total_seconds()))
     late_hours = math.ceil(late_seconds / 3600) if late_seconds else 0
+    chargeable_late_seconds = max(
+        0,
+        late_seconds - RENTAL_GRACE_PERIOD_MINUTES * 60,
+    )
+    chargeable_late_hours = (
+        math.ceil(chargeable_late_seconds / 3600)
+        if chargeable_late_seconds
+        else 0
+    )
 
     daily_rate, _ = _parse_int(
         _car_daily_rate(car),
@@ -2199,7 +2228,11 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
         minimum=0,
     )
     daily_rate = daily_rate or 0
-    rental_days = max(1, (end_date - start_date).days + 1)
+    rental_days = _booked_rental_days(
+        start_datetime,
+        planned_end,
+        start_date,
+    )
     calculated_rental_total = (
         0 if data.get("direct_return") else daily_rate * rental_days
     )
@@ -2253,6 +2286,8 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
         late_fee = 0
         over_mileage_fee = 0
         late_hours = 0
+        chargeable_late_hours = 0
+        chargeable_late_seconds = 0
         over_mileage = 0
 
     return {
@@ -2271,6 +2306,8 @@ def _return_calculation(data: dict) -> dict[str, int | str]:
         "over_mileage": over_mileage,
         "over_mileage_fee": over_mileage_fee,
         "late_hours": late_hours,
+        "chargeable_late_hours": chargeable_late_hours,
+        "chargeable_late_seconds": chargeable_late_seconds,
         "late_seconds": late_seconds,
         "late_fee": late_fee,
         "time_mileage_penalty": time_mileage_penalty,
@@ -5964,7 +6001,7 @@ async def return_extra_fee(message: Message, state: FSMContext) -> None:
     if (
         not data.get("direct_return")
         and (
-            int(calculation["late_hours"]) > 0
+            int(calculation["chargeable_late_hours"]) > 0
             or int(calculation["over_mileage"]) > 0
         )
     ):
@@ -5973,6 +6010,7 @@ async def return_extra_fee(message: Message, state: FSMContext) -> None:
             "⚠️ Обнаружено опоздание на "
             f"{int(calculation['late_hours'])} ч. и перепробег "
             f"{int(calculation['over_mileage'])} км.\n\n"
+            "Первые 2 часа опоздания не тарифицируются автоматически.\n"
             "Удерживать штраф за опоздание / перепробег?",
             reply_markup=time_mileage_penalty_keyboard(),
         )
@@ -6466,16 +6504,30 @@ async def return_notes(message: Message, state: FSMContext) -> None:
         )
     )
     late_warning = ""
-    if int(calculation.get("late_seconds", 0)) > 3600:
+    if int(calculation.get("chargeable_late_hours", 0)) > 0:
         late_warning = (
             f"\n⚠️ Опоздание на {int(calculation['late_hours'])} ч. "
-            "Штраф удерживается только по решению менеджера.\n"
+            f"(первые {RENTAL_GRACE_PERIOD_MINUTES // 60} ч. — бесплатно). "
+            "Удержание применяется только по решению менеджера.\n"
         )
     rental_total_label = (
         "Полная стоимость аренды (со скидкой)"
         if calculation.get("rental_total_override") is not None
         else "Полная стоимость аренды"
     )
+    if calculation.get("rental_total_override") is not None:
+        rental_total_line = (
+            f"• {rental_total_label}: {_format_number(rental_total)} RUB\n"
+            f"• Расчёт по тарифу: {_format_number(calculation['daily_rate'])} × "
+            f"{_format_number(calculation['rental_days'])} сут. = "
+            f"{_format_number(calculation['calculated_rental_total'])} RUB"
+        )
+    else:
+        rental_total_line = (
+            f"• {rental_total_label}: {_format_number(rental_total)} RUB "
+            f"({_format_number(calculation['daily_rate'])} × "
+            f"{_format_number(calculation['rental_days'])} сут.)"
+        )
     act_text = (
         "🏁 АКТ ПРИЁМА АВТОМОБИЛЯ\n"
         f"• Бронь №: {_booking_id(data['booking'])}\n"
@@ -6486,9 +6538,7 @@ async def return_notes(message: Message, state: FSMContext) -> None:
         f"{_format_datetime_ru(data.get('returned_at', _timestamp()))}\n\n"
         f"{late_warning}"
         "\n💰 РАСЧЕТ АРЕНДЫ:\n"
-        f"• {rental_total_label}: {_format_number(rental_total)} RUB "
-        f"({_format_number(calculation['daily_rate'])} × "
-        f"{_format_number(calculation['rental_days'])} сут.)\n"
+        f"{rental_total_line}\n"
         f"• Оплачено при выдаче: "
         f"{_format_number(calculation['rental_paid_at_issuance'])} RUB\n"
         f"• Учтен задаток (предоплата): -{_format_number(prepayment)} RUB\n"
@@ -6505,7 +6555,7 @@ async def return_notes(message: Message, state: FSMContext) -> None:
         f"Лимит: {_format_number(calculation['mileage_limit'])} км)\n"
         f"• Обнаружено опоздание: {int(calculation['late_hours'])} ч. и "
         f"перепробег: {_format_number(calculation['over_mileage'])} км\n"
-        f"• Удержание за опоздание / перепробег: "
+        f"• Удержание за опоздание (отдельно от аренды): "
         f"{_format_number(calculation['time_mileage_penalty'])} RUB\n"
         f"• Чистота: {calculation['cleanliness']} -> "
         f"Мойка: {_format_number(calculation['wash_fee'])} RUB\n"
