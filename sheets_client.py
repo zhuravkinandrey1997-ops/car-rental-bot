@@ -1813,6 +1813,15 @@ def get_active_rentals():
     return _attach_car_references(active_bookings)
 
 
+def get_partner_active_rentals(keyword: str) -> list[dict]:
+    """Return only active rentals belonging to the requested partner source."""
+    return [
+        booking
+        for booking in get_partner_bookings(keyword)
+        if booking.get("Статус") in {"В аренде", "Подтверждена"}
+    ]
+
+
 def get_returnable_rentals():
     all_bookings = _get_sheet_records_safely(
         ws_bookings,

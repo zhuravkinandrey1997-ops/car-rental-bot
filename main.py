@@ -43,6 +43,7 @@ from sheets_client import (
     delete_expense,
     cancel_booking,
     get_active_rentals,
+    get_partner_active_rentals,
     get_active_bookings_for_car,
     get_active_cars,
     get_all_cars,
@@ -1580,6 +1581,19 @@ def _partner_auto_booking_price(data: dict) -> int | None:
     if daily_rate <= 0 or days <= 0:
         return None
     return daily_rate * days
+
+
+async def _stop_partner_flow_without_tariff(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    """Stop safely instead of asking a partner to enter a financial amount."""
+    await state.clear()
+    await message.answer(
+        "Не удалось определить тариф автомобиля. "
+        "Обратитесь к менеджеру для настройки тарифа.",
+        reply_markup=get_main_keyboard(message.from_user.id),
+    )
 
 
 def _booking_car(booking: dict) -> dict:
@@ -5535,11 +5549,7 @@ async def booking_phone(message: Message, state: FSMContext) -> None:
                 await state.update_data(price=auto_price)
                 await _send_reservation_confirmation(message, state)
                 return
-            await state.set_state(BookingForm.price)
-            await message.answer(
-                "Не удалось определить суточный тариф автомобиля. "
-                "Введите сумму брони только для внутренней таблицы в RUB:"
-            )
+            await _stop_partner_flow_without_tariff(message, state)
             return
         await state.set_state(BookingForm.delivery)
         await message.answer(
@@ -5635,7 +5645,10 @@ async def direct_end_date(message: Message, state: FSMContext) -> None:
     )
     data = await state.get_data()
     if data.get("partner_mode"):
-        auto_price = _partner_auto_booking_price(data) or 0
+        auto_price = _partner_auto_booking_price(data)
+        if auto_price is None:
+            await _stop_partner_flow_without_tariff(message, state)
+            return
         await state.update_data(
             price=auto_price,
             pay_type="Без оплаты",
@@ -5650,6 +5663,30 @@ async def direct_end_date(message: Message, state: FSMContext) -> None:
 
 
 async def booking_price(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    if data.get("partner_mode"):
+        auto_price = _partner_auto_booking_price(data)
+        if auto_price is None:
+            await _stop_partner_flow_without_tariff(message, state)
+            return
+        await state.update_data(
+            price=auto_price,
+            delivery_address="Самовывоз",
+            delivery_price=0,
+            prepayment=0,
+            prepayment_pay_type="Без оплаты",
+            pay_type="Без оплаты",
+            deposit=0,
+            deposit_pay_type="Без оплаты",
+        )
+        if data.get("booking_mode") == "reservation":
+            await _send_reservation_confirmation(message, state)
+        elif data.get("booking_mode") == "direct_issuance":
+            await state.set_state(BookingForm.start_mileage)
+            await message.answer("Введите пробег автомобиля на момент выдачи в км:")
+        else:
+            await _stop_partner_flow_without_tariff(message, state)
+        return
     price, error = _parse_int(
         message.text or "",
         "принятая сумма аренды",
@@ -5660,25 +5697,6 @@ async def booking_price(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(price=price)
     data = await state.get_data()
-    if data.get("partner_mode"):
-        if data.get("booking_mode") == "reservation":
-            await state.update_data(
-                delivery_address="Самовывоз",
-                delivery_price=0,
-                prepayment=0,
-                prepayment_pay_type="Без оплаты",
-            )
-            await _send_reservation_confirmation(message, state)
-            return
-        if data.get("booking_mode") == "direct_issuance":
-            await state.update_data(
-                pay_type="Без оплаты",
-                deposit=0,
-                deposit_pay_type="Без оплаты",
-            )
-            await state.set_state(BookingForm.start_mileage)
-            await message.answer("Введите пробег автомобиля на момент выдачи в км:")
-            return
     if data.get("booking_mode") == "reservation":
         await state.set_state(BookingForm.prepayment)
         await message.answer(
@@ -5699,6 +5717,13 @@ async def booking_price(message: Message, state: FSMContext) -> None:
 
 
 async def booking_prepayment(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("partner_mode"):
+        await state.update_data(
+            prepayment=0,
+            prepayment_pay_type="Без оплаты",
+        )
+        await _send_reservation_confirmation(message, state)
+        return
     prepayment, error = _parse_int(
         message.text or "",
         "задаток/предоплата за бронь",
@@ -5757,6 +5782,9 @@ async def booking_start_mileage(message: Message, state: FSMContext) -> None:
 
 
 async def booking_deposit(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("partner_mode"):
+        await _stop_partner_flow_without_tariff(message, state)
+        return
     deposit, error = _parse_int(
         message.text or "",
         "залог",
@@ -6015,7 +6043,11 @@ async def list_active_rentals(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     try:
-        rentals = get_active_rentals()
+        rentals = (
+            get_partner_active_rentals(HEAVY_LUX_PARTNER_SOURCE)
+            if is_heavy_lux_partner_user(message.from_user.id)
+            else get_active_rentals()
+        )
     except Exception:
         logger.exception("Could not load active rentals")
         await message.answer(
@@ -6619,6 +6651,13 @@ async def return_manual_penalty(
 
 
 async def return_rental_paid(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("partner_mode"):
+        await state.update_data(
+            rental_paid=0,
+            rental_pay_type="Без оплаты",
+        )
+        await _continue_return_after_rental_payment(message, state)
+        return
     rental_paid, error = _parse_int(
         message.text or "",
         "фактически полученная оплата за аренду",
@@ -6644,6 +6683,13 @@ async def return_rental_pay_type(
     message: Message,
     state: FSMContext,
 ) -> None:
+    if (await state.get_data()).get("partner_mode"):
+        await state.update_data(
+            rental_paid=0,
+            rental_pay_type="Без оплаты",
+        )
+        await _continue_return_after_rental_payment(message, state)
+        return
     payment_message = await message.answer(
         "Выберите способ получения оплаты за аренду кнопкой ниже:",
         reply_markup=payment_methods_keyboard("return_rental"),
@@ -6732,6 +6778,14 @@ async def direct_deposit_callback(
 
 
 async def return_total_paid(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("partner_mode"):
+        await state.update_data(
+            total_paid=0,
+            pay_type="Без оплаты",
+        )
+        await state.set_state(ReturnForm.notes)
+        await message.answer("Введите комментарий о состоянии автомобиля или отправьте «нет»:")
+        return
     total_paid, error = _parse_int(
         message.text or "",
         "фактически полученная доплата за повреждения/штрафы",
@@ -6762,6 +6816,11 @@ async def return_total_paid(message: Message, state: FSMContext) -> None:
 
 
 async def return_pay_type(message: Message, state: FSMContext) -> None:
+    if (await state.get_data()).get("partner_mode"):
+        await state.update_data(pay_type="Без оплаты")
+        await state.set_state(ReturnForm.notes)
+        await message.answer("Введите комментарий о состоянии автомобиля или отправьте «нет»:")
+        return
     payment_message = await message.answer(
         "Выберите способ получения доплаты за повреждения/штрафы кнопкой ниже:",
         reply_markup=payment_methods_keyboard(),
@@ -6791,6 +6850,18 @@ async def payment_method_callback(callback: CallbackQuery, state: FSMContext) ->
         return
     current_state = await state.get_state()
     data = await state.get_data()
+    if data.get("partner_mode"):
+        await callback.answer(
+            "Платёжные действия недоступны в партнёрском режиме.",
+            show_alert=True,
+        )
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await state.set_state(
+            BookingForm.confirmation
+            if data.get("booking_mode") in {"reservation", "issuance", "direct_issuance"}
+            else ReturnForm.notes
+        )
+        return
     valid_flow = (
         flow == "reservation"
         and current_state == BookingForm.pay_type.state
