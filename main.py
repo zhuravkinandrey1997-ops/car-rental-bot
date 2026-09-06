@@ -89,6 +89,8 @@ PARTNER_ID = 226694751
 PARTNER_CAR_KEYWORD = "Dodge"
 HEAVY_LUX_PARTNER_ROLE = "partner_heavy_lux"
 HEAVY_LUX_PARTNER_SOURCE = "heavy_lux_cr"
+LEON_RENTAL_SOURCE = "Леон Рентал"
+SOURCE_SELECTION_PROMPT = "От чьего имени оформляется операция?"
 
 MONTH_NAMES = (
     "Январь",
@@ -113,6 +115,7 @@ class AvailabilityForm(StatesGroup):
 
 
 class BookingForm(StatesGroup):
+    source = State()
     issuance_mode = State()
     issuance_booking = State()
     direct_car_confirmation = State()
@@ -150,6 +153,7 @@ class CancellationForm(StatesGroup):
 
 
 class ReturnForm(StatesGroup):
+    source = State()
     booking = State()
     end_mileage = State()
     direct_deposit = State()
@@ -525,6 +529,37 @@ def issuance_mode_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+
+def source_selection_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text=f"🏢 {LEON_RENTAL_SOURCE}"),
+                KeyboardButton(text=f"🤝 {HEAVY_LUX_PARTNER_SOURCE}"),
+            ],
+            [KeyboardButton(text="Отмена")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def _source_from_choice(value: str) -> str | None:
+    normalized = (value or "").strip()
+    choices = {
+        f"🏢 {LEON_RENTAL_SOURCE}": LEON_RENTAL_SOURCE,
+        f"🤝 {HEAVY_LUX_PARTNER_SOURCE}": HEAVY_LUX_PARTNER_SOURCE,
+        LEON_RENTAL_SOURCE: LEON_RENTAL_SOURCE,
+        HEAVY_LUX_PARTNER_SOURCE: HEAVY_LUX_PARTNER_SOURCE,
+    }
+    return choices.get(normalized)
+
+
+def _operation_source(data: dict) -> str:
+    if data.get("partner_mode"):
+        return HEAVY_LUX_PARTNER_SOURCE
+    return data.get("source") or LEON_RENTAL_SOURCE
 
 
 def direct_deposit_keyboard() -> InlineKeyboardMarkup:
@@ -3487,6 +3522,8 @@ def _format_financial_report(report: dict) -> str:
         f"📈 ФИНАНСОВЫЙ ОТЧЁТ ЗА {report['month']}",
         "",
         f"🟢 Общий приход: {_format_number(report['gross_income'])} RUB",
+        f"🤝 Комиссия heavy_lux_cr (30%): "
+        f"{_format_number(report.get('partner_fee', 0))} RUB",
         f"🔴 Расходы за месяц: "
         f"{_format_number(report['total_expenses'])} RUB",
         f"💎 Чистая прибыль организации: "
@@ -4819,12 +4856,55 @@ async def _start_booking_flow(
             and is_heavy_lux_partner_user(message.from_user.id)
         ),
     )
+    if bool(message.from_user) and is_heavy_lux_partner_user(message.from_user.id):
+        await state.update_data(source=HEAVY_LUX_PARTNER_SOURCE)
+        await _show_booking_start_prompt(message, state, title)
+        return
+    await state.set_state(BookingForm.source)
+    await message.answer(
+        SOURCE_SELECTION_PROMPT,
+        reply_markup=source_selection_keyboard(),
+    )
+
+
+async def _show_booking_start_prompt(
+    message: Message,
+    state: FSMContext,
+    title: str,
+) -> None:
     await state.set_state(BookingForm.start_date)
     calendar_message = await message.answer(
         f"{title}.\n\n" + _calendar_prompt("booking", "start"),
         reply_markup=calendar_keyboard("booking", "start"),
     )
     await state.update_data(calendar_message_id=calendar_message.message_id)
+
+
+async def booking_source_selection(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if (message.text or "").strip() == "Отмена":
+        await cancel_flow(message, state)
+        return
+    source = _source_from_choice(message.text or "")
+    if not source:
+        await message.answer(
+            SOURCE_SELECTION_PROMPT,
+            reply_markup=source_selection_keyboard(),
+        )
+        return
+    await state.update_data(source=source, partner_mode=False)
+    data = await state.get_data()
+    if data.get("source_flow") == "direct_issuance":
+        await _start_direct_issuance(message, state)
+        return
+    title = (
+        "Новая бронь"
+        if data.get("booking_mode") == "reservation"
+        else "Выдача авто"
+    )
+    await _show_booking_start_prompt(message, state, title)
 
 
 async def start_booking(message: Message, state: FSMContext) -> None:
@@ -4851,39 +4931,71 @@ async def start_issuance(message: Message, state: FSMContext) -> None:
 async def issuance_mode_selection(message: Message, state: FSMContext) -> None:
     choice = (message.text or "").strip()
     if choice == "⚡ Срочная выдача (без брони)":
-        try:
-            cars = get_available_cars_for_direct_issuance()
-        except Exception:
-            logger.exception("Could not load cars for direct issuance")
-            await state.clear()
-            await message.answer(
-                "Не удалось получить список автомобилей.",
-                reply_markup=get_main_keyboard(message.from_user.id),
-            )
+        data = await state.get_data()
+        if data.get("partner_mode"):
+            await state.update_data(source=HEAVY_LUX_PARTNER_SOURCE)
+            await _start_direct_issuance(message, state)
             return
-        if not cars:
-            await state.clear()
-            await message.answer(
-                "В листе Автомобили нет автомобилей.",
-                reply_markup=get_main_keyboard(message.from_user.id),
-            )
-            return
-        await state.update_data(
-            booking_mode="direct_issuance",
-            cars=cars,
-            direct_issuance_cars=cars,
-        )
-        await state.set_state(BookingForm.car)
+        await state.set_state(BookingForm.source)
+        await state.update_data(source_flow="direct_issuance")
         await message.answer(
-            "⚡ Срочная выдача без брони.\n\n"
-            "Выберите автомобиль:",
-            reply_markup=direct_issuance_car_keyboard(cars),
+            SOURCE_SELECTION_PROMPT,
+            reply_markup=source_selection_keyboard(),
         )
         return
     if choice == "📋 По существующей брони":
         await _start_existing_issuance(message, state)
         return
     await message.answer("Выберите один из вариантов кнопкой ниже.")
+
+
+async def _start_direct_issuance(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    try:
+        cars = get_available_cars_for_direct_issuance()
+    except Exception:
+        logger.exception("Could not load cars for direct issuance")
+        await state.clear()
+        await message.answer(
+            "Не удалось получить список автомобилей.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
+        return
+    if not cars:
+        await state.clear()
+        await message.answer(
+            "В листе Автомобили нет автомобилей.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
+        return
+    await state.update_data(
+        booking_mode="direct_issuance",
+        cars=cars,
+        direct_issuance_cars=cars,
+    )
+    await state.set_state(BookingForm.car)
+    await message.answer(
+        "⚡ Срочная выдача без брони.\n\n"
+        "Выберите автомобиль:",
+        reply_markup=direct_issuance_car_keyboard(cars),
+    )
+
+
+async def issuance_source_selection(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    source = _source_from_choice(message.text or "")
+    if not source:
+        await message.answer(
+            SOURCE_SELECTION_PROMPT,
+            reply_markup=source_selection_keyboard(),
+        )
+        return
+    await state.update_data(source=source, partner_mode=False)
+    await _start_direct_issuance(message, state)
 
 
 async def _start_existing_issuance(
@@ -6188,11 +6300,7 @@ async def booking_confirmation(
                     "Без оплаты",
                 ),
                 manager_name=manager_name,
-                source=(
-                    HEAVY_LUX_PARTNER_SOURCE
-                    if data.get("partner_mode")
-                    else ""
-                ),
+                source=_operation_source(data),
             )
         elif is_direct_issuance:
             booking_id = save_direct_issuance(
@@ -6214,6 +6322,7 @@ async def booking_confirmation(
                 manager_name=manager_name,
                 issued_at=data.get("issued_at", _timestamp()),
                 planned_end_at=data.get("planned_end_at", ""),
+                source=_operation_source(data),
             )
         else:
             booking_id = int(_booking_id(data["booking"]))
@@ -6354,18 +6463,51 @@ async def start_return(message: Message, state: FSMContext) -> None:
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    await state.update_data(
-        return_cars=cars,
-        partner_mode=(
-            bool(message.from_user)
-            and is_heavy_lux_partner_user(message.from_user.id)
-        ),
+    partner_mode = (
+        bool(message.from_user)
+        and is_heavy_lux_partner_user(message.from_user.id)
     )
+    await state.update_data(return_cars=cars, partner_mode=partner_mode)
+    if partner_mode:
+        await state.update_data(source=HEAVY_LUX_PARTNER_SOURCE)
+        await _start_return_operation(message, state)
+        return
+    await state.set_state(ReturnForm.source)
+    await message.answer(
+        SOURCE_SELECTION_PROMPT,
+        reply_markup=source_selection_keyboard(),
+    )
+
+
+async def _start_return_operation(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    data = await state.get_data()
+    cars = data.get("return_cars", [])
     await state.set_state(ReturnForm.booking)
     await message.answer(
         "🏁 Приём авто.\n\nВыберите автомобиль из автопарка:",
         reply_markup=car_choice_keyboard(cars),
     )
+
+
+async def return_source_selection(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if (message.text or "").strip() == "Отмена":
+        await cancel_flow(message, state)
+        return
+    source = _source_from_choice(message.text or "")
+    if not source:
+        await message.answer(
+            SOURCE_SELECTION_PROMPT,
+            reply_markup=source_selection_keyboard(),
+        )
+        return
+    await state.update_data(source=source, partner_mode=False)
+    await _start_return_operation(message, state)
 
 
 async def _prepare_return(
@@ -7503,6 +7645,7 @@ async def _save_return(
             allow_unlinked=direct_return,
             car_id=_car_id(car),
             idempotency_key=return_id if direct_return else "",
+            source=_operation_source(data),
         )
     except ValueError:
         logger.warning(
@@ -7778,6 +7921,8 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(cancellation_car, CancellationForm.car)
     dispatcher.message.register(cancellation_reason, CancellationForm.reason)
 
+    dispatcher.message.register(booking_source_selection, BookingForm.source)
+    dispatcher.message.register(return_source_selection, ReturnForm.source)
     dispatcher.message.register(return_booking, ReturnForm.booking)
     dispatcher.message.register(
         overdue_extension_input,

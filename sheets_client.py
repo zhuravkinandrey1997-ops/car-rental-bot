@@ -26,6 +26,8 @@ SHEET_TITLE_MAP = {
     "Car_Profit_Summary": "Прибыль_по_авто",
     "Managers": "Менеджеры",
 }
+HEAVY_LUX_SOURCE = "heavy_lux_cr"
+HEAVY_LUX_COMMISSION_RATE = 0.30
 BOOKING_HEADERS = [
     "ID Брони",
     "ID Авто",
@@ -90,6 +92,7 @@ EXPENSE_HEADERS = [
 MONTHLY_SUMMARY_HEADERS = [
     "Месяц (ГГГГ-ММ)",
     "Общий приход (RUB)",
+    "Партнёрская комиссия heavy_lux_cr (RUB)",
     "Прямые расходы (RUB)",
     "Общие расходы компании (RUB)",
     "ЗП Ксении (10%) (RUB)",
@@ -1226,7 +1229,78 @@ def _build_financial_report(
     def return_revenue(record: dict) -> float:
         return sum(amount for amount, _ in payment_parts(record))
 
+    def source_commission_rate(record: dict) -> float:
+        source = str(
+            cell(
+                record,
+                "Источник",
+                "Партнёр",
+                "Партнер",
+                "Канал",
+                default="",
+            )
+            or ""
+        ).strip().casefold()
+        return (
+            HEAVY_LUX_COMMISSION_RATE
+            if source == HEAVY_LUX_SOURCE
+            else 0.0
+        )
+
+    def net_income_for_payment(record: dict, amount: float) -> float:
+        return amount * (1 - source_commission_rate(record))
+
     def booking_payment_parts(record: dict) -> list[tuple[float, str]]:
+        actual_rental = cell(
+            record,
+            "Фактически оплачено за аренду (RUB)",
+            "Сумма аренды получена (RUB)",
+            default="",
+        )
+        actual_top_up = cell(
+            record,
+            "Полученная доплата (RUB)",
+            "Полученная доплата",
+            default="",
+        )
+        has_actual_payment_fields = any(
+            str(value if value is not None else "").strip()
+            for value in (actual_rental, actual_top_up)
+        )
+        if has_actual_payment_fields:
+            parts: list[tuple[float, str]] = []
+            rental_amount = safe_float(actual_rental)
+            top_up_amount = safe_float(actual_top_up)
+            if rental_amount:
+                parts.append(
+                    (
+                        rental_amount,
+                        normalize_payment_method(
+                            cell(
+                                record,
+                                "Способ оплаты аренды",
+                                "Способ оплаты",
+                                default="Без оплаты",
+                            )
+                        ),
+                    )
+                )
+            if top_up_amount:
+                parts.append(
+                    (
+                        top_up_amount,
+                        normalize_payment_method(
+                            cell(
+                                record,
+                                "Способ оплаты доплаты",
+                                "Способ оплаты",
+                                default="Без оплаты",
+                            )
+                        ),
+                    )
+                )
+            return parts
+
         accepted_value = first_matching_value(record, "Принятая сумма")
         if not str(accepted_value if accepted_value is not None else "").strip():
             accepted_value = cell(
@@ -1362,11 +1436,14 @@ def _build_financial_report(
         "СБП": 0.0,
     }
     gross_income = 0.0
+    partner_fee = 0.0
     for record in month_bookings:
         for amount, method in booking_payment_parts(record):
-            gross_income += amount
+            partner_fee += amount * source_commission_rate(record)
+            net_amount = net_income_for_payment(record, amount)
+            gross_income += net_amount
             payment_breakdown[method] = (
-                payment_breakdown.get(method, 0.0) + amount
+                payment_breakdown.get(method, 0.0) + net_amount
             )
     direct_expenses = int(round(sum(
         safe_float(cell(record, "Сумма (RUB)", default=""))
@@ -1388,7 +1465,8 @@ def _build_financial_report(
         car_key = booking_car_id(record)
         if car_key:
             car_income[car_key] = car_income.get(car_key, 0) + sum(
-                amount for amount, _ in booking_payment_parts(record)
+                net_income_for_payment(record, amount)
+                for amount, _ in booking_payment_parts(record)
             )
 
     car_expenses: dict[str, int] = {}
@@ -1436,6 +1514,7 @@ def _build_financial_report(
             {
                 "Месяц (ГГГГ-ММ)": month_key,
                 "Общий приход (RUB)": gross_income,
+                "Партнёрская комиссия heavy_lux_cr (RUB)": partner_fee,
                 "Прямые расходы (RUB)": direct_expenses,
                 "Общие расходы компании (RUB)": general_expenses,
                 "ЗП Ксении (10%) (RUB)": ksenia_salary,
@@ -1465,6 +1544,8 @@ def _build_financial_report(
     return {
         "month": month_key,
         "gross_income": int(round(gross_income)),
+        "client_payments": int(round(gross_income + partner_fee)),
+        "partner_fee": int(round(partner_fee)),
         "direct_expenses": direct_expenses,
         "general_expenses": general_expenses,
         "ksenia_salary": ksenia_salary,
@@ -1498,7 +1579,7 @@ def add_new_booking(
     manager_name: str = "",
     delivery_address: str = "Самовывоз",
     delivery_price: int = 0,
-    source: str = "",
+    source: str = "Леон Рентал",
 ):
     try:
         bookings_sheet = _get_bookings_sheet()
@@ -1508,10 +1589,10 @@ def add_new_booking(
         )
         rented_ids, rented_plates = _open_rental_car_identifiers(records)
         normalized_car_id = _normalized_car_identifier(car_id)
-        normalized_plate = str(plate or "").strip().casefold()
+        normalized_plate = ""
         if (
             normalized_car_id in rented_ids
-            or normalized_plate in rented_plates
+            or (normalized_plate and normalized_plate in rented_plates)
         ):
             raise ValueError(
                 f"Car {car_id} is already rented and has no completed return act"
@@ -1755,6 +1836,7 @@ def save_direct_issuance(
     manager_name: str,
     issued_at: str,
     planned_end_at: str = "",
+    source: str = "Леон Рентал",
 ) -> int:
     """Create an immediately active booking and mark its car as rented."""
     with BOOKINGS_LOCK:
@@ -1800,6 +1882,7 @@ def save_direct_issuance(
             ("Плановое окончание", "Плановая дата и время окончания"),
             ("Время выдачи",),
             ("Время возврата",),
+            ("Источник",),
         ]
         headers = _ensure_header_aliases(bookings_sheet, required_headers)
         issued_parts = str(issued_at or "").replace("T", " ").split()
@@ -1856,6 +1939,7 @@ def save_direct_issuance(
             "Способ оплаты задатка": "Без оплаты",
             "Плановое окончание": planned_end_at,
             "Плановая дата и время окончания": planned_end_at,
+            "Источник": source,
         }
         bookings_sheet.append_row(
             [values.get(header, "") for header in headers],
@@ -2352,6 +2436,7 @@ def save_actual_return(
     allow_unlinked: bool = False,
     car_id: str = "",
     idempotency_key: str = "",
+    source: str = "Леон Рентал",
 ):
     returned_at = returned_at or datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     total_penalties = (
@@ -2527,6 +2612,7 @@ def save_actual_return(
         )
     booking_updates = {
         "Дата и время приёма": returned_at,
+        "Источник": source,
         "Пробег при возврате (км)": end_mileage,
         "Пробег за аренду (км)": delta_mileage,
         "Сумма брони (RUB)": rental_total,
