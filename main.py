@@ -606,6 +606,7 @@ except ZoneInfoNotFoundError as exc:
 NOTIFICATION_SEND_LOCK = asyncio.Lock()
 EXPIRING_RENTAL_ALERTED_BOOKING_IDS: set[str] = set()
 OVERDUE_1H_ALERTED_BOOKING_IDS: set[str] = set()
+UPCOMING_BOOKING_NOTIFIED_IDS: set[str] = set()
 
 
 def payment_methods_keyboard(flow: str = "return") -> InlineKeyboardMarkup:
@@ -707,6 +708,19 @@ def overdue_rental_keyboard(booking_id: object) -> InlineKeyboardMarkup:
                     text="⏳ Продлить аренду",
                     callback_data=f"extend_rent:{booking_key}",
                 ),
+            ]
+        ]
+    )
+
+
+def upcoming_handover_keyboard(booking_id: object) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚗 Перейти к выдаче",
+                    callback_data=f"handover_car:{str(booking_id).strip()}",
+                )
             ]
         ]
     )
@@ -1152,6 +1166,54 @@ def _booking_planned_end_datetime(
         default="",
     )
     return _parse_datetime_text(raw) or default
+
+
+def _booking_planned_start_datetime(
+    booking: dict,
+    default: datetime.datetime | None = None,
+) -> datetime.datetime | None:
+    full_value = _value(
+        booking,
+        "Плановое начало",
+        "Плановая дата и время начала",
+        "Дата и время подачи",
+        "Время подачи",
+        default="",
+    )
+    if full_value:
+        parsed = _parse_datetime_text(full_value)
+        if parsed and not (
+            parsed.hour == 0
+            and parsed.minute == 0
+            and len(str(full_value).strip().split()) == 1
+        ):
+            return parsed
+
+    start_date = _value(
+        booking,
+        "Дата начала (ГГГГ-ММ-ДД)",
+        "Дата начала",
+        default="",
+    )
+    start_time = _value(
+        booking,
+        "Плановое время подачи",
+        "Время подачи",
+        "Время начала",
+        "Время выдачи",
+        default="",
+    )
+    if start_date and start_time:
+        parsed = _parse_datetime_text(f"{start_date} {start_time}")
+        if parsed:
+            return parsed
+    if start_date and (
+        "Плановое начало" in booking
+        or "Плановая дата и время начала" in booking
+        or "Дата и время подачи" in booking
+    ):
+        return _parse_datetime_text(start_date) or default
+    return default
 
 
 def _booked_rental_days(
@@ -2182,6 +2244,197 @@ async def check_expiring_rentals(
                 EXPIRING_RENTAL_ALERTED_BOOKING_IDS.add(booking_id)
                 logger.info(
                     "Sent one-hour expiry alert for booking %s",
+                    booking_id,
+                )
+
+
+def build_upcoming_booking_notification(booking: dict) -> str:
+    booking_id = _booking_id(booking)
+    car_name = _value(
+        booking,
+        "__car_name__",
+        "Автомобиль",
+        "Авто",
+        "Название авто",
+        default="Авто",
+    )
+    car_plate = _value(
+        booking,
+        "__car_plate__",
+        "Госномер",
+        "Номер авто",
+        "Номер",
+        default="—",
+    )
+    client_name = _value(
+        booking,
+        "ФИО Клиента",
+        "Клиент",
+        "Клиент ФИО",
+        "Имя клиента",
+        default="не указан",
+    )
+    client_phone = _value(
+        booking,
+        "Телефон",
+        "Телефон клиента",
+        default="не указан",
+    )
+    start_at = _booking_planned_start_datetime(booking)
+    start_text = (
+        _format_datetime_ru(_timestamp(start_at))
+        if start_at
+        else _value(
+            booking,
+            "Плановое начало",
+            "Дата и время подачи",
+            "Дата начала (ГГГГ-ММ-ДД)",
+            "Дата начала",
+            default="не указано",
+        )
+    )
+    return (
+        "⏳ Напоминание! До начала брони остался 1 час!\n"
+        f"📋 Бронь: №{booking_id}\n"
+        f"🚘 Авто: {car_name} ({car_plate})\n"
+        f"👤 Клиент: {client_name} ({client_phone})\n"
+        f"🕒 Время подачи / начала: {start_text}\n\n"
+        "Подготовьте автомобиль к выдаче (мойка, заправка, документы)."
+    )
+
+
+async def _upcoming_booking_recipient_ids(booking: dict) -> list[int]:
+    manager_id = _booking_manager_id(booking)
+    source = _value(booking, "Источник", default="").casefold()
+    if manager_id is None and source == HEAVY_LUX_PARTNER_SOURCE.casefold():
+        return [PARTNER_ID]
+    if manager_id is None:
+        return []
+
+    try:
+        access = await asyncio.to_thread(
+            _manager_access_for_user,
+            manager_id,
+        )
+    except Exception:
+        logger.exception(
+            "Could not resolve booking creator %s for upcoming booking %s",
+            manager_id,
+            _booking_id(booking),
+        )
+        access = None
+    role = _normalized_role(access)
+    if (
+        source == HEAVY_LUX_PARTNER_SOURCE.casefold()
+        or role == HEAVY_LUX_PARTNER_ROLE
+    ):
+        return [PARTNER_ID if role == HEAVY_LUX_PARTNER_ROLE else manager_id]
+    return [manager_id]
+
+
+async def _send_upcoming_booking_alert(
+    bot: Bot,
+    recipient_id: int,
+    booking_id: str,
+    text: str,
+) -> None:
+    keyboard = upcoming_handover_keyboard(booking_id)
+    last_error = None
+    for attempt in range(3):
+        try:
+            await bot.send_message(
+                chat_id=recipient_id,
+                text=text,
+                reply_markup=keyboard,
+            )
+            return
+        except Exception as error:
+            last_error = error
+            if attempt < 2:
+                await asyncio.sleep(5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
+async def check_upcoming_bookings(
+    bot: Bot,
+    now: datetime.datetime | None = None,
+) -> None:
+    """Notify once about confirmed bookings starting in roughly one hour."""
+    current = now or datetime.datetime.now(NOTIFICATION_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=NOTIFICATION_TZ)
+    else:
+        current = current.astimezone(NOTIFICATION_TZ)
+
+    async with NOTIFICATION_SEND_LOCK:
+        try:
+            bookings = await asyncio.to_thread(get_active_rentals)
+        except Exception:
+            logger.exception("Could not collect upcoming bookings")
+            return
+
+        confirmed_ids = {
+            _booking_id(booking)
+            for booking in bookings
+            if str(booking.get("Статус", "")).strip() == "Подтверждена"
+            and _booking_id(booking) not in {"", "—"}
+        }
+        UPCOMING_BOOKING_NOTIFIED_IDS.intersection_update(confirmed_ids)
+
+        for booking in bookings:
+            if str(booking.get("Статус", "")).strip() != "Подтверждена":
+                continue
+            booking_id = _booking_id(booking)
+            if (
+                booking_id in {"", "—"}
+                or booking_id in UPCOMING_BOOKING_NOTIFIED_IDS
+            ):
+                continue
+            start_at = _booking_planned_start_datetime(booking)
+            if start_at is None:
+                logger.warning(
+                    "Skipping upcoming-booking alert for booking %s: "
+                    "start date/time is missing or invalid",
+                    booking_id,
+                )
+                continue
+            minutes_left = (
+                start_at.astimezone(NOTIFICATION_TZ) - current
+            ).total_seconds() / 60
+            if not 50 <= minutes_left <= 70:
+                continue
+
+            recipient_ids = await _upcoming_booking_recipient_ids(booking)
+            if not recipient_ids:
+                logger.warning(
+                    "Skipping upcoming-booking alert for booking %s: "
+                    "manager Telegram ID is missing",
+                    booking_id,
+                )
+                continue
+            notification = build_upcoming_booking_notification(booking)
+            delivery_succeeded = True
+            for recipient_id in recipient_ids:
+                try:
+                    await _send_upcoming_booking_alert(
+                        bot,
+                        recipient_id,
+                        booking_id,
+                        notification,
+                    )
+                except Exception:
+                    delivery_succeeded = False
+                    logger.exception(
+                        "Could not send upcoming-booking alert for booking %s "
+                        "to chat %s",
+                        booking_id,
+                        recipient_id,
+                    )
+            if delivery_succeeded:
+                UPCOMING_BOOKING_NOTIFIED_IDS.add(booking_id)
+                logger.info(
+                    "Sent upcoming-booking alert for booking %s",
                     booking_id,
                 )
 
@@ -4613,15 +4866,11 @@ async def _start_existing_issuance(
     )
 
 
-async def issuance_booking(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    bookings = data.get("issuance_bookings", [])
-    try:
-        choice = int((message.text or "").split(".", 1)[0])
-        booking = bookings[choice - 1]
-    except (ValueError, IndexError):
-        await message.answer("Выберите подтверждённую бронь кнопкой из списка.")
-        return
+async def _prepare_issuance_booking(
+    message: Message,
+    state: FSMContext,
+    booking: dict,
+) -> bool:
     try:
         car = get_car_by_id(_car_id(booking))
     except Exception:
@@ -4631,14 +4880,14 @@ async def issuance_booking(message: Message, state: FSMContext) -> None:
             "Не удалось получить данные автомобиля.",
             reply_markup=get_main_keyboard(message.from_user.id),
         )
-        return
+        return False
     if not car:
         await state.clear()
         await message.answer(
             "Автомобиль из брони не найден в листе Автомобили.",
             reply_markup=get_main_keyboard(message.from_user.id),
         )
-        return
+        return False
     prepayment, _ = _parse_int(
         _value(
             booking,
@@ -4711,6 +4960,19 @@ async def issuance_booking(message: Message, state: FSMContext) -> None:
         "Укажите фактическую дату выдачи:",
         reply_markup=issuance_date_keyboard(),
     )
+    return True
+
+
+async def issuance_booking(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    bookings = data.get("issuance_bookings", [])
+    try:
+        choice = int((message.text or "").split(".", 1)[0])
+        booking = bookings[choice - 1]
+    except (ValueError, IndexError):
+        await message.answer("Выберите подтверждённую бронь кнопкой из списка.")
+        return
+    await _prepare_issuance_booking(message, state, booking)
 
 
 async def booking_start_date(message: Message, state: FSMContext) -> None:
