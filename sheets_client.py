@@ -470,6 +470,45 @@ def get_tomorrow_bookings(target_date: datetime.date) -> dict[str, list[dict]]:
     return events
 
 
+def _normalized_car_identifier(value: object) -> str:
+    return str(value or "").strip().replace(" ", "").removesuffix(".0")
+
+
+def _open_rental_car_identifiers(
+    bookings: list[dict],
+) -> tuple[set[str], set[str]]:
+    rented_ids: set[str] = set()
+    rented_plates: set[str] = set()
+    for booking in bookings:
+        if str(booking.get("Статус", "")).strip() != "В аренде":
+            continue
+        car_id = _normalized_car_identifier(
+            booking.get("ID Авто") or booking.get("Car ID")
+        )
+        plate = str(
+            booking.get("Госномер")
+            or booking.get("Номер авто")
+            or booking.get("Номер")
+            or ""
+        ).strip().casefold()
+        if car_id:
+            rented_ids.add(car_id)
+        if plate:
+            rented_plates.add(plate)
+    return rented_ids, rented_plates
+
+
+def has_open_rental_for_car(car_id: str = "", plate: str = "") -> bool:
+    bookings = _get_sheet_records_safely(ws_bookings, "Бронирования")
+    rented_ids, rented_plates = _open_rental_car_identifiers(bookings)
+    normalized_id = _normalized_car_identifier(car_id)
+    normalized_plate = str(plate or "").strip().casefold()
+    return (
+        bool(normalized_id and normalized_id in rented_ids)
+        or bool(normalized_plate and normalized_plate in rented_plates)
+    )
+
+
 def get_available_cars(start_date_str: str, end_date_str: str):
     req_start = datetime.datetime.strptime(start_date_str, "%Y-%m-%d").date()
     req_end = datetime.datetime.strptime(end_date_str, "%Y-%m-%d").date()
@@ -478,17 +517,41 @@ def get_available_cars(start_date_str: str, end_date_str: str):
         ws_bookings,
         "Бронирования",
     )
-    busy_car_ids = set()
+    busy_car_ids: set[str] = set()
+    rented_car_ids, rented_car_plates = _open_rental_car_identifiers(
+        all_bookings
+    )
+    busy_car_ids.update(rented_car_ids)
     for b in all_bookings:
-        if b.get("Статус") in ["Подтверждена", "В аренде"]:
+        if b.get("Статус") == "Подтверждена":
             try:
                 b_start = datetime.datetime.strptime(str(b.get("Дата начала (ГГГГ-ММ-ДД)")), "%Y-%m-%d").date()
                 b_end = datetime.datetime.strptime(str(b.get("Дата окончания (ГГГГ-ММ-ДД)")), "%Y-%m-%d").date()
                 if req_start <= b_end and req_end >= b_start:
-                    busy_car_ids.add(b.get("ID Авто"))
+                    busy_car_ids.add(
+                        _normalized_car_identifier(
+                            b.get("ID Авто") or b.get("Car ID")
+                        )
+                    )
             except ValueError:
                 continue
-    return [c for c in all_cars if c.get("ID") not in busy_car_ids and c.get("Статус") == "Активен"]
+    available_cars = []
+    for car in all_cars:
+        car_id = _normalized_car_identifier(car.get("ID"))
+        car_plate = str(
+            car.get("Госномер")
+            or car.get("Номер авто")
+            or car.get("Номер")
+            or ""
+        ).strip().casefold()
+        if (
+            car_id in busy_car_ids
+            or car_plate in rented_car_plates
+            or car.get("Статус") != "Активен"
+        ):
+            continue
+        available_cars.append(car)
+    return available_cars
 
 
 def _ensure_headers(ws, required_headers: list[str]) -> list[str]:
@@ -1443,6 +1506,16 @@ def add_new_booking(
             bookings_sheet,
             "Бронирования",
         )
+        rented_ids, rented_plates = _open_rental_car_identifiers(records)
+        normalized_car_id = _normalized_car_identifier(car_id)
+        normalized_plate = str(plate or "").strip().casefold()
+        if (
+            normalized_car_id in rented_ids
+            or normalized_plate in rented_plates
+        ):
+            raise ValueError(
+                f"Car {car_id} is already rented and has no completed return act"
+            )
         booking_ids = []
         for record in records:
             raw_booking_id = record.get("ID Брони", record.get("ID", 0))
@@ -1569,8 +1642,28 @@ def add_new_booking(
 
 
 def get_available_cars_for_direct_issuance() -> list[dict]:
-    """Return every car so the manager can explicitly override its status."""
-    return ws_cars.get_all_records()
+    """Return every car with open-booking status taking precedence."""
+    cars = ws_cars.get_all_records()
+    bookings = _get_sheet_records_safely(ws_bookings, "Бронирования")
+    rented_ids, rented_plates = _open_rental_car_identifiers(bookings)
+    result = []
+    for car in cars:
+        enriched = dict(car)
+        car_id = _normalized_car_identifier(car.get("ID"))
+        car_plate = str(
+            car.get("Госномер")
+            or car.get("Номер авто")
+            or car.get("Номер")
+            or ""
+        ).strip().casefold()
+        is_rented = car_id in rented_ids or car_plate in rented_plates
+        if is_rented:
+            enriched["Статус"] = "В аренде"
+            enriched["__open_rental__"] = True
+        else:
+            enriched["__open_rental__"] = False
+        result.append(enriched)
+    return result
 
 
 def update_car_status(
@@ -1609,8 +1702,13 @@ def update_car_status(
             ),
             "",
         )
-        if (car_id and row_id == str(car_id).strip()) or (
-            plate and row_plate == str(plate).strip()
+        if (
+            car_id
+            and _normalized_car_identifier(row_id)
+            == _normalized_car_identifier(car_id)
+        ) or (
+            plate
+            and row_plate.casefold() == str(plate).strip().casefold()
         ):
             target_row = row_number
             break
@@ -1892,6 +1990,7 @@ def issue_booking(
     records = _get_sheet_records_safely(ws_bookings, "Бронирования")
     booking_row = None
     current_status = ""
+    selected_booking: dict = {}
     for row_number, booking in enumerate(records, start=2):
         current_id = (
             booking.get("ID Брони")
@@ -1902,12 +2001,28 @@ def issue_booking(
         if str(current_id).strip() == str(booking_id).strip():
             booking_row = row_number
             current_status = str(booking.get("Статус", "")).strip()
+            selected_booking = booking
             break
     if booking_row is None:
         raise ValueError(f"Booking {booking_id} was not found")
     if current_status != "Подтверждена":
         raise ValueError(
             f"Booking {booking_id} cannot be issued from status {current_status}"
+        )
+    rented_ids, rented_plates = _open_rental_car_identifiers(records)
+    selected_car_id = _normalized_car_identifier(
+        selected_booking.get("ID Авто") or selected_booking.get("Car ID")
+    )
+    selected_plate = str(
+        selected_booking.get("Госномер")
+        or selected_booking.get("Номер авто")
+        or selected_booking.get("Номер")
+        or ""
+    ).strip().casefold()
+    if selected_car_id in rented_ids or selected_plate in rented_plates:
+        raise ValueError(
+            f"Car for booking {booking_id} is already rented and has no "
+            "completed return act"
         )
 
     issued_parts = str(issued_at or "").replace("T", " ").split()
@@ -1971,6 +2086,11 @@ def issue_booking(
             ),
             (("Telegram ID Менеджера выдачи",), manager_id, False),
         ],
+    )
+    update_car_status(
+        car_id=selected_car_id,
+        plate=selected_plate,
+        status="В аренде",
     )
 
 
