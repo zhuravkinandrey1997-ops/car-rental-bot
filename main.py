@@ -1177,6 +1177,8 @@ def _booking_planned_start_datetime(
         "Плановое начало",
         "Плановая дата и время начала",
         "Дата и время подачи",
+        "Дата начала (ГГГГ-ММ-ДД)",
+        "Дата начала",
         "Время подачи",
         default="",
     )
@@ -1207,12 +1209,6 @@ def _booking_planned_start_datetime(
         parsed = _parse_datetime_text(f"{start_date} {start_time}")
         if parsed:
             return parsed
-    if start_date and (
-        "Плановое начало" in booking
-        or "Плановая дата и время начала" in booking
-        or "Дата и время подачи" in booking
-    ):
-        return _parse_datetime_text(start_date) or default
     return default
 
 
@@ -2328,7 +2324,7 @@ async def _upcoming_booking_recipient_ids(booking: dict) -> list[int]:
         source == HEAVY_LUX_PARTNER_SOURCE.casefold()
         or role == HEAVY_LUX_PARTNER_ROLE
     ):
-        return [PARTNER_ID if role == HEAVY_LUX_PARTNER_ROLE else manager_id]
+        return [PARTNER_ID]
     return [manager_id]
 
 
@@ -2834,6 +2830,47 @@ async def overdue_extension_input(
     )
 
 
+async def handover_car_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
+    if not await _callback_operational_access(callback):
+        await callback.answer(
+            "Недостаточно прав для оформления выдачи.",
+            show_alert=True,
+        )
+        return
+    booking_id = callback.data.removeprefix("handover_car:")
+    try:
+        bookings = await asyncio.to_thread(get_confirmed_bookings)
+        booking = _find_returnable_booking(bookings, booking_id)
+    except Exception:
+        logger.exception(
+            "Could not load confirmed booking %s for handover",
+            booking_id,
+        )
+        booking = None
+    if not booking:
+        await callback.answer(
+            "Подтверждённая бронь не найдена. Возможно, выдача уже оформлена.",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer("Открываем сценарий выдачи.")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.clear()
+    await state.update_data(
+        booking_mode="issuance",
+        issuance_bookings=[booking],
+        partner_mode=is_heavy_lux_partner_user(callback.from_user.id),
+    )
+    await _prepare_issuance_booking(callback.message, state, booking)
+
+
 def create_notification_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=NOTIFICATION_TZ)
     scheduler.add_job(
@@ -2851,6 +2888,16 @@ def create_notification_scheduler(bot: Bot) -> AsyncIOScheduler:
         IntervalTrigger(minutes=5, timezone=NOTIFICATION_TZ),
         args=[bot],
         id="overdue_rental_alerts",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        check_upcoming_bookings,
+        IntervalTrigger(minutes=5, timezone=NOTIFICATION_TZ),
+        args=[bot],
+        id="upcoming_booking_alerts",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
@@ -7610,6 +7657,10 @@ def create_dispatcher() -> Dispatcher:
         F.data.startswith("extend_rent:"),
     )
     dispatcher.callback_query.register(
+        handover_car_callback,
+        F.data.startswith("handover_car:"),
+    )
+    dispatcher.callback_query.register(
         expense_category_callback,
         F.data.startswith("expense_category:"),
     )
@@ -7806,6 +7857,10 @@ async def run_bot() -> None:
         )
         logger.info(
             "Overdue-rental alerts scheduled every 5 minutes (%s)",
+            NOTIFICATION_TIMEZONE_NAME,
+        )
+        logger.info(
+            "Upcoming-booking alerts scheduled every 5 minutes (%s)",
             NOTIFICATION_TIMEZONE_NAME,
         )
         logger.info("Car rental bot started")
