@@ -71,6 +71,7 @@ from sheets_client import (
     save_actual_return,
     save_direct_issuance,
     safe_int,
+    update_booking_planned_end,
 )
 
 load_dotenv()
@@ -165,6 +166,10 @@ class ReturnForm(StatesGroup):
     pay_type = State()
     notes = State()
     confirmation = State()
+
+
+class OverdueExtensionForm(StatesGroup):
+    end_at = State()
 
 
 class ExpenseForm(StatesGroup):
@@ -599,6 +604,7 @@ except ZoneInfoNotFoundError as exc:
     ) from exc
 NOTIFICATION_SEND_LOCK = asyncio.Lock()
 EXPIRING_RENTAL_ALERTED_BOOKING_IDS: set[str] = set()
+OVERDUE_1H_ALERTED_BOOKING_IDS: set[str] = set()
 
 
 def payment_methods_keyboard(flow: str = "return") -> InlineKeyboardMarkup:
@@ -683,6 +689,24 @@ def rental_total_keyboard(total_price: int) -> InlineKeyboardMarkup:
                     callback_data="return_rental_total:discount",
                 ),
             ],
+        ]
+    )
+
+
+def overdue_rental_keyboard(booking_id: object) -> InlineKeyboardMarkup:
+    booking_key = str(booking_id).strip()
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🏁 Закрыть (Приём авто)",
+                    callback_data=f"return_car:{booking_key}",
+                ),
+                InlineKeyboardButton(
+                    text="⏳ Продлить аренду",
+                    callback_data=f"extend_rent:{booking_key}",
+                ),
+            ]
         ]
     )
 
@@ -2148,6 +2172,401 @@ async def check_expiring_rentals(
                 )
 
 
+def _booking_manager_id(booking: dict) -> int | None:
+    raw_id = _value(
+        booking,
+        "Telegram ID Менеджера",
+        "ID Менеджера",
+        "Telegram ID Менеджера выдачи",
+        default="",
+    )
+    normalized_id = str(raw_id).strip().replace(" ", "").removesuffix(".0")
+    try:
+        manager_id = int(normalized_id)
+    except (TypeError, ValueError):
+        return None
+    return manager_id if manager_id > 0 else None
+
+
+def _admin_notification_ids() -> list[int]:
+    return list(dict.fromkeys([*NOTIFY_MANAGERS, *ADMIN_IDS]))
+
+
+def build_overdue_rental_notification(booking: dict) -> str:
+    """Build the overdue alert without any financial information."""
+    booking_id = _booking_id(booking)
+    car_name = _value(
+        booking,
+        "__car_name__",
+        "Автомобиль",
+        "Авто",
+        "Название авто",
+        default="Авто",
+    )
+    car_plate = _value(
+        booking,
+        "__car_plate__",
+        "Госномер",
+        "Номер авто",
+        "Номер",
+        default="—",
+    )
+    client_name = _value(
+        booking,
+        "ФИО Клиента",
+        "Клиент",
+        "Клиент ФИО",
+        "Имя клиента",
+        default="не указан",
+    )
+    client_phone = _value(
+        booking,
+        "Телефон",
+        "Телефон клиента",
+        default="не указан",
+    )
+    planned_end_raw = _value(
+        booking,
+        "Плановое окончание",
+        "Плановая дата и время окончания",
+        default="не указано",
+    )
+    planned_end = _parse_datetime_text(planned_end_raw)
+    planned_end_text = (
+        _format_datetime_ru(_timestamp(planned_end))
+        if planned_end
+        else planned_end_raw
+    )
+    return (
+        "⚠️ Внимание! Аренда не закрыта вовремя!\n"
+        f"📋 Бронь: №{booking_id}\n"
+        f"🚘 Авто: {car_name} ({car_plate})\n"
+        f"👤 Клиент: {client_name} ({client_phone})\n"
+        f"⏰ Плановое окончание: {planned_end_text} "
+        "(задержка более 1 часа)\n\n"
+        "Машина возвращена или аренда продолжается?"
+    )
+
+
+async def _send_overdue_alert(
+    bot: Bot,
+    chat_id: int,
+    booking_id: str,
+    text: str,
+) -> None:
+    keyboard = overdue_rental_keyboard(booking_id)
+    last_error = None
+    for attempt in range(3):
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=keyboard,
+            )
+            return
+        except Exception as error:
+            last_error = error
+            if attempt < 2:
+                await asyncio.sleep(5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
+async def _send_overdue_recipients(
+    bot: Bot,
+    booking: dict,
+    text: str,
+) -> bool:
+    booking_id = _booking_id(booking)
+    manager_id = _booking_manager_id(booking)
+    manager_access = None
+    manager_is_partner = False
+    if manager_id is not None:
+        try:
+            manager_access = await asyncio.to_thread(
+                _manager_access_for_user,
+                manager_id,
+            )
+        except Exception:
+            logger.exception(
+                "Could not resolve manager %s for overdue booking %s",
+                manager_id,
+                booking_id,
+            )
+        manager_is_partner = (
+            _normalized_role(manager_access)
+            in {
+                "партнёр",
+                "партнер",
+                "partner",
+                HEAVY_LUX_PARTNER_ROLE,
+            }
+        )
+
+    manager_available = bool(manager_access and manager_access.get("active"))
+    manager_delivered = False
+    if manager_available and manager_id is not None:
+        try:
+            await _send_overdue_alert(bot, manager_id, booking_id, text)
+            manager_delivered = True
+        except Exception:
+            logger.exception(
+                "Could not send overdue alert for booking %s to manager %s",
+                booking_id,
+                manager_id,
+            )
+
+    admins_required = (
+        not manager_available
+        or not manager_delivered
+        or manager_is_partner
+    )
+    admin_delivered = False
+    if admins_required:
+        for admin_id in _admin_notification_ids():
+            if admin_id == manager_id and manager_delivered:
+                continue
+            try:
+                await _send_overdue_alert(bot, admin_id, booking_id, text)
+                admin_delivered = True
+            except Exception:
+                logger.exception(
+                    "Could not send overdue alert for booking %s to admin %s",
+                    booking_id,
+                    admin_id,
+                )
+
+    return (
+        (manager_delivered and (not admins_required or admin_delivered))
+        if manager_available
+        else admin_delivered
+    )
+
+
+async def check_overdue_rentals(
+    bot: Bot,
+    now: datetime.datetime | None = None,
+) -> None:
+    """Notify once when an active rental passes one hour overdue."""
+    current = now or datetime.datetime.now(NOTIFICATION_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=NOTIFICATION_TZ)
+    else:
+        current = current.astimezone(NOTIFICATION_TZ)
+
+    async with NOTIFICATION_SEND_LOCK:
+        try:
+            rentals = await asyncio.to_thread(get_active_rentals)
+        except Exception:
+            logger.exception("Could not collect overdue rentals")
+            return
+
+        active_booking_ids = {
+            _booking_id(booking)
+            for booking in rentals
+            if _booking_id(booking) not in {"", "—"}
+        }
+        OVERDUE_1H_ALERTED_BOOKING_IDS.intersection_update(active_booking_ids)
+
+        for booking in rentals:
+            if str(booking.get("Статус", "")).strip() != "В аренде":
+                continue
+            booking_id = _booking_id(booking)
+            if (
+                booking_id in {"", "—"}
+                or booking_id in OVERDUE_1H_ALERTED_BOOKING_IDS
+            ):
+                continue
+            planned_end = _booking_planned_end_datetime(booking)
+            if planned_end is None:
+                logger.warning(
+                    "Skipping overdue alert for booking %s: planned end "
+                    "is missing or invalid",
+                    booking_id,
+                )
+                continue
+            overdue_minutes = (
+                current - planned_end.astimezone(NOTIFICATION_TZ)
+            ).total_seconds() / 60
+            if not 60 <= overdue_minutes < 75:
+                continue
+
+            notification = build_overdue_rental_notification(booking)
+            if await _send_overdue_recipients(bot, booking, notification):
+                OVERDUE_1H_ALERTED_BOOKING_IDS.add(booking_id)
+                logger.info(
+                    "Sent one-hour overdue alert for booking %s",
+                    booking_id,
+                )
+
+
+def _find_returnable_booking(bookings: list[dict], booking_id: str) -> dict | None:
+    normalized_id = str(booking_id).strip().removesuffix(".0")
+    for booking in bookings:
+        current_id = _booking_id(booking).strip().removesuffix(".0")
+        if current_id == normalized_id:
+            return booking
+    return None
+
+
+async def _callback_operational_access(
+    callback: CallbackQuery,
+) -> bool:
+    user = callback.from_user
+    if user is None:
+        return False
+    if is_heavy_lux_partner_user(user.id):
+        return True
+    access = _manager_access_for_user(user.id)
+    return bool(
+        access
+        and access.get("active")
+        and _normalized_role(access)
+        not in {
+            "партнёр",
+            "партнер",
+            "partner",
+            HEAVY_LUX_PARTNER_ROLE,
+        }
+    )
+
+
+async def overdue_return_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
+    if not await _callback_operational_access(callback):
+        await callback.answer(
+            "Недостаточно прав для оформления возврата.",
+            show_alert=True,
+        )
+        return
+    booking_id = callback.data.removeprefix("return_car:")
+    try:
+        booking = await asyncio.to_thread(
+            lambda: _find_returnable_booking(
+                get_returnable_rentals(),
+                booking_id,
+            )
+        )
+        if not booking:
+            raise ValueError("Активная бронь не найдена.")
+        car = await asyncio.to_thread(get_car_by_id, _car_id(booking))
+        if not car:
+            car = await asyncio.to_thread(
+                get_car_by_plate,
+                _value(booking, "Госномер", "Номер авто", "Номер", default=""),
+            )
+        if not car:
+            raise ValueError("Автомобиль из брони не найден.")
+    except Exception as error:
+        logger.exception("Could not open overdue return for booking %s", booking_id)
+        await callback.answer(str(error), show_alert=True)
+        return
+
+    await callback.answer("Открываем сценарий приёма авто.")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.clear()
+    await state.update_data(
+        return_cars=[car],
+        partner_mode=is_heavy_lux_partner_user(callback.from_user.id),
+    )
+    await _prepare_return(callback.message, state, car, booking)
+
+
+async def overdue_extend_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
+    if not await _callback_operational_access(callback):
+        await callback.answer(
+            "Недостаточно прав для продления аренды.",
+            show_alert=True,
+        )
+        return
+    booking_id = callback.data.removeprefix("extend_rent:")
+    try:
+        booking = await asyncio.to_thread(
+            lambda: _find_returnable_booking(
+                get_returnable_rentals(),
+                booking_id,
+            )
+        )
+    except Exception:
+        logger.exception("Could not load booking %s for extension", booking_id)
+        booking = None
+    if not booking:
+        await callback.answer("Активная бронь не найдена.", show_alert=True)
+        return
+
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.clear()
+    await state.update_data(overdue_booking_id=_booking_id(booking))
+    await state.set_state(OverdueExtensionForm.end_at)
+    await callback.message.answer(
+        "Введите новое плановое окончание аренды в формате "
+        "ГГГГ-ММ-ДД ЧЧ:ММ:"
+    )
+
+
+async def overdue_extension_input(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    parsed = _parse_datetime_text(message.text or "")
+    if parsed is None:
+        await message.answer(
+            "Неверный формат. Пример: 2026-09-06 18:30."
+        )
+        return
+    now = datetime.datetime.now(MINSK_TZ)
+    if parsed <= now:
+        await message.answer("Новое окончание должно быть в будущем.")
+        return
+    data = await state.get_data()
+    booking_id = data.get("overdue_booking_id")
+    if not booking_id:
+        await state.clear()
+        await message.answer(
+            "Сценарий продления устарел. Откройте уведомление заново.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
+        return
+    planned_end_at = _timestamp(parsed)
+    try:
+        await asyncio.to_thread(
+            update_booking_planned_end,
+            booking_id,
+            planned_end_at,
+        )
+    except Exception:
+        logger.exception(
+            "Could not extend rental for booking %s",
+            booking_id,
+        )
+        await state.clear()
+        await message.answer(
+            "Не удалось обновить плановое окончание в Google Sheets.",
+            reply_markup=get_main_keyboard(message.from_user.id),
+        )
+        return
+
+    OVERDUE_1H_ALERTED_BOOKING_IDS.discard(str(booking_id))
+    await state.clear()
+    await message.answer(
+        f"✅ Аренда по брони №{booking_id} продлена.\n"
+        f"Новое плановое окончание: {_format_datetime_ru(planned_end_at)}",
+        reply_markup=get_main_keyboard(message.from_user.id),
+    )
+
+
 def create_notification_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=NOTIFICATION_TZ)
     scheduler.add_job(
@@ -2155,6 +2574,16 @@ def create_notification_scheduler(bot: Bot) -> AsyncIOScheduler:
         IntervalTrigger(minutes=5, timezone=NOTIFICATION_TZ),
         args=[bot],
         id="expiring_rental_alerts",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        check_overdue_rentals,
+        IntervalTrigger(minutes=5, timezone=NOTIFICATION_TZ),
+        args=[bot],
+        id="overdue_rental_alerts",
         replace_existing=True,
         coalesce=True,
         max_instances=1,
@@ -6889,6 +7318,14 @@ def create_dispatcher() -> Dispatcher:
         F.data == "cancel_return",
     )
     dispatcher.callback_query.register(
+        overdue_return_callback,
+        F.data.startswith("return_car:"),
+    )
+    dispatcher.callback_query.register(
+        overdue_extend_callback,
+        F.data.startswith("extend_rent:"),
+    )
+    dispatcher.callback_query.register(
         expense_category_callback,
         F.data.startswith("expense_category:"),
     )
@@ -7007,6 +7444,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.message.register(cancellation_reason, CancellationForm.reason)
 
     dispatcher.message.register(return_booking, ReturnForm.booking)
+    dispatcher.message.register(
+        overdue_extension_input,
+        OverdueExtensionForm.end_at,
+    )
     dispatcher.message.register(return_end_mileage, ReturnForm.end_mileage)
     dispatcher.message.register(return_fuel_level, ReturnForm.fuel_level)
     dispatcher.message.register(return_wash_fee, ReturnForm.wash_fee)
@@ -7077,6 +7518,10 @@ async def run_bot() -> None:
         )
         logger.info(
             "Expiring-rental alerts scheduled every 5 minutes (%s)",
+            NOTIFICATION_TIMEZONE_NAME,
+        )
+        logger.info(
+            "Overdue-rental alerts scheduled every 5 minutes (%s)",
             NOTIFICATION_TIMEZONE_NAME,
         )
         logger.info("Car rental bot started")

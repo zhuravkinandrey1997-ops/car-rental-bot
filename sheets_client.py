@@ -1821,6 +1821,48 @@ def get_returnable_rentals():
     return [b for b in all_bookings if b.get("Статус") == "В аренде"]
 
 
+def update_booking_planned_end(
+    booking_id: int | str,
+    planned_end_at: str,
+) -> None:
+    """Update the planned return time for an active booking."""
+    with BOOKINGS_LOCK:
+        records = _get_sheet_records_safely(ws_bookings, "Бронирования")
+        booking_row = None
+        current_status = ""
+        for row_number, booking in enumerate(records, start=2):
+            current_id = (
+                booking.get("ID Брони")
+                or booking.get("ID")
+                or booking.get("Booking ID")
+                or ""
+            )
+            normalized_id = str(current_id).strip().removesuffix(".0")
+            if normalized_id == str(booking_id).strip().removesuffix(".0"):
+                booking_row = row_number
+                current_status = str(booking.get("Статус", "")).strip()
+                break
+        if booking_row is None:
+            raise ValueError(f"Booking {booking_id} was not found")
+        if current_status != "В аренде":
+            raise ValueError(
+                f"Booking {booking_id} cannot be extended from status "
+                f"{current_status}"
+            )
+
+        headers = _ensure_headers(
+            ws_bookings,
+            ["Плановое окончание"],
+        )
+        updates = {"Плановое окончание": planned_end_at}
+        if "Плановая дата и время окончания" in headers:
+            updates["Плановая дата и время окончания"] = planned_end_at
+        planned_parts = str(planned_end_at).split()
+        if "Время возврата" in headers and len(planned_parts) > 1:
+            updates["Время возврата"] = planned_parts[1][:5]
+        _update_row_values(ws_bookings, booking_row, headers, updates)
+
+
 def get_confirmed_bookings():
     all_bookings = _get_sheet_records_safely(
         ws_bookings,
