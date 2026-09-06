@@ -89,6 +89,38 @@ class ExpiringRentalNotificationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(first_deliveries), len(main.NOTIFY_MANAGERS))
         self.assertEqual(second_deliveries, [])
 
+    async def test_retries_all_recipients_after_partial_delivery_failure(self):
+        booking = self._booking(booking_id=43, minutes_left=60)
+        attempts = []
+        failed_recipient = main.NOTIFY_MANAGERS[-1]
+
+        async def deliver_with_temporary_failure(bot, recipient_id, chunks):
+            attempts.append(recipient_id)
+            if recipient_id == failed_recipient and attempts.count(recipient_id) == 1:
+                raise RuntimeError("temporary Telegram failure")
+
+        with (
+            patch.object(main, "get_active_rentals", return_value=[booking]),
+            patch.object(
+                main,
+                "_send_notification_chunks",
+                new=deliver_with_temporary_failure,
+            ),
+        ):
+            await main.check_expiring_rentals(object(), now=self.current)
+            self.assertNotIn(
+                "43",
+                main.EXPIRING_RENTAL_ALERTED_BOOKING_IDS,
+            )
+
+            await main.check_expiring_rentals(object(), now=self.current)
+
+        self.assertEqual(
+            attempts,
+            [*main.NOTIFY_MANAGERS, *main.NOTIFY_MANAGERS],
+        )
+        self.assertIn("43", main.EXPIRING_RENTAL_ALERTED_BOOKING_IDS)
+
     async def test_heavy_lux_booking_also_reaches_partner_without_financial_fields(self):
         booking = self._booking(
             booking_id=77,
