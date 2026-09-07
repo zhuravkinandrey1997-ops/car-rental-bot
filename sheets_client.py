@@ -643,9 +643,11 @@ def _update_existing_headers(
         ws.update_cell(row_number, column_number, value)
 
 
-def _get_sheet_records_safely(ws, sheet_name: str) -> list[dict]:
-    """Read a worksheet without gspread's duplicate/blank-header validation."""
-    all_values = ws.get_all_values()
+def _records_from_values(
+    all_values: list[list[object]],
+    sheet_name: str,
+) -> list[dict]:
+    """Convert raw worksheet rows without gspread header validation."""
     if not all_values:
         return []
 
@@ -696,6 +698,49 @@ def _get_sheet_records_safely(ws, sheet_name: str) -> list[dict]:
             elif base_header not in record:
                 record[base_header] = value
         records.append(record)
+    return records
+
+
+def _get_sheet_records_safely(ws, sheet_name: str) -> list[dict]:
+    """Read a worksheet without gspread's duplicate/blank-header validation."""
+    return _records_from_values(ws.get_all_values(), sheet_name)
+
+
+BOOKINGS_FINANCIAL_RANGE = "A1:BT1000"
+BOOKING_ACCEPTED_RENTAL_COLUMN = 13  # M: Принятая сумма аренды
+BOOKING_ACCEPTED_TOTAL_COLUMN = 46  # AT: Фактически принято
+BOOKING_SOURCE_COLUMN = 70  # BR: Источник
+
+
+def _get_financial_booking_records() -> list[dict]:
+    """Read financial booking fields from their fixed legacy columns.
+
+    The bookings sheet has accumulated optional fields over time, so header
+    lookup is not reliable for the financial source and accepted amounts.
+    Keep the full A:BT read wide enough to preserve those fixed positions.
+    """
+    all_values = ws_bookings.get(BOOKINGS_FINANCIAL_RANGE)
+    records = _records_from_values(all_values, "Бронирования")
+    for row_offset, record in enumerate(records, start=1):
+        row = all_values[row_offset] if row_offset < len(all_values) else []
+        record["Источник"] = (
+            str(
+                row[BOOKING_SOURCE_COLUMN - 1]
+                if len(row) >= BOOKING_SOURCE_COLUMN
+                else ""
+            )
+            .strip()
+        )
+        record["__accepted_rental_m"] = (
+            row[BOOKING_ACCEPTED_RENTAL_COLUMN - 1]
+            if len(row) >= BOOKING_ACCEPTED_RENTAL_COLUMN
+            else ""
+        )
+        record["__accepted_total_at"] = (
+            row[BOOKING_ACCEPTED_TOTAL_COLUMN - 1]
+            if len(row) >= BOOKING_ACCEPTED_TOTAL_COLUMN
+            else ""
+        )
     return records
 
 
@@ -1032,7 +1077,7 @@ def _build_financial_report(
     month_key: str,
     context: dict[str, object],
 ) -> dict:
-    bookings = _get_sheet_records_safely(ws_bookings, "Бронирования")
+    bookings = _get_financial_booking_records()
     returns = _get_sheet_records_safely(ws_returns, "Возвраты_Касса")
     expenses = _get_sheet_records_safely(ws_expenses, "Затраты")
     cars = _get_sheet_records_safely(ws_cars, "Автомобили")
@@ -1230,17 +1275,7 @@ def _build_financial_report(
         return sum(amount for amount, _ in payment_parts(record))
 
     def source_commission_rate(record: dict) -> float:
-        source = str(
-            cell(
-                record,
-                "Источник",
-                "Партнёр",
-                "Партнер",
-                "Канал",
-                default="",
-            )
-            or ""
-        ).strip().casefold()
+        source = str(record.get("Источник", "") or "").strip().casefold()
         return (
             HEAVY_LUX_COMMISSION_RATE
             if source == HEAVY_LUX_SOURCE
@@ -1251,71 +1286,9 @@ def _build_financial_report(
         return amount * (1 - source_commission_rate(record))
 
     def booking_payment_parts(record: dict) -> list[tuple[float, str]]:
-        actual_rental = cell(
-            record,
-            "Фактически оплачено за аренду (RUB)",
-            "Сумма аренды получена (RUB)",
-            default="",
-        )
-        actual_top_up = cell(
-            record,
-            "Полученная доплата (RUB)",
-            "Полученная доплата",
-            default="",
-        )
-        has_actual_payment_fields = any(
-            str(value if value is not None else "").strip()
-            for value in (actual_rental, actual_top_up)
-        )
-        if has_actual_payment_fields:
-            parts: list[tuple[float, str]] = []
-            rental_amount = safe_float(actual_rental)
-            top_up_amount = safe_float(actual_top_up)
-            if rental_amount:
-                parts.append(
-                    (
-                        rental_amount,
-                        normalize_payment_method(
-                            cell(
-                                record,
-                                "Способ оплаты аренды",
-                                "Способ оплаты",
-                                default="Без оплаты",
-                            )
-                        ),
-                    )
-                )
-            if top_up_amount:
-                parts.append(
-                    (
-                        top_up_amount,
-                        normalize_payment_method(
-                            cell(
-                                record,
-                                "Способ оплаты доплаты",
-                                "Способ оплаты",
-                                default="Без оплаты",
-                            )
-                        ),
-                    )
-                )
-            return parts
-
-        accepted_value = first_matching_value(record, "Принятая сумма")
-        if not str(accepted_value if accepted_value is not None else "").strip():
-            accepted_value = cell(
-                record,
-                "Сумма брони (RUB)",
-                default="",
-            )
-        accepted_amount = safe_float(accepted_value)
-        if not accepted_amount:
-            fallback_value = cell(
-                record,
-                "Сумма брони (RUB)",
-                default="",
-            )
-            accepted_amount = safe_float(fallback_value)
+        accepted_amount = safe_float(record.get("__accepted_rental_m"))
+        if accepted_amount <= 0:
+            accepted_amount = safe_float(record.get("__accepted_total_at"))
         if not accepted_amount:
             return []
         return [
