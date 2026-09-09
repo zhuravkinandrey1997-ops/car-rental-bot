@@ -3,11 +3,13 @@ import unittest
 from unittest.mock import patch
 
 import main
+import sheets_client
 
 
 class ExpiringRentalNotificationTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         main.EXPIRING_RENTAL_ALERTED_BOOKING_IDS.clear()
+        self.persisted_alert_ids = set()
         self.current = datetime.datetime(
             2026,
             9,
@@ -42,8 +44,24 @@ class ExpiringRentalNotificationTest(unittest.IsolatedAsyncioTestCase):
         async def capture_delivery(bot, recipient_id, chunks):
             deliveries.append((recipient_id, chunks))
 
+        def load_persisted_alerts(now):
+            return set(self.persisted_alert_ids)
+
+        def save_persisted_alert(booking_id, sent_at):
+            self.persisted_alert_ids.add(str(booking_id))
+
         with (
             patch.object(main, "get_active_rentals", return_value=bookings),
+            patch.object(
+                main,
+                "get_expiring_rental_alerted_booking_ids",
+                new=load_persisted_alerts,
+            ),
+            patch.object(
+                main,
+                "mark_expiring_rental_alert_sent",
+                new=save_persisted_alert,
+            ),
             patch.object(
                 main,
                 "_send_notification_chunks",
@@ -89,6 +107,67 @@ class ExpiringRentalNotificationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(first_deliveries), len(main.NOTIFY_MANAGERS))
         self.assertEqual(second_deliveries, [])
 
+    async def test_same_booking_is_not_notified_after_process_restart(self):
+        booking = self._booking(booking_id=41, minutes_left=60)
+        first_deliveries = await self._run_check([booking])
+        main.EXPIRING_RENTAL_ALERTED_BOOKING_IDS.clear()
+        second_deliveries = await self._run_check([booking])
+
+        self.assertEqual(len(first_deliveries), len(main.NOTIFY_MANAGERS))
+        self.assertEqual(second_deliveries, [])
+
+    def test_expired_persisted_alerts_are_removed(self):
+        current = self.current
+        old_timestamp = (
+            current
+            - datetime.timedelta(
+                days=sheets_client.EXPIRING_RENTAL_ALERT_RETENTION_DAYS,
+                seconds=1,
+            )
+        ).isoformat()
+        current_timestamp = current.isoformat()
+        records = [
+            {
+                "Тип уведомления": sheets_client.EXPIRING_RENTAL_ALERT_TYPE,
+                "ID Брони": "old",
+                "Отправлено в UTC": old_timestamp,
+                "__row_number__": 2,
+            },
+            {
+                "Тип уведомления": sheets_client.EXPIRING_RENTAL_ALERT_TYPE,
+                "ID Брони": "current",
+                "Отправлено в UTC": current_timestamp,
+                "__row_number__": 3,
+            },
+        ]
+
+        class FakeNotificationSheet:
+            def __init__(self):
+                self.deleted_rows = []
+
+            def delete_rows(self, row_number):
+                self.deleted_rows.append(row_number)
+
+        fake_sheet = FakeNotificationSheet()
+        with (
+            patch.object(
+                sheets_client,
+                "ws_notification_state",
+                fake_sheet,
+            ),
+            patch.object(
+                sheets_client,
+                "_get_sheet_records_safely",
+                return_value=records,
+            ),
+        ):
+            alerted_ids = sheets_client.get_expiring_rental_alerted_booking_ids(
+                current
+            )
+
+        self.assertEqual(alerted_ids, {"current"})
+        self.assertEqual(fake_sheet.deleted_rows, [2])
+
     async def test_retries_all_recipients_after_partial_delivery_failure(self):
         booking = self._booking(booking_id=43, minutes_left=60)
         attempts = []
@@ -101,6 +180,18 @@ class ExpiringRentalNotificationTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(main, "get_active_rentals", return_value=[booking]),
+            patch.object(
+                main,
+                "get_expiring_rental_alerted_booking_ids",
+                return_value=set(self.persisted_alert_ids),
+            ),
+            patch.object(
+                main,
+                "mark_expiring_rental_alert_sent",
+                side_effect=lambda booking_id, sent_at: self.persisted_alert_ids.add(
+                    str(booking_id)
+                ),
+            ),
             patch.object(
                 main,
                 "_send_notification_chunks",

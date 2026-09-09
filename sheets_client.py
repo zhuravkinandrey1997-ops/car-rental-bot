@@ -89,6 +89,13 @@ EXPENSE_HEADERS = [
     "Имя",
     "Примечание",
 ]
+NOTIFICATION_STATE_HEADERS = [
+    "Тип уведомления",
+    "ID Брони",
+    "Отправлено в UTC",
+]
+EXPIRING_RENTAL_ALERT_TYPE = "expiring_rental"
+EXPIRING_RENTAL_ALERT_RETENTION_DAYS = 7
 MONTHLY_SUMMARY_HEADERS = [
     "Месяц (ГГГГ-ММ)",
     "Общий приход (RUB)",
@@ -797,6 +804,142 @@ ws_car_profit_summary = _get_or_create_sheet(
     "Прибыль_по_авто",
     CAR_PROFIT_SUMMARY_HEADERS,
 )
+ws_notification_state = _get_or_create_sheet(
+    "Состояние_уведомлений",
+    NOTIFICATION_STATE_HEADERS,
+)
+
+
+def _notification_state_datetime(
+    value: object,
+    *,
+    default: datetime.datetime | None = None,
+) -> datetime.datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = datetime.datetime.fromisoformat(raw)
+    except ValueError:
+        return default
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _notification_state_now(
+    value: datetime.datetime | None = None,
+) -> datetime.datetime:
+    current = value or datetime.datetime.now(datetime.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=datetime.timezone.utc)
+    return current.astimezone(datetime.timezone.utc)
+
+
+def _cleanup_expired_rental_alert_rows(
+    records: list[dict],
+    *,
+    now: datetime.datetime,
+) -> None:
+    cutoff = now - datetime.timedelta(
+        days=EXPIRING_RENTAL_ALERT_RETENTION_DAYS
+    )
+    expired_rows = []
+    for record in records:
+        if (
+            str(record.get("Тип уведомления", "")).strip()
+            != EXPIRING_RENTAL_ALERT_TYPE
+        ):
+            continue
+        sent_at = _notification_state_datetime(
+            record.get("Отправлено в UTC"),
+        )
+        if sent_at is None or sent_at < cutoff:
+            row_number = record.get("__row_number__")
+            if row_number:
+                expired_rows.append(int(row_number))
+
+    # Delete from the bottom up so earlier row numbers remain valid.
+    for row_number in sorted(expired_rows, reverse=True):
+        ws_notification_state.delete_rows(row_number)
+
+
+def get_expiring_rental_alerted_booking_ids(
+    now: datetime.datetime | None = None,
+) -> set[str]:
+    """Return persisted one-hour alert keys and remove expired rows."""
+    current = _notification_state_now(now)
+    records = _get_sheet_records_safely(
+        ws_notification_state,
+        "Состояние_уведомлений",
+    )
+    _cleanup_expired_rental_alert_rows(records, now=current)
+
+    cutoff = current - datetime.timedelta(
+        days=EXPIRING_RENTAL_ALERT_RETENTION_DAYS
+    )
+    alerted_booking_ids: set[str] = set()
+    for record in records:
+        if (
+            str(record.get("Тип уведомления", "")).strip()
+            != EXPIRING_RENTAL_ALERT_TYPE
+        ):
+            continue
+        sent_at = _notification_state_datetime(
+            record.get("Отправлено в UTC"),
+        )
+        booking_id = str(record.get("ID Брони", "")).strip()
+        if sent_at and sent_at >= cutoff and booking_id:
+            alerted_booking_ids.add(booking_id)
+    return alerted_booking_ids
+
+
+def mark_expiring_rental_alert_sent(
+    booking_id: object,
+    sent_at: datetime.datetime | None = None,
+) -> None:
+    """Persist a completed one-hour alert delivery."""
+    normalized_booking_id = str(booking_id or "").strip()
+    if not normalized_booking_id:
+        return
+
+    current = _notification_state_now(sent_at)
+    # Cleanup also runs on the write path, keeping the state bounded when a
+    # scheduler check happens to persist a new alert after a long pause.
+    get_expiring_rental_alerted_booking_ids(current)
+    records = _get_sheet_records_safely(
+        ws_notification_state,
+        "Состояние_уведомлений",
+    )
+    headers = _ensure_headers(
+        ws_notification_state,
+        NOTIFICATION_STATE_HEADERS,
+    )
+    timestamp = current.isoformat(timespec="seconds")
+    for record in records:
+        if (
+            str(record.get("Тип уведомления", "")).strip()
+            == EXPIRING_RENTAL_ALERT_TYPE
+            and str(record.get("ID Брони", "")).strip()
+            == normalized_booking_id
+        ):
+            _update_row_values(
+                ws_notification_state,
+                int(record["__row_number__"]),
+                headers,
+                {"Отправлено в UTC": timestamp},
+            )
+            return
+
+    _append_record(
+        ws_notification_state,
+        {
+            "Тип уведомления": EXPIRING_RENTAL_ALERT_TYPE,
+            "ID Брони": normalized_booking_id,
+            "Отправлено в UTC": timestamp,
+        },
+        NOTIFICATION_STATE_HEADERS,
+    )
 
 
 def safe_int(value: object) -> int:

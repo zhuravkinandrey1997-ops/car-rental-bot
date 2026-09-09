@@ -27,3 +27,16 @@ before recording successful delivery can lose the operational reminder.
 resolve the creator's role before routing Heavy Lux reminders to the partner,
 and leave failed deliveries eligible for a retry while the 50–70 minute window
 is open.
+
+Completed one-hour expiry alerts use a dedicated persistent state with a bounded
+retention period, and the state is written only after every recipient accepts the
+message. If the state cannot be read, do not send until a later scheduler run.
+
+**Why:** Process memory disappears on restart, while sending without a readable
+marker can duplicate an alert. Writing after delivery preserves retries for
+partial failures; the retention window prevents the state sheet from growing
+forever.
+
+**How to apply:** Keep the persisted alert key stable per booking, clean expired
+rows during state access, and perform the blocking storage operations off the
+asyncio event loop.

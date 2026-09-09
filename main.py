@@ -57,6 +57,7 @@ from sheets_client import (
     get_available_expense_months,
     get_expenses_for_month,
     get_financial_report,
+    get_expiring_rental_alerted_booking_ids,
     get_recent_expenses,
     get_pending_notification_manager_ids,
     get_returnable_rentals,
@@ -69,6 +70,7 @@ from sheets_client import (
     is_partner_authorized,
     issue_booking,
     mark_notification_sent,
+    mark_expiring_rental_alert_sent,
     save_actual_return,
     save_direct_issuance,
     safe_int,
@@ -2230,6 +2232,19 @@ async def check_expiring_rentals(
         EXPIRING_RENTAL_ALERTED_BOOKING_IDS.intersection_update(
             active_booking_ids
         )
+        try:
+            persisted_alerted_booking_ids = await asyncio.to_thread(
+                get_expiring_rental_alerted_booking_ids,
+                current,
+            )
+        except Exception:
+            logger.exception(
+                "Could not load persisted one-hour expiry alert state"
+            )
+            return
+        EXPIRING_RENTAL_ALERTED_BOOKING_IDS.update(
+            persisted_alerted_booking_ids.intersection(active_booking_ids)
+        )
 
         for booking in rentals:
             if str(booking.get("Статус", "")).strip() != "В аренде":
@@ -2273,6 +2288,17 @@ async def check_expiring_rentals(
                     )
             if delivery_succeeded:
                 EXPIRING_RENTAL_ALERTED_BOOKING_IDS.add(booking_id)
+                try:
+                    await asyncio.to_thread(
+                        mark_expiring_rental_alert_sent,
+                        booking_id,
+                        current,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not persist one-hour expiry alert for booking %s",
+                        booking_id,
+                    )
                 logger.info(
                     "Sent one-hour expiry alert for booking %s",
                     booking_id,
