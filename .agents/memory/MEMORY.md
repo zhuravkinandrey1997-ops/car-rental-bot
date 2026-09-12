@@ -7,6 +7,7 @@
 - [Return act idempotency](return-act-idempotency.md) — multi-sheet return writes use booking ID as the retry key and set completion status last.
 - [Financial report revenue](financial-report-revenue.md) — profit and Ksenia's 10% use actual received return income, not accrued rental cost.
 - [Partner car filtering](partner-car-filtering.md) — match partner expenses by make/model or plate, never numeric IDs embedded in vehicle text.
+- [Financial report source filters](financial-report-source-filters.md) — source views filter linked direct expenses and never overwrite the canonical combined summary.
 - [Manager authorization normalization](manager-auth-normalization.md) — normalize ID, role, and active status before routing; active unknown roles default to manager access.
 - [Telegram ID formatting](telegram-id-formatting.md) — compare manager IDs after removing spaces and a Sheets-style `.0` suffix.
 - [Manager-approved rental price](rental-price-adjustments.md) — confirm or discount the tariff total before calculating the remaining rent at return.

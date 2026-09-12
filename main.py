@@ -1066,14 +1066,20 @@ def financial_report_type_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🏢 Общий по всей фирме",
-                    callback_data="financial_type:company",
+                    text=f"🏢 {LEON_RENTAL_SOURCE}",
+                    callback_data="financial_type:leon",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="🚗 Выбрать машины",
-                    callback_data="financial_type:cars",
+                    text=f"🤝 {HEAVY_LUX_PARTNER_SOURCE}",
+                    callback_data="financial_type:heavy_lux_cr",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📊 Сводный (Общий)",
+                    callback_data="financial_type:all",
                 )
             ],
         ]
@@ -3545,16 +3551,48 @@ def _callback_has_finance_access(callback: CallbackQuery) -> bool:
 
 def _format_financial_report(report: dict) -> str:
     payment_breakdown = report.get("payment_breakdown", {})
+    source_filter = report.get("source_filter", "all")
+    if source_filter == "leon":
+        title = f"🏢 ФИНАНСОВЫЙ ОТЧЁТ LEON RENTAL ЗА {report['month']}"
+        summary_lines = [
+            f"🟢 Валовый приход: "
+            f"{_format_number(report['gross_income'])} RUB",
+            "🤝 Комиссия партнёров: 0 RUB",
+            f"🔴 Прямые расходы за месяц: "
+            f"{_format_number(report['total_expenses'])} RUB",
+            f"💎 Чистая прибыль: "
+            f"{_format_number(report['company_profit'])} RUB",
+        ]
+    elif source_filter == "heavy_lux_cr":
+        title = f"🤝 ФИНАНСОВЫЙ ОТЧЁТ HEAVY_LUX_CR ЗА {report['month']}"
+        summary_lines = [
+            f"🟢 Общий валовый сбор: "
+            f"{_format_number(report['gross_income'])} RUB",
+            f"🤝 Доход партнёра heavy_lux_cr (30%): "
+            f"{_format_number(report.get('partner_fee', 0))} RUB",
+            f"🏢 Доля Leon Rental (70%): "
+            f"{_format_number(report.get('company_revenue', 0))} RUB",
+            f"🔴 Прямые расходы за месяц: "
+            f"{_format_number(report['total_expenses'])} RUB",
+            f"💎 Чистый остаток Leon Rental: "
+            f"{_format_number(report['company_profit'])} RUB",
+        ]
+    else:
+        title = f"📊 СВОДНЫЙ ФИНАНСОВЫЙ ОТЧЁТ ЗА {report['month']}"
+        summary_lines = [
+            f"🟢 Общий приход: "
+            f"{_format_number(report['gross_income'])} RUB",
+            f"🤝 Комиссия heavy_lux_cr (30%): "
+            f"{_format_number(report.get('partner_fee', 0))} RUB",
+            f"🔴 Расходы за месяц: "
+            f"{_format_number(report['total_expenses'])} RUB",
+            f"💎 Итоговая чистая прибыль Leon Rental: "
+            f"{_format_number(report['company_profit'])} RUB",
+        ]
     lines = [
-        f"📈 ФИНАНСОВЫЙ ОТЧЁТ ЗА {report['month']}",
+        title,
         "",
-        f"🟢 Общий приход: {_format_number(report['gross_income'])} RUB",
-        f"🤝 Комиссия heavy_lux_cr (30%): "
-        f"{_format_number(report.get('partner_fee', 0))} RUB",
-        f"🔴 Расходы за месяц: "
-        f"{_format_number(report['total_expenses'])} RUB",
-        f"💎 Чистая прибыль организации: "
-        f"{_format_number(report['company_profit'])} RUB",
+        *summary_lines,
         "",
         "💳 ВЫРУЧКА ПО СПОСОБАМ ОПЛАТЫ:",
         f"  Наличные: {_format_number(payment_breakdown.get('Наличные', 0))} RUB",
@@ -3572,17 +3610,36 @@ def _format_financial_report(report: dict) -> str:
                 if car["Марка и Модель"]
                 else f"Авто {car['ID Авто']} ({car['Госномер']})"
             )
-            lines.extend(
-                [
-                    "",
-                    label,
-                    f"  Приход: {_format_number(car['Приход / Выручка (RUB)'])} RUB",
-                    f"  Прямые расходы: "
-                    f"{_format_number(car['Затраты на авто (RUB)'])} RUB",
-                    f"  Чистая прибыль: "
-                    f"{_format_number(car['Чистая прибыль авто (RUB)'])} RUB",
-                ]
-            )
+            if source_filter == "heavy_lux_cr":
+                lines.extend(
+                    [
+                        "",
+                        label,
+                        f"  Валовый сбор: "
+                        f"{_format_number(car.get('Валовый сбор (RUB)', 0))} RUB",
+                        f"  Комиссия 30%: "
+                        f"{_format_number(car.get('Комиссия heavy_lux_cr (RUB)', 0))} RUB",
+                        f"  Доля Leon Rental 70%: "
+                        f"{_format_number(car.get('Доля Leon Rental (70%) (RUB)', 0))} RUB",
+                        f"  Прямые расходы: "
+                        f"{_format_number(car['Затраты на авто (RUB)'])} RUB",
+                        f"  Чистый остаток: "
+                        f"{_format_number(car['Чистая прибыль авто (RUB)'])} RUB",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "",
+                        label,
+                        f"  Приход: "
+                        f"{_format_number(car['Приход / Выручка (RUB)'])} RUB",
+                        f"  Прямые расходы: "
+                        f"{_format_number(car['Затраты на авто (RUB)'])} RUB",
+                        f"  Чистая прибыль: "
+                        f"{_format_number(car['Чистая прибыль авто (RUB)'])} RUB",
+                    ]
+                )
     return "\n".join(lines)
 
 
@@ -4599,16 +4656,20 @@ async def financial_report_type_callback(
         return
     report_type = callback.data.split(":", 1)[1]
     month_key = data.get("financial_month")
-    if report_type not in {"company", "cars"} or not month_key:
+    if report_type not in {"leon", "heavy_lux_cr", "all"} or not month_key:
         await callback.answer("Некорректный тип отчёта.", show_alert=True)
         return
 
-    if report_type == "company":
+    if report_type in {"leon", "heavy_lux_cr", "all"}:
         await callback.answer(f"Формирую отчёт за {month_key}")
         await callback.message.edit_reply_markup(reply_markup=None)
         await state.clear()
         try:
-            report = await asyncio.to_thread(get_financial_report, month_key)
+            report = await asyncio.to_thread(
+                get_financial_report,
+                month_key,
+                report_type,
+            )
         except Exception:
             logger.exception("Could not build financial report for %s", month_key)
             await callback.message.answer(

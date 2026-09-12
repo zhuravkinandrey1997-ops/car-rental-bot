@@ -28,6 +28,9 @@ SHEET_TITLE_MAP = {
 }
 HEAVY_LUX_SOURCE = "heavy_lux_cr"
 HEAVY_LUX_COMMISSION_RATE = 0.30
+FINANCIAL_SOURCE_ALL = "all"
+FINANCIAL_SOURCE_LEON = "leon"
+FINANCIAL_SOURCE_HEAVY_LUX = HEAVY_LUX_SOURCE
 BOOKING_HEADERS = [
     "ID Брони",
     "ID Авто",
@@ -1357,7 +1360,32 @@ def get_available_financial_months(
     return sorted(months, reverse=True)
 
 
-def get_financial_report(month_key: str) -> dict:
+def normalize_financial_source_filter(source_filter: object = FINANCIAL_SOURCE_ALL) -> str:
+    """Normalize the financial report source selector."""
+    normalized = str(source_filter or FINANCIAL_SOURCE_ALL).strip().casefold()
+    aliases = {
+        "all": FINANCIAL_SOURCE_ALL,
+        "общий": FINANCIAL_SOURCE_ALL,
+        "сводный": FINANCIAL_SOURCE_ALL,
+        "leon": FINANCIAL_SOURCE_LEON,
+        "леон": FINANCIAL_SOURCE_LEON,
+        "леон rental": FINANCIAL_SOURCE_LEON,
+        "леон рентал": FINANCIAL_SOURCE_LEON,
+        HEAVY_LUX_SOURCE.casefold(): FINANCIAL_SOURCE_HEAVY_LUX,
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as error:
+        raise ValueError(
+            f"Unknown financial source filter: {source_filter!r}"
+        ) from error
+
+
+def get_financial_report(
+    month_key: str,
+    source_filter: object = FINANCIAL_SOURCE_ALL,
+) -> dict:
+    source_filter = normalize_financial_source_filter(source_filter)
     context = {
         "sheet": "—",
         "row": "—",
@@ -1365,7 +1393,11 @@ def get_financial_report(month_key: str) -> dict:
         "value": "—",
     }
     try:
-        return _build_financial_report(month_key, context)
+        return _build_financial_report(
+            month_key,
+            context,
+            source_filter=source_filter,
+        )
     except Exception as error:
         logger.exception(
             "Financial report failed for %s at sheet=%s row=%s "
@@ -1383,6 +1415,7 @@ def get_financial_report(month_key: str) -> dict:
 def _build_financial_report(
     month_key: str,
     context: dict[str, object],
+    source_filter: str = FINANCIAL_SOURCE_ALL,
 ) -> dict:
     bookings = _get_financial_booking_records()
     returns = _get_sheet_records_safely(ws_returns, "Возвраты_Касса")
@@ -1587,7 +1620,7 @@ def _build_financial_report(
     def return_revenue(record: dict) -> float:
         return sum(amount for amount, _ in payment_parts(record))
 
-    def source_commission_rate(record: dict) -> float:
+    def booking_source(record: dict) -> str:
         source = str(record.get("Источник", "") or "").strip().casefold()
         client = str(
             record.get("ФИО Клиента")
@@ -1595,14 +1628,19 @@ def _build_financial_report(
             or record.get("Клиент ФИО")
             or ""
         ).strip().casefold()
+        if (
+            source == HEAVY_LUX_SOURCE
+            or "heavy" in client
+            or "хэви" in client
+            or "хеви" in client
+        ):
+            return FINANCIAL_SOURCE_HEAVY_LUX
+        return FINANCIAL_SOURCE_LEON
+
+    def source_commission_rate(record: dict) -> float:
         return (
             HEAVY_LUX_COMMISSION_RATE
-            if (
-                source == HEAVY_LUX_SOURCE
-                or "heavy" in client
-                or "хэви" in client
-                or "хеви" in client
-            )
+            if booking_source(record) == FINANCIAL_SOURCE_HEAVY_LUX
             else 0.0
         )
 
@@ -1707,6 +1745,12 @@ def _build_financial_report(
             or "Прочее"
         ).strip() or "Прочее"
 
+    def financial_source_matches(record: dict) -> bool:
+        return (
+            source_filter == FINANCIAL_SOURCE_ALL
+            or booking_source(record) == source_filter
+        )
+
     month_returns = [
         record
         for record in returns
@@ -1729,7 +1773,57 @@ def _build_financial_report(
             "Дата начала",
             "Дата начала (ГГГГ-ММ-ДД)",
         )
+        and financial_source_matches(record)
     ]
+
+    source_car_identifiers: set[str] = set()
+    if source_filter != FINANCIAL_SOURCE_ALL:
+        for record in month_bookings:
+            if not booking_payment_parts(record):
+                continue
+            for value in (
+                booking_car_id(record),
+                record.get("Автомобиль"),
+                record.get("Авто"),
+                record.get("Название авто"),
+                record.get("Марка и Модель"),
+                record.get("Госномер"),
+                record.get("Номер авто"),
+                record.get("Номер"),
+            ):
+                normalized = str(value or "").strip().casefold()
+                if normalized:
+                    source_car_identifiers.add(normalized)
+        for car in cars:
+            normalized_identifiers = {
+                str(value or "").strip().casefold()
+                for value in (car_id(car), car_plate(car), car_name(car))
+                if str(value or "").strip()
+            }
+            if normalized_identifiers & source_car_identifiers:
+                source_car_identifiers.update(normalized_identifiers)
+
+    def expense_matches_source(record: dict) -> bool:
+        if source_filter == FINANCIAL_SOURCE_ALL:
+            return True
+        if is_general_expense(record):
+            return False
+        vehicle = expense_vehicle(record)
+        if not vehicle or not source_car_identifiers:
+            return False
+        return any(
+            (
+                identifier == vehicle
+                if identifier.isdigit()
+                else (
+                    identifier == vehicle
+                    or identifier in vehicle
+                    or vehicle in identifier
+                )
+            )
+            for identifier in source_car_identifiers
+        )
+
     payment_breakdown = {
         "Наличные": 0.0,
         "Безнал": 0.0,
@@ -1747,32 +1841,47 @@ def _build_financial_report(
     direct_expenses = int(round(sum(
         safe_float(cell(record, "Сумма (RUB)", default=""))
         for record in month_expenses
-        if not is_general_expense(record)
+        if (
+            not is_general_expense(record)
+            and expense_matches_source(record)
+        )
     )))
     general_expenses = int(round(sum(
         safe_float(cell(record, "Сумма (RUB)", default=""))
         for record in month_expenses
-        if is_general_expense(record)
+        if (
+            source_filter == FINANCIAL_SOURCE_ALL
+            and is_general_expense(record)
+        )
     )))
     ksenia_salary = 0
     total_expenses = direct_expenses + general_expenses
     company_revenue = gross_income - partner_fee
     company_profit = company_revenue - total_expenses
 
+    car_gross_income: dict[str, float] = {}
+    car_partner_fee: dict[str, float] = {}
     car_income: dict[str, float] = {}
     car_mileage: dict[str, int] = {}
     for record in month_bookings:
         car_key = booking_car_id(record)
         if car_key:
-            car_income[car_key] = car_income.get(car_key, 0) + sum(
-                net_income_for_payment(record, amount)
-                for amount, _ in booking_payment_parts(record)
-            )
+            for amount, _ in booking_payment_parts(record):
+                fee = amount * source_commission_rate(record)
+                car_gross_income[car_key] = (
+                    car_gross_income.get(car_key, 0) + amount
+                )
+                car_partner_fee[car_key] = (
+                    car_partner_fee.get(car_key, 0) + fee
+                )
+                car_income[car_key] = car_income.get(car_key, 0) + (
+                    amount - fee
+                )
 
     car_expenses: dict[str, int] = {}
     car_expenses_by_category: dict[str, dict[str, int]] = {}
     for record in month_expenses:
-        if is_general_expense(record):
+        if not expense_matches_source(record):
             continue
         vehicle = expense_vehicle(record)
         amount = _number(record.get("Сумма (RUB)"))
@@ -1788,61 +1897,78 @@ def _build_financial_report(
         stable_car_id = car_id(car) or plate_display
         car_key = normalized_identifier(stable_car_id)
         display_name = car_name(car)
+        if (
+            source_filter != FINANCIAL_SOURCE_ALL
+            and car_key not in source_car_identifiers
+            and plate_key not in source_car_identifiers
+        ):
+            continue
+        car_gross = car_gross_income.get(car_key, 0)
+        car_fee = car_partner_fee.get(car_key, 0)
         income = car_income.get(car_key, 0)
         costs = car_expenses.get(plate_key, 0)
-        car_rows.append(
-            {
-                "Месяц (ГГГГ-ММ)": month_key,
-                "ID Авто": stable_car_id,
-                "Марка и Модель": display_name,
-                "Госномер": plate_display,
-                "Приход / Выручка (RUB)": income,
-                "Затраты на авто (RUB)": costs,
-                "Расходы по статьям": dict(
-                    sorted(car_expenses_by_category.get(plate_key, {}).items())
-                ),
-                "Пробег за месяц (км)": car_mileage.get(plate_key, 0),
-                "Чистая прибыль авто (RUB)": income - costs,
-            }
-        )
-
-    try:
-        _upsert_record(
-            ws_monthly_summary,
-            "Месяц (ГГГГ-ММ)",
-            month_key,
-            {
-                "Месяц (ГГГГ-ММ)": month_key,
-                "Общий приход (RUB)": gross_income,
-                "Партнёрская комиссия heavy_lux_cr (RUB)": partner_fee,
-                "Прямые расходы (RUB)": direct_expenses,
-                "Общие расходы компании (RUB)": general_expenses,
-                "ЗП Ксении (10%) (RUB)": ksenia_salary,
-                "Итого расходы (RUB)": total_expenses,
-                "Чистая прибыль компании (RUB)": company_profit,
-            },
-            MONTHLY_SUMMARY_HEADERS,
-        )
-        for row in car_rows:
-            _upsert_record_by_keys(
-                ws_car_profit_summary,
-                ("Месяц (ГГГГ-ММ)", "ID Авто"),
-                (month_key, row["ID Авто"]),
-                row,
-                CAR_PROFIT_SUMMARY_HEADERS,
+        car_row = {
+            "Месяц (ГГГГ-ММ)": month_key,
+            "ID Авто": stable_car_id,
+            "Марка и Модель": display_name,
+            "Госномер": plate_display,
+            "Приход / Выручка (RUB)": income,
+            "Затраты на авто (RUB)": costs,
+            "Расходы по статьям": dict(
+                sorted(car_expenses_by_category.get(plate_key, {}).items())
+            ),
+            "Пробег за месяц (км)": car_mileage.get(plate_key, 0),
+            "Чистая прибыль авто (RUB)": income - costs,
+        }
+        if source_filter == FINANCIAL_SOURCE_HEAVY_LUX:
+            car_row.update(
+                {
+                    "Валовый сбор (RUB)": car_gross,
+                    "Комиссия heavy_lux_cr (RUB)": car_fee,
+                    "Доля Leon Rental (70%) (RUB)": income,
+                }
             )
-    except gspread.exceptions.APIError as error:
-        if "429" not in str(error):
-            raise
-        logger.warning(
-            "Financial report %s calculated successfully, but summary "
-            "persistence was skipped because Google Sheets write quota "
-            "was exceeded: %s",
-            month_key,
-            error,
-        )
+        car_rows.append(car_row)
+
+    if source_filter == FINANCIAL_SOURCE_ALL:
+        try:
+            _upsert_record(
+                ws_monthly_summary,
+                "Месяц (ГГГГ-ММ)",
+                month_key,
+                {
+                    "Месяц (ГГГГ-ММ)": month_key,
+                    "Общий приход (RUB)": gross_income,
+                    "Партнёрская комиссия heavy_lux_cr (RUB)": partner_fee,
+                    "Прямые расходы (RUB)": direct_expenses,
+                    "Общие расходы компании (RUB)": general_expenses,
+                    "ЗП Ксении (10%) (RUB)": ksenia_salary,
+                    "Итого расходы (RUB)": total_expenses,
+                    "Чистая прибыль компании (RUB)": company_profit,
+                },
+                MONTHLY_SUMMARY_HEADERS,
+            )
+            for row in car_rows:
+                _upsert_record_by_keys(
+                    ws_car_profit_summary,
+                    ("Месяц (ГГГГ-ММ)", "ID Авто"),
+                    (month_key, row["ID Авто"]),
+                    row,
+                    CAR_PROFIT_SUMMARY_HEADERS,
+                )
+        except gspread.exceptions.APIError as error:
+            if "429" not in str(error):
+                raise
+            logger.warning(
+                "Financial report %s calculated successfully, but summary "
+                "persistence was skipped because Google Sheets write quota "
+                "was exceeded: %s",
+                month_key,
+                error,
+            )
     return {
         "month": month_key,
+        "source_filter": source_filter,
         "gross_income": int(round(gross_income)),
         "company_revenue": int(round(company_revenue)),
         "client_payments": int(round(gross_income)),
