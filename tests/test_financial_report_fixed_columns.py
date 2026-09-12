@@ -79,7 +79,7 @@ class FinancialReportFixedColumnsTest(unittest.TestCase):
             7: "0",
             11: "В аренде",
             12: "25000",
-            14: "СБП",
+            14: "Без оплаты",
         })
         bookings_sheet = _FakeSheet(
             [headers, booking_113, booking_116, booking_107, booking_117]
@@ -124,8 +124,8 @@ class FinancialReportFixedColumnsTest(unittest.TestCase):
         self.assertEqual(report["company_revenue"], 136500)
         self.assertEqual(report["company_profit"], 125300)
         self.assertEqual(report["payment_breakdown"]["Безнал"], 150000)
-        self.assertEqual(report["payment_breakdown"]["Наличные"], 14000)
-        self.assertEqual(report["payment_breakdown"]["СБП"], 25000)
+        self.assertEqual(report["payment_breakdown"]["Наличные"], 39000)
+        self.assertEqual(report["payment_breakdown"]["СБП"], 0)
 
         urus = next(
             row

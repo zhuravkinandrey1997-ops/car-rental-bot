@@ -1610,6 +1610,9 @@ def _build_financial_report(
         return amount * (1 - source_commission_rate(record))
 
     def booking_payment_parts(record: dict) -> list[tuple[float, str]]:
+        status = str(record.get("Статус", "") or "").strip().casefold()
+        if status not in {"завершена", "в аренде"}:
+            return []
         accepted_amount = safe_float(record.get("__accepted_rental_m"))
         if accepted_amount <= 0:
             accepted_amount = safe_float(record.get("__accepted_total_at"))
@@ -1617,7 +1620,10 @@ def _build_financial_report(
             return []
         method = normalize_payment_method(record.get("__payment_method_o"))
         if method == "Без оплаты":
-            return []
+            # A positive accepted amount in M/AT is an actual received
+            # payment even when the legacy payment-method cell was not
+            # updated. Keep it in revenue and classify it as cash.
+            method = "Наличные"
         return [
             (
                 accepted_amount,
