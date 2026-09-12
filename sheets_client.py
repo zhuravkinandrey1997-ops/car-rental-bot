@@ -528,37 +528,44 @@ def get_available_cars(start_date_str: str, end_date_str: str):
         "Бронирования",
     )
     busy_car_ids: set[str] = set()
-    rented_car_ids, rented_car_plates = _open_rental_car_identifiers(
-        all_bookings
-    )
-    busy_car_ids.update(rented_car_ids)
     for b in all_bookings:
-        if b.get("Статус") == "Подтверждена":
-            try:
-                b_start = datetime.datetime.strptime(str(b.get("Дата начала (ГГГГ-ММ-ДД)")), "%Y-%m-%d").date()
-                b_end = datetime.datetime.strptime(str(b.get("Дата окончания (ГГГГ-ММ-ДД)")), "%Y-%m-%d").date()
-                if req_start <= b_end and req_end >= b_start:
-                    busy_car_ids.add(
-                        _normalized_car_identifier(
-                            b.get("ID Авто") or b.get("Car ID")
-                        )
+        status = str(b.get("Статус", "")).strip().casefold()
+        if status not in {"подтверждена", "в аренде"}:
+            continue
+        b_start = _first_booking_date(
+            b,
+            "Дата выдачи",
+            "Дата выдачи (ГГГГ-ММ-ДД)",
+            "Дата начала (ГГГГ-ММ-ДД)",
+            "Дата начала",
+        )
+        b_end = _first_booking_date(
+            b,
+            "Плановое окончание",
+            "Плановая дата и время окончания",
+            "Дата окончания (ГГГГ-ММ-ДД)",
+            "Дата окончания",
+        )
+        if b_start is None or b_end is None:
+            # A live rental without a known end remains conservatively busy.
+            if status == "в аренде":
+                busy_car_ids.add(
+                    _normalized_car_identifier(
+                        b.get("ID Авто") or b.get("Car ID")
                     )
-            except ValueError:
-                continue
+                )
+            continue
+        if req_start <= b_end and req_end >= b_start:
+            busy_car_ids.add(
+                _normalized_car_identifier(
+                    b.get("ID Авто") or b.get("Car ID")
+                )
+            )
     available_cars = []
     for car in all_cars:
         car_id = _normalized_car_identifier(car.get("ID"))
-        car_plate = str(
-            car.get("Госномер")
-            or car.get("Номер авто")
-            or car.get("Номер")
-            or ""
-        ).strip().casefold()
-        if (
-            car_id in busy_car_ids
-            or car_plate in rented_car_plates
-            or car.get("Статус") != "Активен"
-        ):
+        status = str(car.get("Статус", "") or "").strip().casefold()
+        if car_id in busy_car_ids or status in {"в ремонте", "списан"}:
             continue
         available_cars.append(car)
     return available_cars
@@ -746,6 +753,11 @@ def _get_financial_booking_records() -> list[dict]:
         record["__accepted_total_at"] = (
             row[BOOKING_ACCEPTED_TOTAL_COLUMN - 1]
             if len(row) >= BOOKING_ACCEPTED_TOTAL_COLUMN
+            else ""
+        )
+        record["__payment_method_o"] = (
+            row[15 - 1]
+            if len(row) >= 15
             else ""
         )
     return records
@@ -1258,16 +1270,22 @@ def _build_financial_report(
 
     def normalize_payment_method(value: object) -> str:
         normalized = str(value or "").strip().casefold()
+        if (
+            not normalized
+            or "без оплат" in normalized
+            or "не оплач" in normalized
+        ):
+            return "Без оплаты"
         if "сбп" in normalized:
             return "СБП"
-        if "нал" in normalized or "cash" in normalized:
-            return "Наличные"
         if (
             "безнал" in normalized
             or "карта" in normalized
             or "перевод" in normalized
         ):
             return "Безнал"
+        if "нал" in normalized or "cash" in normalized:
+            return "Наличные"
         return "Безнал"
 
     def first_matching_value(record: dict, fragment: str) -> object:
@@ -1419,9 +1437,20 @@ def _build_financial_report(
 
     def source_commission_rate(record: dict) -> float:
         source = str(record.get("Источник", "") or "").strip().casefold()
+        client = str(
+            record.get("ФИО Клиента")
+            or record.get("Клиент")
+            or record.get("Клиент ФИО")
+            or ""
+        ).strip().casefold()
         return (
             HEAVY_LUX_COMMISSION_RATE
-            if source == HEAVY_LUX_SOURCE
+            if (
+                source == HEAVY_LUX_SOURCE
+                or "heavy" in client
+                or "хэви" in client
+                or "хеви" in client
+            )
             else 0.0
         )
 
@@ -1434,16 +1463,13 @@ def _build_financial_report(
             accepted_amount = safe_float(record.get("__accepted_total_at"))
         if not accepted_amount:
             return []
+        method = normalize_payment_method(record.get("__payment_method_o"))
+        if method == "Без оплаты":
+            return []
         return [
             (
                 accepted_amount,
-                normalize_payment_method(
-                    cell(
-                        record,
-                        "Способ оплаты",
-                        default="Без оплаты",
-                    )
-                ),
+                method,
             )
         ]
 
@@ -1556,10 +1582,9 @@ def _build_financial_report(
     for record in month_bookings:
         for amount, method in booking_payment_parts(record):
             partner_fee += amount * source_commission_rate(record)
-            net_amount = net_income_for_payment(record, amount)
-            gross_income += net_amount
+            gross_income += amount
             payment_breakdown[method] = (
-                payment_breakdown.get(method, 0.0) + net_amount
+                payment_breakdown.get(method, 0.0) + amount
             )
     direct_expenses = int(round(sum(
         safe_float(cell(record, "Сумма (RUB)", default=""))
@@ -1573,7 +1598,8 @@ def _build_financial_report(
     )))
     ksenia_salary = 0
     total_expenses = direct_expenses + general_expenses
-    company_profit = gross_income - total_expenses
+    company_revenue = gross_income - partner_fee
+    company_profit = company_revenue - total_expenses
 
     car_income: dict[str, float] = {}
     car_mileage: dict[str, int] = {}
@@ -1660,7 +1686,8 @@ def _build_financial_report(
     return {
         "month": month_key,
         "gross_income": int(round(gross_income)),
-        "client_payments": int(round(gross_income + partner_fee)),
+        "company_revenue": int(round(company_revenue)),
+        "client_payments": int(round(gross_income)),
         "partner_fee": int(round(partner_fee)),
         "direct_expenses": direct_expenses,
         "general_expenses": general_expenses,

@@ -29,8 +29,9 @@ class FinancialReportFixedColumnsTest(unittest.TestCase):
         headers[0] = "ID Брони"
         headers[1] = "ID Авто"
         headers[3] = "Дата начала"
+        headers[5] = "ФИО Клиента"
         headers[7] = "Сумма брони (RUB)"
-        headers[8] = "Способ оплаты"
+        headers[14] = "Способ оплаты"
         headers[11] = "Статус"
         headers[12] = "Принятая сумма аренды"
         headers[18] = "Источник"
@@ -42,7 +43,7 @@ class FinancialReportFixedColumnsTest(unittest.TestCase):
             1: "7",
             3: "2026-09-05",
             7: "0",
-            8: "Карта",
+            14: "Карта",
             11: "Завершена",
             12: "70000",
             18: "Леон Рентал",
@@ -53,18 +54,42 @@ class FinancialReportFixedColumnsTest(unittest.TestCase):
             1: "7",
             3: "2026-09-06",
             7: "0",
-            8: "Карта",
+            14: "Карта",
             11: "Завершена",
             12: "0",
             18: "Леон Рентал",
             45: "80000",
             69: "heavy_lux_cr",
         })
-        bookings_sheet = _FakeSheet([headers, booking_113, booking_116])
+        booking_107 = _wide_row({
+            0: "107",
+            1: "8",
+            3: "2026-09-07",
+            5: "Клиент Dodge",
+            7: "0",
+            11: "В аренде",
+            12: "14000",
+            14: "Наличные",
+        })
+        booking_117 = _wide_row({
+            0: "117",
+            1: "9",
+            3: "2026-09-07",
+            5: "Хэви люкс",
+            7: "0",
+            11: "В аренде",
+            12: "25000",
+            14: "СБП",
+        })
+        bookings_sheet = _FakeSheet(
+            [headers, booking_113, booking_116, booking_107, booking_117]
+        )
         cars_sheet = _FakeSheet(
             [
                 ["ID", "Марка и Модель", "Госномер"],
                 ["7", "Lamborghini Urus", "URUS-1"],
+                ["8", "Dodge Challenger", "DODGE-1"],
+                ["9", "Jaguar F-Type", "JAG-1"],
             ]
         )
         returns_sheet = _FakeSheet([["Дата возврата"]])
@@ -80,17 +105,27 @@ class FinancialReportFixedColumnsTest(unittest.TestCase):
             patch.object(sheets_client, "ws_cars", cars_sheet),
             patch.object(sheets_client, "ws_returns", returns_sheet),
             patch.object(sheets_client, "ws_expenses", expenses_sheet),
-            patch.object(sheets_client, "_upsert_record"),
+            patch.object(sheets_client, "_upsert_record") as upsert_record,
             patch.object(sheets_client, "_upsert_record_by_keys"),
         ):
             report = sheets_client.get_financial_report("2026-09")
 
+        summary = upsert_record.call_args.args[3]
+        self.assertEqual(summary["Общий приход (RUB)"], 189000)
+        self.assertEqual(
+            summary["Партнёрская комиссия heavy_lux_cr (RUB)"],
+            52500,
+        )
+        self.assertEqual(summary["Чистая прибыль компании (RUB)"], 125300)
         self.assertEqual(bookings_sheet.requested_range, "A1:BT1000")
-        self.assertEqual(report["client_payments"], 150000)
-        self.assertEqual(report["partner_fee"], 45000)
-        self.assertEqual(report["gross_income"], 105000)
-        self.assertEqual(report["company_profit"], 93800)
-        self.assertEqual(report["payment_breakdown"]["Безнал"], 105000)
+        self.assertEqual(report["client_payments"], 189000)
+        self.assertEqual(report["partner_fee"], 52500)
+        self.assertEqual(report["gross_income"], 189000)
+        self.assertEqual(report["company_revenue"], 136500)
+        self.assertEqual(report["company_profit"], 125300)
+        self.assertEqual(report["payment_breakdown"]["Безнал"], 150000)
+        self.assertEqual(report["payment_breakdown"]["Наличные"], 14000)
+        self.assertEqual(report["payment_breakdown"]["СБП"], 25000)
 
         urus = next(
             row
@@ -100,6 +135,13 @@ class FinancialReportFixedColumnsTest(unittest.TestCase):
         self.assertEqual(urus["Приход / Выручка (RUB)"], 105000)
         self.assertEqual(urus["Затраты на авто (RUB)"], 11200)
         self.assertEqual(urus["Чистая прибыль авто (RUB)"], 93800)
+
+        jaguar = next(
+            row
+            for row in report["cars"]
+            if row["ID Авто"] == "9"
+        )
+        self.assertEqual(jaguar["Приход / Выручка (RUB)"], 17500)
 
 
 if __name__ == "__main__":
