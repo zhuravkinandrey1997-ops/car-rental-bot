@@ -123,7 +123,6 @@ class BookingForm(StatesGroup):
     issuance_booking = State()
     direct_car_confirmation = State()
     issue_date = State()
-    issue_custom_date = State()
     issue_time = State()
     start_date = State()
     end_date = State()
@@ -231,6 +230,7 @@ def calendar_keyboard(
     flow: str,
     stage: str,
     minimum_date: datetime.date | None = None,
+    maximum_date: datetime.date | None = None,
     year: int | None = None,
     month: int | None = None,
     occupied_dates: dict[str, list[str]] | None = None,
@@ -245,6 +245,9 @@ def calendar_keyboard(
     month = month or (minimum_date or datetime.date.today()).month
     minimum_month = (
         (minimum_date.year, minimum_date.month) if minimum_date else None
+    )
+    maximum_month = (
+        (maximum_date.year, maximum_date.month) if maximum_date else None
     )
     previous_year, previous_month = _shift_month(year, month, -1)
     next_year, next_month = _shift_month(year, month, 1)
@@ -291,6 +294,10 @@ def calendar_keyboard(
                 callback_data=(
                     "calendar:noop"
                     if locked
+                    or (
+                        maximum_month is not None
+                        and (next_year, next_month) > maximum_month
+                    )
                     else f"calendar:{flow}:{stage}:{next_year}:{next_month}"
                 ),
             ),
@@ -353,6 +360,8 @@ def calendar_keyboard(
                 )
             elif minimum_date and current_date < minimum_date:
                 row.append(InlineKeyboardButton(text="·", callback_data="calendar:noop"))
+            elif maximum_date and current_date > maximum_date:
+                row.append(InlineKeyboardButton(text="·", callback_data="calendar:noop"))
             else:
                 row.append(
                     InlineKeyboardButton(
@@ -366,6 +375,17 @@ def calendar_keyboard(
 
 
 def _calendar_prompt(flow: str, stage: str, minimum_date: datetime.date | None = None) -> str:
+    if flow == "issuance" and stage == "issue":
+        return (
+            "📅 Выберите дату фактической выдачи в календаре.\n"
+            "Прошедшие даты доступны для оформления задним числом. "
+            "Будущие даты недоступны."
+        )
+    if flow == "issuance" and stage == "end":
+        return (
+            f"🟢 Дата выдачи: {format_date_ru(minimum_date.isoformat())}. "
+            "Теперь выберите дату окончания аренды:"
+        )
     minimum_text = ""
     if minimum_date:
         minimum_text = (
@@ -600,22 +620,19 @@ def delivery_choice_keyboard() -> InlineKeyboardMarkup:
 
 
 def issuance_date_keyboard() -> InlineKeyboardMarkup:
+    current_time = _now_moscow().strftime("%H:%M")
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📅 Сегодня",
-                    callback_data="issue_date_today",
-                ),
-                InlineKeyboardButton(
-                    text="📅 Вчера",
-                    callback_data="issue_date_yesterday",
+                    text=f"⏱ Сейчас ({current_time})",
+                    callback_data="issue_date_now",
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text="🗓 Другая дата",
-                    callback_data="issue_date_custom",
+                    callback_data="issue_date_calendar",
                 )
             ],
         ]
@@ -5553,9 +5570,20 @@ def _calendar_minimum_date(
 ) -> datetime.date | None:
     if flow == "occupancy":
         return None
+    if flow == "issuance" and stage == "issue":
+        return None
     if stage == "end" and data.get("start_date"):
         return datetime.date.fromisoformat(data["start_date"])
     return datetime.date.today()
+
+
+def _calendar_maximum_date(
+    flow: str,
+    stage: str,
+) -> datetime.date | None:
+    if flow == "issuance" and stage == "issue":
+        return _now_moscow().date()
+    return None
 
 
 async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
@@ -5581,6 +5609,8 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
         ("booking", "start"): BookingForm.start_date.state,
         ("booking", "end"): BookingForm.end_date.state,
         ("occupancy", "calendar"): OccupancyForm.calendar.state,
+        ("issuance", "issue"): BookingForm.issue_date.state,
+        ("issuance", "end"): BookingForm.direct_end_date.state,
     }
     expected_state = expected_states.get((flow, stage))
     current_state = await state.get_state()
@@ -5608,6 +5638,7 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
         )
         return
     minimum_date = _calendar_minimum_date(flow, stage, data)
+    maximum_date = _calendar_maximum_date(flow, stage)
     message = callback.message
 
     if len(parts) == 5 and parts[3] not in ("day", "busy"):
@@ -5623,6 +5654,7 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
                 flow,
                 stage,
                 minimum_date=minimum_date,
+                maximum_date=maximum_date,
                 year=year,
                 month=month,
                 allow_past=flow == "occupancy",
@@ -5698,6 +5730,9 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
     if minimum_date and selected_date < minimum_date:
         await callback.answer("Эта дата недоступна для выбора.", show_alert=True)
         return
+    if maximum_date and selected_date > maximum_date:
+        await callback.answer("Будущая дата недоступна для выбора.", show_alert=True)
+        return
 
     selected_value = selected_date.isoformat()
     if flow == "occupancy" and stage == "calendar":
@@ -5706,6 +5741,23 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
         )
         return
     await callback.answer()
+
+    if flow == "issuance" and stage == "issue":
+        await state.update_data(issue_date=selected_value)
+        await state.set_state(BookingForm.issue_time)
+        await message.edit_text(
+            f"Дата выдачи: {format_date_ru(selected_value)}.\n"
+            "Введите время выдачи в формате ЧЧ:ММ:"
+        )
+        return
+
+    if flow == "issuance" and stage == "end":
+        await message.edit_text(
+            f"Период выбран: {format_date_ru(data['start_date'])} — "
+            f"{format_date_ru(selected_value)}"
+        )
+        await _complete_direct_end_date(message, state, selected_value)
+        return
 
     if flow == "availability" and stage == "start":
         await state.update_data(start_date=selected_value)
@@ -5877,12 +5929,23 @@ async def _complete_issue_datetime(
         backdated=issued_at < now,
     )
     await state.set_state(BookingForm.direct_end_date)
-    await message.answer(
+    calendar_message = await message.answer(
         "Фактическая выдача: "
         f"{_format_datetime_ru(issued_at_text)}"
         f"{' (Оформлено задним числом)' if issued_at < now else ''}\n\n"
-        "Введите дату окончания аренды в формате ГГГГ-ММ-ДД:"
+        + _calendar_prompt(
+            "issuance",
+            "end",
+            issued_at.date(),
+        ),
+        reply_markup=calendar_keyboard(
+            "issuance",
+            "end",
+            minimum_date=issued_at.date(),
+            selected_start_date=issued_at.date(),
+        ),
     )
+    await state.update_data(calendar_message_id=calendar_message.message_id)
 
 
 async def issuance_date_callback(
@@ -5890,9 +5953,8 @@ async def issuance_date_callback(
     state: FSMContext,
 ) -> None:
     if not callback.message or callback.data not in {
-        "issue_date_today",
-        "issue_date_yesterday",
-        "issue_date_custom",
+        "issue_date_now",
+        "issue_date_calendar",
     }:
         await callback.answer()
         return
@@ -5904,38 +5966,19 @@ async def issuance_date_callback(
         return
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
-    if callback.data == "issue_date_today":
+    if callback.data == "issue_date_now":
         await _complete_issue_datetime(callback.message, state, _now_moscow())
         return
-    if callback.data == "issue_date_yesterday":
-        yesterday = _now_moscow().date() - datetime.timedelta(days=1)
-        await state.update_data(issue_date=yesterday.isoformat())
-        await state.set_state(BookingForm.issue_time)
-        await callback.message.answer(
-            "Введите время выдачи за вчера в формате ЧЧ:ММ:"
-        )
-        return
-    await state.set_state(BookingForm.issue_custom_date)
-    await callback.message.answer(
-        "Введите дату выдачи в формате ДД.ММ.ГГГГ:"
+    calendar_message = await callback.message.answer(
+        _calendar_prompt("issuance", "issue"),
+        reply_markup=calendar_keyboard(
+            "issuance",
+            "issue",
+            maximum_date=_now_moscow().date(),
+            allow_past=True,
+        ),
     )
-
-
-async def issue_custom_date(message: Message, state: FSMContext) -> None:
-    try:
-        selected_date = datetime.datetime.strptime(
-            (message.text or "").strip(),
-            "%d.%m.%Y",
-        ).date()
-    except ValueError:
-        await message.answer("Неверный формат. Пример: 03.09.2026.")
-        return
-    if selected_date > _now_moscow().date():
-        await message.answer("Дата выдачи не может быть в будущем.")
-        return
-    await state.update_data(issue_date=selected_date.isoformat())
-    await state.set_state(BookingForm.issue_time)
-    await message.answer("Введите время выдачи в формате ЧЧ:ММ:")
+    await state.update_data(calendar_message_id=calendar_message.message_id)
 
 
 async def issue_time(message: Message, state: FSMContext) -> None:
@@ -6087,14 +6130,14 @@ async def booking_delivery_price(
     await message.answer("Введите итоговую стоимость аренды в RUB:")
 
 
-async def direct_end_date(message: Message, state: FSMContext) -> None:
-    value = (message.text or "").strip()
-    if not _parse_date(value):
-        await message.answer("Неверный формат. Пример: 2026-09-20.")
-        return
-    selected_date = datetime.date.fromisoformat(value)
+async def _complete_direct_end_date(
+    message: Message,
+    state: FSMContext,
+    value: str,
+) -> None:
     data = await state.get_data()
     start_date = datetime.date.fromisoformat(data["start_date"])
+    selected_date = datetime.date.fromisoformat(value)
     if selected_date < start_date:
         await message.answer("Дата окончания не может быть раньше даты выдачи.")
         return
@@ -6120,6 +6163,27 @@ async def direct_end_date(message: Message, state: FSMContext) -> None:
         return
     await state.set_state(BookingForm.price)
     await message.answer("Введите фактическую сумму аренды в RUB:")
+
+
+async def direct_end_date(message: Message, state: FSMContext) -> None:
+    """Keep typed input from breaking the flow, but require calendar selection."""
+    data = await state.get_data()
+    try:
+        start_date = datetime.date.fromisoformat(data["start_date"])
+    except (KeyError, TypeError, ValueError):
+        await message.answer("Дата выдачи потеряна. Начните выдачу заново.")
+        await state.clear()
+        return
+    calendar_message = await message.answer(
+        _calendar_prompt("issuance", "end", start_date),
+        reply_markup=calendar_keyboard(
+            "issuance",
+            "end",
+            minimum_date=start_date,
+            selected_start_date=start_date,
+        ),
+    )
+    await state.update_data(calendar_message_id=calendar_message.message_id)
 
 
 async def booking_price(message: Message, state: FSMContext) -> None:
@@ -7852,7 +7916,7 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(
         issuance_date_callback,
         F.data.in_(
-            {"issue_date_today", "issue_date_yesterday", "issue_date_custom"}
+            {"issue_date_now", "issue_date_calendar"}
         ),
     )
     dispatcher.callback_query.register(
@@ -7980,7 +8044,6 @@ def create_dispatcher() -> Dispatcher:
         issuance_mode_selection,
         BookingForm.issuance_mode,
     )
-    dispatcher.message.register(issue_custom_date, BookingForm.issue_custom_date)
     dispatcher.message.register(issue_time, BookingForm.issue_time)
     dispatcher.message.register(direct_end_date, BookingForm.direct_end_date)
     dispatcher.message.register(

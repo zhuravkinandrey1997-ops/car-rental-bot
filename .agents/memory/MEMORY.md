@@ -3,6 +3,7 @@
 - [Rental return timing](rental-return-timing.md) — date-only bookings use 23:59 on the end date as the planned return time for late-fee calculations.
 - [Booking status transitions](booking-status-transitions.md) — only confirmed reservations may be cancelled; issued rentals must stay in the return workflow.
 - [Evening notification delivery](evening-notification-delivery.md) — use one scheduler process, persisted per-recipient dates, and at-least-once delivery with evening retries.
+- [Telegram calendar validation](telegram-calendar-validation.md) — validate inline-calendar dates again in callbacks; disabled cells are not an integrity boundary.
 - [Rental financial separation](deposit-settlement.md) — booking prepayment reduces rent; insurance deposit covers only return penalties and must remain separate.
 - [Return act idempotency](return-act-idempotency.md) — multi-sheet return writes use booking ID as the retry key and set completion status last.
 - [Financial report revenue](financial-report-revenue.md) — profit and Ksenia's 10% use actual received return income, not accrued rental cost.
