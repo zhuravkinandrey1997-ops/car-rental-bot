@@ -91,6 +91,7 @@ NOTIFY_MANAGERS = [661842368, 952125424, 1574781782]
 PARTNER_ID = 226694751
 PARTNER_CAR_KEYWORD = "Dodge"
 HEAVY_LUX_PARTNER_ROLE = "partner_heavy_lux"
+ADMIN_PLUS_ROLE = "администратор плюс"
 HEAVY_LUX_PARTNER_SOURCE = "heavy_lux_cr"
 LEON_RENTAL_SOURCE = "Леон Рентал"
 SOURCE_SELECTION_PROMPT = "От чьего имени оформляется операция?"
@@ -489,20 +490,17 @@ def get_main_keyboard(
             KeyboardButton(text="🔎 Проверка броней"),
         ],
     ]
-    if normalized_role in {"администратор", "admin"}:
+    if normalized_role in {"администратор", "admin", ADMIN_PLUS_ROLE}:
         buttons.append(
             [
                 KeyboardButton(text="💸 Внести расход"),
                 KeyboardButton(text="📈 Фин. отчет"),
             ]
         )
-        buttons.append(
-            [
-                KeyboardButton(text="❌ Отменить расход"),
-                KeyboardButton(text="📑 Просмотр расходов"),
-            ]
-        )
-    buttons.append([KeyboardButton(text="🚫 Отмена брони")])
+        buttons.append([KeyboardButton(text="📑 Просмотр расходов")])
+    if normalized_role == ADMIN_PLUS_ROLE:
+        buttons.append([KeyboardButton(text="🚫 Отмена брони")])
+        buttons.append([KeyboardButton(text="❌ Отменить расход")])
     buttons.append([KeyboardButton(text="Отмена")])
     return ReplyKeyboardMarkup(
         keyboard=buttons,
