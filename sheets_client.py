@@ -1779,8 +1779,6 @@ def _build_financial_report(
     source_car_identifiers: set[str] = set()
     if source_filter != FINANCIAL_SOURCE_ALL:
         for record in month_bookings:
-            if not booking_payment_parts(record):
-                continue
             for value in (
                 booking_car_id(record),
                 record.get("Автомобиль"),
@@ -1862,10 +1860,12 @@ def _build_financial_report(
     car_gross_income: dict[str, float] = {}
     car_partner_fee: dict[str, float] = {}
     car_income: dict[str, float] = {}
+    car_booking_count: dict[str, int] = {}
     car_mileage: dict[str, int] = {}
     for record in month_bookings:
         car_key = booking_car_id(record)
         if car_key:
+            car_booking_count[car_key] = car_booking_count.get(car_key, 0) + 1
             for amount, _ in booking_payment_parts(record):
                 fee = amount * source_commission_rate(record)
                 car_gross_income[car_key] = (
@@ -1912,6 +1912,7 @@ def _build_financial_report(
             "ID Авто": stable_car_id,
             "Марка и Модель": display_name,
             "Госномер": plate_display,
+            "Количество сдач": car_booking_count.get(car_key, 0),
             "Приход / Выручка (RUB)": income,
             "Затраты на авто (RUB)": costs,
             "Расходы по статьям": dict(
@@ -1969,6 +1970,7 @@ def _build_financial_report(
     return {
         "month": month_key,
         "source_filter": source_filter,
+        "booking_count": len(month_bookings),
         "gross_income": int(round(gross_income)),
         "company_revenue": int(round(company_revenue)),
         "client_payments": int(round(gross_income)),

@@ -462,6 +462,7 @@ def get_main_keyboard(
                     KeyboardButton(text="🏁 Приём авто"),
                     KeyboardButton(text="🔎 Проверка броней"),
                 ],
+                [KeyboardButton(text="📈 Фин. отчет")],
                 [KeyboardButton(text="Отмена")],
             ],
             resize_keyboard=True,
@@ -3566,6 +3567,52 @@ def _callback_has_finance_access(callback: CallbackQuery) -> bool:
         return False
 
 
+async def ensure_financial_report_access(message: Message) -> bool:
+    """Allow administrators and the isolated Heavy Lux report role."""
+    user = message.from_user
+    if user is None:
+        await message.answer("Не удалось определить пользователя.")
+        return False
+    try:
+        access = _manager_access_for_user(user.id)
+    except Exception:
+        logger.exception("Financial report authorization check failed")
+        await message.answer("Не удалось проверить доступ. Попробуйте ещё раз позже.")
+        return False
+    if not access or not access["active"]:
+        await message.answer(
+            "Доступ ограничен. "
+            f"Ваш Telegram ID: {str(user.id).strip()}. "
+            "Сообщите его администратору."
+        )
+        return False
+    if _normalized_role(access) == HEAVY_LUX_PARTNER_ROLE:
+        return True
+    if _normalized_role(access) not in {"администратор", "admin"}:
+        await message.answer(
+            "Финансовый отчёт доступен только уполномоченным пользователям.",
+            reply_markup=get_main_keyboard(user.id, _normalized_role(access)),
+        )
+        return False
+    return True
+
+
+def _callback_has_financial_report_access(callback: CallbackQuery) -> bool:
+    if callback.from_user is None:
+        return False
+    try:
+        access = _manager_access_for_user(callback.from_user.id)
+        return bool(
+            access
+            and access["active"]
+            and _normalized_role(access)
+            in {HEAVY_LUX_PARTNER_ROLE, "администратор", "admin"}
+        )
+    except Exception:
+        logger.exception("Financial report callback authorization check failed")
+        return False
+
+
 def _format_financial_report(report: dict) -> str:
     payment_breakdown = report.get("payment_breakdown", {})
     source_filter = report.get("source_filter", "all")
@@ -3657,6 +3704,38 @@ def _format_financial_report(report: dict) -> str:
                         f"{_format_number(car['Чистая прибыль авто (RUB)'])} RUB",
                     ]
                 )
+    return "\n".join(lines)
+
+
+def _format_heavy_lux_partner_report(report: dict) -> str:
+    """Format only the financial facts that belong to the Heavy Lux partner."""
+    lines = [
+        f"📈 ФИНАНСОВЫЙ ОТЧЁТ HEAVY LUX ЗА {report['month']}",
+        "",
+        f"🤝 Всего сдач через партнёра: {report.get('booking_count', 0)}",
+        f"💵 Валовый сбор с клиентов: "
+        f"{_format_number(report.get('gross_income', 0))} RUB",
+        f"💎 Ваша комиссия к выплате (30%): "
+        f"{_format_number(report.get('partner_fee', 0))} RUB",
+        "",
+        "🚗 СДАЧИ ПО АВТОМОБИЛЯМ:",
+    ]
+    cars = report.get("cars", [])
+    if not cars:
+        lines.append("Нет сдач за выбранный месяц.")
+        return "\n".join(lines)
+    for car in cars:
+        lines.extend(
+            [
+                "",
+                f"• {_car_report_label(car)}",
+                f"  - Поездок: {car.get('Количество сдач', 0)}",
+                f"  - Оборот: "
+                f"{_format_number(car.get('Валовый сбор (RUB)', 0))} RUB",
+                f"  - Ваша комиссия (30%): "
+                f"{_format_number(car.get('Комиссия heavy_lux_cr (RUB)', 0))} RUB",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -4577,7 +4656,7 @@ async def expense_cancel_confirmation(
 
 
 async def start_financial_report(message: Message, state: FSMContext) -> None:
-    if not await ensure_finance_access(message):
+    if not await ensure_financial_report_access(message):
         return
     await state.clear()
     try:
@@ -4600,6 +4679,7 @@ async def start_financial_report(message: Message, state: FSMContext) -> None:
     await state.update_data(
         financial_months=months,
         financial_month_message_id=selection_message.message_id,
+        financial_partner_mode=is_heavy_lux_partner_user(message.from_user.id),
     )
 
 
@@ -4610,9 +4690,9 @@ async def financial_month_callback(
     if not callback.message or not callback.data:
         await callback.answer()
         return
-    if not _callback_has_finance_access(callback):
+    if not _callback_has_financial_report_access(callback):
         await callback.answer(
-            "У вас нет доступа к финансовым операциям.",
+            "У вас нет доступа к финансовому отчёту.",
             show_alert=True,
         )
         return
@@ -4633,8 +4713,39 @@ async def financial_month_callback(
     if month_key not in data.get("financial_months", []):
         await callback.answer("Недоступный месяц.", show_alert=True)
         return
-    await callback.answer(f"Выбран месяц: {month_key}")
+    await callback.answer(
+        (
+            f"Формирую партнёрский отчёт за {month_key}"
+            if is_heavy_lux_partner_user(callback.from_user.id)
+            else f"Выбран месяц: {month_key}"
+        )
+    )
     await state.update_data(financial_month=month_key)
+    if is_heavy_lux_partner_user(callback.from_user.id):
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await state.clear()
+        try:
+            report = await asyncio.to_thread(
+                get_financial_report,
+                month_key,
+                "heavy_lux_cr",
+            )
+        except Exception:
+            logger.exception(
+                "Could not build Heavy Lux partner report for %s",
+                month_key,
+            )
+            await callback.message.answer(
+                "Не удалось сформировать финансовый отчёт.",
+                reply_markup=get_main_keyboard(callback.from_user.id),
+            )
+            return
+        await _answer_financial_report(
+            callback.message,
+            _format_heavy_lux_partner_report(report),
+            callback.from_user.id,
+        )
+        return
     await state.set_state(FinancialReportForm.report_type)
     await callback.message.edit_text(
         f"Месяц отчёта: {month_key}\n\nВыберите тип финансового отчёта:",

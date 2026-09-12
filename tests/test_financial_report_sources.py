@@ -104,6 +104,7 @@ class FinancialReportSourcesTest(unittest.TestCase):
     def test_heavy_lux_report_shows_collection_commission_and_company_share(self):
         report = self._report("heavy_lux_cr")
 
+        self.assertEqual(report["booking_count"], 1)
         self.assertEqual(report["gross_income"], 20000)
         self.assertEqual(report["partner_fee"], 6000)
         self.assertEqual(report["company_revenue"], 14000)
@@ -112,6 +113,7 @@ class FinancialReportSourcesTest(unittest.TestCase):
         self.assertEqual(report["payment_breakdown"]["Наличные"], 20000)
         self.assertEqual(len(report["cars"]), 1)
         heavy_car = report["cars"][0]
+        self.assertEqual(heavy_car["Количество сдач"], 1)
         self.assertEqual(heavy_car["Валовый сбор (RUB)"], 20000)
         self.assertEqual(heavy_car["Комиссия heavy_lux_cr (RUB)"], 6000)
         self.assertEqual(heavy_car["Доля Leon Rental (70%) (RUB)"], 14000)
