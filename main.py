@@ -3197,6 +3197,37 @@ def _normalized_role(access: dict | None) -> str:
     return str(access.get("role", "") if access else "").strip().lower()
 
 
+def get_user_role(user_id: int) -> str:
+    """Return the normalized role from the Менеджеры access record."""
+    return _normalized_role(_manager_access_for_user(user_id))
+
+
+def _is_admin_plus_user(user_id: int) -> bool:
+    try:
+        return get_user_role(user_id) == ADMIN_PLUS_ROLE
+    except Exception:
+        logger.exception("Admin Plus authorization check failed")
+        return False
+
+
+async def ensure_admin_plus(message: Message) -> bool:
+    user = message.from_user
+    if user is None or not _is_admin_plus_user(user.id):
+        await message.answer(
+            "🚫 Ошибка доступа: отменять брони и расходы может только "
+            "Администратор плюс."
+        )
+        return False
+    return True
+
+
+def _callback_has_admin_plus_access(callback: CallbackQuery) -> bool:
+    return bool(
+        callback.from_user
+        and _is_admin_plus_user(callback.from_user.id)
+    )
+
+
 def is_partner_user(user_id: int) -> bool:
     try:
         access = _manager_access_for_user(user_id)
@@ -3541,7 +3572,11 @@ async def ensure_finance_access(message: Message) -> bool:
             reply_markup=get_main_keyboard(user.id, _normalized_role(access)),
         )
         return False
-    if _normalized_role(access) not in {"администратор", "admin"}:
+    if _normalized_role(access) not in {
+        "администратор",
+        "admin",
+        ADMIN_PLUS_ROLE,
+    }:
         await message.answer(
             "Финансовые операции доступны только уполномоченным менеджерам.",
             reply_markup=get_main_keyboard(user.id, _normalized_role(access)),
@@ -3558,7 +3593,8 @@ def _callback_has_finance_access(callback: CallbackQuery) -> bool:
         return bool(
             access
             and access["active"]
-            and _normalized_role(access) in {"администратор", "admin"}
+            and _normalized_role(access)
+            in {"администратор", "admin", ADMIN_PLUS_ROLE}
         )
     except Exception:
         logger.exception("Finance callback authorization check failed")
@@ -3586,7 +3622,11 @@ async def ensure_financial_report_access(message: Message) -> bool:
         return False
     if _normalized_role(access) == HEAVY_LUX_PARTNER_ROLE:
         return True
-    if _normalized_role(access) not in {"администратор", "admin"}:
+    if _normalized_role(access) not in {
+        "администратор",
+        "admin",
+        ADMIN_PLUS_ROLE,
+    }:
         await message.answer(
             "Финансовый отчёт доступен только уполномоченным пользователям.",
             reply_markup=get_main_keyboard(user.id, _normalized_role(access)),
@@ -3604,7 +3644,12 @@ def _callback_has_financial_report_access(callback: CallbackQuery) -> bool:
             access
             and access["active"]
             and _normalized_role(access)
-            in {HEAVY_LUX_PARTNER_ROLE, "администратор", "admin"}
+            in {
+                HEAVY_LUX_PARTNER_ROLE,
+                "администратор",
+                "admin",
+                ADMIN_PLUS_ROLE,
+            }
         )
     except Exception:
         logger.exception("Financial report callback authorization check failed")
@@ -4525,7 +4570,7 @@ async def start_expense_cancellation(
     message: Message,
     state: FSMContext,
 ) -> None:
-    if not await ensure_finance_access(message):
+    if not await ensure_admin_plus(message):
         return
     await state.clear()
     try:
@@ -4561,9 +4606,10 @@ async def expense_cancel_select_callback(
     if not callback.message or not callback.data:
         await callback.answer()
         return
-    if not _callback_has_finance_access(callback):
+    if not _callback_has_admin_plus_access(callback):
         await callback.answer(
-            "У вас нет доступа к финансовым операциям.",
+            "🚫 Ошибка доступа: отменять брони и расходы может только "
+            "Администратор плюс.",
             show_alert=True,
         )
         return
@@ -4611,7 +4657,7 @@ async def expense_cancel_confirmation(
     message: Message,
     state: FSMContext,
 ) -> None:
-    if not await ensure_finance_access(message):
+    if not await ensure_admin_plus(message):
         return
     if (message.text or "").strip() != "Подтвердить":
         await cancel_flow(message, state)
@@ -5491,7 +5537,7 @@ async def occupancy_car(message: Message, state: FSMContext) -> None:
 
 
 async def start_cancellation(message: Message, state: FSMContext) -> None:
-    if not await ensure_manager(message):
+    if not await ensure_admin_plus(message):
         return
     await state.clear()
     try:
@@ -5518,6 +5564,8 @@ async def start_cancellation(message: Message, state: FSMContext) -> None:
 
 
 async def cancellation_car(message: Message, state: FSMContext) -> None:
+    if not await ensure_admin_plus(message):
+        return
     data = await state.get_data()
     cars = data.get("cars", [])
     try:
@@ -5562,6 +5610,13 @@ async def cancellation_booking_callback(
     if not callback.data or not callback.message:
         await callback.answer()
         return
+    if not _callback_has_admin_plus_access(callback):
+        await callback.answer(
+            "🚫 Ошибка доступа: отменять брони и расходы может только "
+            "Администратор плюс.",
+            show_alert=True,
+        )
+        return
     if await state.get_state() != CancellationForm.booking.state:
         await callback.answer(
             "Этот список устарел. Начните отмену заново.",
@@ -5593,6 +5648,8 @@ async def cancellation_booking_callback(
 
 
 async def cancellation_reason(message: Message, state: FSMContext) -> None:
+    if not await ensure_admin_plus(message):
+        return
     reason = (message.text or "").strip()
     if len(reason) < 2:
         await message.answer("Укажите причину отмены текстом.")
@@ -5614,6 +5671,13 @@ async def cancellation_deposit_callback(
 ) -> None:
     if not callback.data or not callback.message:
         await callback.answer()
+        return
+    if not _callback_has_admin_plus_access(callback):
+        await callback.answer(
+            "🚫 Ошибка доступа: отменять брони и расходы может только "
+            "Администратор плюс.",
+            show_alert=True,
+        )
         return
     if await state.get_state() != CancellationForm.deposit_status.state:
         await callback.answer(
