@@ -720,10 +720,162 @@ def _get_sheet_records_safely(ws, sheet_name: str) -> list[dict]:
     return _records_from_values(ws.get_all_values(), sheet_name)
 
 
+def _is_heavy_lux_booking(source: object = "", client_name: object = "") -> bool:
+    """Return whether a booking belongs to Heavy Lux for row highlighting."""
+    normalized_source = str(source or "").strip().casefold()
+    normalized_client = str(client_name or "").strip().casefold()
+    return (
+        normalized_source == HEAVY_LUX_SOURCE.casefold()
+        or "хэви" in normalized_client
+    )
+
+
+def _booking_color_source(
+    source: object = "",
+    client_name: object = "",
+) -> str:
+    """Normalize a booking source to one of the two row-color categories."""
+    if _is_heavy_lux_booking(source, client_name):
+        return HEAVY_LUX_SOURCE
+    return "Леон Рентал"
+
+
+def _booking_source_from_row(
+    row: list[object],
+    headers: list[object],
+) -> str:
+    """Determine a booking's color source, preferring the fixed BR column."""
+    source = (
+        row[BOOKING_SOURCE_COLUMN - 1]
+        if len(row) >= BOOKING_SOURCE_COLUMN
+        else ""
+    )
+    if not str(source or "").strip():
+        for index, header in enumerate(headers):
+            if str(header or "").strip() == "Источник" and index < len(row):
+                source = row[index]
+    client_name = ""
+    client_headers = {
+        "ФИО Клиента",
+        "Клиент",
+        "Клиент ФИО",
+        "Имя клиента",
+    }
+    for index, header in enumerate(headers):
+        if str(header or "").strip() in client_headers and index < len(row):
+            client_name = row[index]
+            if str(client_name or "").strip():
+                break
+    return _booking_color_source(source, client_name)
+
+
+def _booking_color_end_column(ws, row: list[object] | None = None) -> int:
+    """Return the exclusive zero-based end column for a row color range."""
+    current_grid_width = int(getattr(ws, "col_count", 0) or 0)
+    row_width = len(row or [])
+    return max(
+        BOOKING_COLOR_MIN_END_COLUMN,
+        current_grid_width,
+        row_width,
+    )
+
+
+def _booking_color_request(
+    sheet_id: int,
+    row_index: int,
+    source: object,
+    *,
+    end_column_index: int,
+) -> dict:
+    """Build one Sheets API repeatCell request for a booking row."""
+    if int(row_index) < 2:
+        raise ValueError("Booking row index must point below the header row")
+    color = (
+        HEAVY_LUX_BOOKING_COLOR
+        if _booking_color_source(source) == HEAVY_LUX_SOURCE
+        else LEON_RENTAL_BOOKING_COLOR
+    )
+    return {
+        "repeatCell": {
+            "range": {
+                "sheetId": int(sheet_id),
+                "startRowIndex": int(row_index) - 1,
+                "endRowIndex": int(row_index),
+                "startColumnIndex": BOOKING_COLOR_START_COLUMN,
+                "endColumnIndex": int(end_column_index),
+            },
+            "cell": {
+                "userEnteredFormat": {
+                    "backgroundColor": color,
+                },
+            },
+            "fields": "userEnteredFormat.backgroundColor",
+        }
+    }
+
+
+def colorize_booking_row(
+    spreadsheet_id,
+    sheet_id,
+    row_index,
+    source,
+) -> None:
+    """Color one booking row through Google Sheets spreadsheets.batchUpdate."""
+    del spreadsheet_id  # The bound gspread Spreadsheet already targets this file.
+    request = _booking_color_request(
+        sheet_id,
+        row_index,
+        source,
+        end_column_index=_booking_color_end_column(ws_bookings),
+    )
+    sh.batch_update({"requests": [request]})
+
+
+def colorize_existing_booking_rows() -> int:
+    """Color every existing booking row in one Google Sheets batchUpdate."""
+    all_values = ws_bookings.get_all_values()
+    if len(all_values) <= 1:
+        return 0
+
+    headers = all_values[0]
+    end_column_index = max(
+        BOOKING_COLOR_MIN_END_COLUMN,
+        len(headers),
+        *(len(row) for row in all_values[1:]),
+    )
+    requests = []
+    for row_index, row in enumerate(all_values[1:], start=2):
+        if not any(str(value or "").strip() for value in row):
+            continue
+        requests.append(
+            _booking_color_request(
+                getattr(ws_bookings, "id", 0),
+                row_index,
+                _booking_source_from_row(row, headers),
+                end_column_index=end_column_index,
+            )
+        )
+    if requests:
+        sh.batch_update({"requests": requests})
+    return len(requests)
+
+
 BOOKINGS_FINANCIAL_RANGE = "A1:BT1000"
 BOOKING_ACCEPTED_RENTAL_COLUMN = 13  # M: Принятая сумма аренды
 BOOKING_ACCEPTED_TOTAL_COLUMN = 46  # AT: Фактически принято
 BOOKING_SOURCE_COLUMN = 70  # BR: Источник
+BOOKING_COLOR_START_COLUMN = 0  # A, zero-based Sheets API index
+BOOKING_COLOR_MIN_END_COLUMN = 13  # At least A:M
+HEAVY_LUX_BOOKING_COLOR = {
+    "red": 0.85,
+    "green": 0.95,
+    "blue": 0.85,
+}
+LEON_RENTAL_BOOKING_COLOR = {
+    "red": 0.98,
+    "green": 0.86,
+    "blue": 0.86,
+}
 
 
 def _get_financial_booking_records() -> list[dict]:
@@ -1859,6 +2011,23 @@ def add_new_booking(
             row_to_append,
             value_input_option="USER_ENTERED",
         )
+        booking_row = (
+            int(records[-1]["__row_number__"]) + 1
+            if records and records[-1].get("__row_number__")
+            else len(records) + 2
+        )
+        try:
+            colorize_booking_row(
+                getattr(sh, "id", SPREADSHEET_NAME),
+                getattr(bookings_sheet, "id", 0),
+                booking_row,
+                _booking_color_source(source, client_name),
+            )
+        except Exception:
+            logger.exception(
+                "Booking %s was saved but row coloring failed",
+                new_booking_id,
+            )
         return new_booking_id
     except Exception:
         traceback.print_exc()
@@ -2088,6 +2257,19 @@ def save_direct_issuance(
             [values.get(header, "") for header in headers],
             value_input_option="USER_ENTERED",
         )
+        booking_row = len(records) + 2
+        try:
+            colorize_booking_row(
+                getattr(sh, "id", SPREADSHEET_NAME),
+                getattr(bookings_sheet, "id", 0),
+                booking_row,
+                _booking_color_source(source, client_name),
+            )
+        except Exception:
+            logger.exception(
+                "Direct issuance booking %s was saved but row coloring failed",
+                booking_id,
+            )
         try:
             update_car_status(
                 car_id=str(car_id),
@@ -2589,6 +2771,8 @@ def save_actual_return(
     )
     booking_row = None
     current_status = ""
+    booking_source = ""
+    booking_client = ""
     if not allow_unlinked:
         for row_number, booking in enumerate(
             _get_sheet_records_safely(ws_bookings, "Бронирования"),
@@ -2603,6 +2787,13 @@ def save_actual_return(
             if str(current_id).strip() == str(booking_id).strip():
                 booking_row = row_number
                 current_status = str(booking.get("Статус", "")).strip()
+                booking_source = booking.get("Источник", "")
+                booking_client = (
+                    booking.get("ФИО Клиента")
+                    or booking.get("Клиент")
+                    or booking.get("Клиент ФИО")
+                    or ""
+                )
                 break
         if booking_row is None:
             raise ValueError(f"Booking {booking_id} was not found")
@@ -2867,3 +3058,18 @@ def save_actual_return(
             booking_headers.index("Статус") + 1,
             "Завершена",
         )
+        try:
+            colorize_booking_row(
+                getattr(sh, "id", SPREADSHEET_NAME),
+                getattr(ws_bookings, "id", 0),
+                booking_row,
+                _booking_color_source(
+                    booking_source or source,
+                    booking_client or client,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Booking %s was completed but row coloring failed",
+                booking_id,
+            )

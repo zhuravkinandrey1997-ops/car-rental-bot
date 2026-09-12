@@ -42,6 +42,7 @@ from sheets_client import (
     add_new_booking,
     delete_expense,
     cancel_booking,
+    colorize_existing_booking_rows,
     get_active_rentals,
     get_partner_active_rentals,
     get_active_bookings_for_car,
@@ -8014,6 +8015,18 @@ async def run_bot() -> None:
     catchup_task: asyncio.Task | None = None
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        try:
+            colored_rows = await asyncio.to_thread(
+                colorize_existing_booking_rows,
+            )
+            logger.info(
+                "Booking row colors synchronized for %s existing rows",
+                colored_rows,
+            )
+        except Exception:
+            logger.exception(
+                "Could not synchronize existing booking row colors",
+            )
         scheduler.start()
         catchup_task = asyncio.create_task(
             send_missed_tomorrow_notifications(bot)
