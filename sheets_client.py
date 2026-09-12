@@ -2642,6 +2642,88 @@ def get_active_cars():
     return [car for car in all_cars if car.get("Статус") == "Активен"]
 
 
+def get_cancellable_cars() -> list[dict]:
+    """Return unique cars that have at least one confirmed booking.
+
+    The bookings sheet is authoritative here. A car's current operational
+    status must not hide future confirmed reservations from cancellation.
+    """
+    bookings = [
+        booking
+        for booking in _get_sheet_records_safely(
+            ws_bookings,
+            "Бронирования",
+        )
+        if str(booking.get("Статус", "")).strip() == "Подтверждена"
+    ]
+    if not bookings:
+        return []
+
+    cars = ws_cars.get_all_records()
+    cars_by_id = {
+        _normalized_car_identifier(
+            car.get("ID") or car.get("ID Авто") or car.get("Car ID")
+        ): dict(car)
+        for car in cars
+        if _normalized_car_identifier(
+            car.get("ID") or car.get("ID Авто") or car.get("Car ID")
+        )
+    }
+    unique_cars: dict[str, dict] = {}
+    for booking in bookings:
+        raw_car_id = (
+            booking.get("ID Авто")
+            or booking.get("ID")
+            or booking.get("Car ID")
+            or ""
+        )
+        car_id = _normalized_car_identifier(raw_car_id)
+        car = dict(cars_by_id.get(car_id, {}))
+        booking_name = str(
+            booking.get("Автомобиль")
+            or booking.get("Авто")
+            or booking.get("Название авто")
+            or booking.get("Марка и Модель")
+            or ""
+        ).strip()
+        booking_plate = str(
+            booking.get("Госномер")
+            or booking.get("Номер авто")
+            or booking.get("Номер")
+            or ""
+        ).strip()
+        if not car:
+            car = {
+                "ID": raw_car_id,
+                "Марка и Модель": booking_name or "Автомобиль",
+                "Госномер": booking_plate,
+            }
+        elif booking_name and not any(
+            str(car.get(field) or "").strip()
+            for field in (
+                "Марка и Модель",
+                "Марка и модель",
+                "Марка Модель",
+                "Название",
+                "Авто",
+                "Модель",
+            )
+        ):
+            car["Марка и Модель"] = booking_name
+        if booking_plate and not any(
+            str(car.get(field) or "").strip()
+            for field in ("Госномер", "Номер авто", "Номер", "Plate")
+        ):
+            car["Госномер"] = booking_plate
+
+        unique_key = car_id or (
+            f"{str(car.get('Марка и Модель') or '').strip().casefold()}|"
+            f"{str(car.get('Госномер') or '').strip().casefold()}"
+        )
+        unique_cars.setdefault(unique_key, car)
+    return list(unique_cars.values())
+
+
 def get_all_cars():
     return ws_cars.get_all_records()
 
@@ -2758,11 +2840,13 @@ def get_active_bookings_for_car(car_id: str, plate: str = ""):
             ws_bookings,
             "Бронирования",
         )
-        if booking.get("Статус") in active_statuses
+        if str(booking.get("Статус", "")).strip() in active_statuses
     ]
     matching_bookings = []
     for booking in bookings:
-        if str(booking.get("ID Авто", "")).strip() == str(car_id).strip():
+        if _normalized_car_identifier(booking.get("ID Авто")) == (
+            _normalized_car_identifier(car_id)
+        ):
             matching_bookings.append(booking)
             continue
         booking_plate = str(
@@ -2771,7 +2855,7 @@ def get_active_bookings_for_car(car_id: str, plate: str = ""):
             or booking.get("Номер")
             or ""
         ).strip()
-        if plate and booking_plate == str(plate).strip():
+        if plate and booking_plate.casefold() == str(plate).strip().casefold():
             matching_bookings.append(booking)
     return matching_bookings
 
@@ -2780,7 +2864,7 @@ def get_cancellable_bookings_for_car(car_id: str, plate: str = ""):
     return [
         booking
         for booking in get_active_bookings_for_car(car_id, plate)
-        if booking.get("Статус") == "Подтверждена"
+        if str(booking.get("Статус", "")).strip() == "Подтверждена"
     ]
 
 

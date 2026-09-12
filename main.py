@@ -52,6 +52,7 @@ from sheets_client import (
     get_available_cars_for_direct_issuance,
     get_car_by_id,
     get_car_by_plate,
+    get_cancellable_cars,
     get_cancellable_bookings_for_car,
     get_confirmed_bookings,
     get_available_financial_months,
@@ -151,6 +152,7 @@ class OccupancyForm(StatesGroup):
 class CancellationForm(StatesGroup):
     car = State()
     booking = State()
+    confirmation = State()
     reason = State()
     deposit_status = State()
 
@@ -793,9 +795,9 @@ def cancellation_booking_keyboard(bookings: list[dict]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for index, booking in enumerate(bookings):
         text = (
-            f"Бронь #{_booking_id(booking)} · "
+            f"#{_booking_id(booking)}: "
             f"{format_date_ru(_value(booking, 'Дата начала (ГГГГ-ММ-ДД)', 'Дата начала'))} — "
-            f"{format_date_ru(_value(booking, 'Дата окончания (ГГГГ-ММ-ДД)', 'Дата окончания'))} · "
+            f"{format_date_ru(_value(booking, 'Дата окончания (ГГГГ-ММ-ДД)', 'Дата окончания'))} | "
             f"{_value(booking, 'ФИО Клиента', 'Клиент', 'Клиент ФИО')}"
         )
         rows.append(
@@ -807,6 +809,23 @@ def cancellation_booking_keyboard(bookings: list[dict]) -> InlineKeyboardMarkup:
             ]
         )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cancellation_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Да, отменить",
+                    callback_data="cancel_booking_confirm",
+                ),
+                InlineKeyboardButton(
+                    text="↩️ Назад",
+                    callback_data="cancel_booking_back",
+                ),
+            ]
+        ]
+    )
 
 
 def cancellation_deposit_keyboard() -> InlineKeyboardMarkup:
@@ -5541,7 +5560,7 @@ async def start_cancellation(message: Message, state: FSMContext) -> None:
         return
     await state.clear()
     try:
-        cars = get_active_cars()
+        cars = get_cancellable_cars()
     except Exception:
         logger.exception("Could not load cars for cancellation")
         await message.answer(
@@ -5551,7 +5570,7 @@ async def start_cancellation(message: Message, state: FSMContext) -> None:
         return
     if not cars:
         await message.answer(
-            "В листе Автомобили нет активных автомобилей.",
+            "В листе Бронирования нет подтверждённых броней для отмены.",
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
@@ -5639,9 +5658,74 @@ async def cancellation_booking_callback(
         await callback.answer("Список броней устарел.", show_alert=True)
         return
     await state.update_data(selected_booking=booking)
-    await state.set_state(CancellationForm.reason)
+    await state.set_state(CancellationForm.confirmation)
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
+    confirmation_message = await callback.message.answer(
+        f"Вы действительно хотите отменить бронь #{_booking_id(booking)} "
+        f"({_car_name(data.get('selected_car', {}))}, "
+        f"{_value(booking, 'ФИО Клиента', 'Клиент', 'Клиент ФИО', default='—')})?",
+        reply_markup=cancellation_confirmation_keyboard(),
+    )
+    await state.update_data(
+        cancellation_confirmation_message_id=confirmation_message.message_id
+    )
+
+
+async def cancellation_confirmation_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.data or not callback.message:
+        await callback.answer()
+        return
+    if not _callback_has_admin_plus_access(callback):
+        await callback.answer(
+            "🚫 Ошибка доступа: отменять брони и расходы может только "
+            "Администратор плюс.",
+            show_alert=True,
+        )
+        return
+    if await state.get_state() != CancellationForm.confirmation.state:
+        await callback.answer(
+            "Этот выбор устарел. Начните отмену заново.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if callback.message.message_id != data.get(
+        "cancellation_confirmation_message_id"
+    ):
+        await callback.answer(
+            "Используйте последние кнопки подтверждения.",
+            show_alert=True,
+        )
+        return
+    booking = data.get("selected_booking")
+    if not booking:
+        await callback.answer(
+            "Операция устарела. Начните отмену заново.",
+            show_alert=True,
+        )
+        return
+    if callback.data == "cancel_booking_back":
+        bookings = data.get("cancel_bookings", [])
+        await state.set_state(CancellationForm.booking)
+        await callback.answer()
+        await callback.message.edit_text(
+            "Выберите бронь для отмены:",
+            reply_markup=cancellation_booking_keyboard(bookings),
+        )
+        await state.update_data(
+            cancellation_booking_message_id=callback.message.message_id
+        )
+        return
+    if callback.data != "cancel_booking_confirm":
+        await callback.answer("Этот вариант недоступен.", show_alert=True)
+        return
+    await callback.answer("Бронь выбрана для отмены")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.set_state(CancellationForm.reason)
     await callback.message.answer(
         f"Введите причину отмены брони №{_booking_id(booking)}:"
     )
@@ -8171,6 +8255,10 @@ def create_dispatcher() -> Dispatcher:
     dispatcher.callback_query.register(
         cancellation_booking_callback,
         F.data.startswith("cancel_booking:"),
+    )
+    dispatcher.callback_query.register(
+        cancellation_confirmation_callback,
+        F.data.in_({"cancel_booking_confirm", "cancel_booking_back"}),
     )
     dispatcher.callback_query.register(
         cancellation_deposit_callback,
