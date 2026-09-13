@@ -32,6 +32,8 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram_calendar import SimpleCalendar, SimpleCalendarCallback
+from aiogram_calendar.schemas import SimpleCalAct
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -181,14 +183,15 @@ class BookingForm(StatesGroup):
 
 
 class ClientBookingState(StatesGroup):
+    car = State()
     start_date = State()
     end_date = State()
-    car = State()
     delivery = State()
     delivery_address = State()
     client_name = State()
     phone = State()
     receipt = State()
+    confirmation = State()
 
 
 class OccupancyForm(StatesGroup):
@@ -970,9 +973,18 @@ def client_booking_car_keyboard(cars: list[dict]) -> ReplyKeyboardMarkup:
 def client_welcome_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🏎 Выбрать автомобиль")],
+            [
+                KeyboardButton(text="🏎 Автопарк и цены"),
+                KeyboardButton(text="📅 Забронировать онлайн"),
+            ],
+            [
+                KeyboardButton(text="✈️ Подача в Пулково"),
+                KeyboardButton(text="📋 Условия и залог"),
+            ],
+            [KeyboardButton(text="👤 Связь с менеджером")],
         ],
         resize_keyboard=True,
+        is_persistent=True,
     )
 
 
@@ -989,25 +1001,90 @@ def client_ai_booking_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def client_booking_entry_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📅 Забронировать онлайн",
+                    callback_data="client_booking:start",
+                )
+            ]
+        ]
+    )
+
+
+def client_booking_cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Отменить / В меню",
+                    callback_data="client_booking:cancel",
+                )
+            ]
+        ]
+    )
+
+
+def client_car_booking_keyboard(car: dict) -> InlineKeyboardMarkup:
+    car_id = _car_id(car)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"📅 Забронировать {_car_name(car)}"[:64],
+                    callback_data=f"client_booking:car:{car_id}",
+                )
+            ]
+        ]
+    )
+
+
+def client_fleet_selection_keyboard(cars: list[dict]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for car in cars:
+        car_id = _car_id(car)
+        if not car_id:
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"📅 Забронировать {_car_name(car)}"[:64],
+                    callback_data=f"client_booking:car:{car_id}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="❌ Отменить / В меню",
+                callback_data="client_booking:cancel",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def client_delivery_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🏢 Заберу сам в офисе (Бесплатно)",
-                    callback_data="client_delivery:office",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✈️ Аэропорт Пулково (+ 3 000 RUB)",
+                    text="✈️ Подача в Пулково (+ 3 000 RUB)",
                     callback_data="client_delivery:airport",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="📍 Доставка по адресу в СПб (+ 3 000 RUB)",
-                    callback_data="client_delivery:address",
+                    text="🏢 Забрать в офисе",
+                    callback_data="client_delivery:office",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отменить / В меню",
+                    callback_data="client_booking:cancel",
                 )
             ],
         ]
@@ -1017,12 +1094,52 @@ def client_delivery_keyboard() -> InlineKeyboardMarkup:
 def client_contact_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📱 Поделиться контактом", request_contact=True)],
-            [KeyboardButton(text="Ввести номер текстом")],
-            [KeyboardButton(text="Отмена")],
+            [KeyboardButton(text="📱 Отправить контакт", request_contact=True)],
+            [KeyboardButton(text="Ввести Telegram username")],
+            [KeyboardButton(text="❌ Отменить / В меню")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
+    )
+
+
+def client_cancel_reply_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Отменить / В меню")]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def client_pulkovo_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📅 Заказать подачу в аэропорт",
+                    callback_data="client_booking:pulkovo",
+                )
+            ]
+        ]
+    )
+
+
+def client_manager_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💬 Написать в Telegram: @leonRentalSPB",
+                    url="https://t.me/leonRentalSPB",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📞 Позвонить: +7 (911) 215-56-62",
+                    url="tel:+79112155662",
+                )
+            ],
+        ]
     )
 
 
@@ -1837,6 +1954,45 @@ def _car_base_deposit(car: dict) -> int | None:
         return None
     parsed, _ = _parse_int(raw, "базовый залог", minimum=0)
     return parsed
+
+
+def _car_class(car: dict) -> str:
+    return _value(
+        car,
+        "Класс",
+        "Класс авто",
+        "Класс автомобиля",
+        "Категория",
+        "Тип кузова",
+        default="Не указан",
+    )
+
+
+def _car_mileage_limit(car: dict) -> str:
+    return _value(
+        car,
+        "Включенный суточный пробег (км)",
+        "Включённый суточный пробег (км)",
+        "Лимит пробега (км/сутки)",
+        "Лимит пробега",
+        "Суточный пробег",
+        "Пробег/сутки",
+        default="Уточняется",
+    )
+
+
+def _car_photo_url(car: dict) -> str:
+    return _value(
+        car,
+        "Фото",
+        "Фото URL",
+        "Ссылка на фото",
+        "URL фото",
+        "Изображение",
+        "Image",
+        "Photo",
+        default="",
+    ).strip()
 
 
 def _car_label(car: dict) -> str:
@@ -3577,60 +3733,290 @@ def _client_payment_instruction(prepayment: int) -> str:
     )
 
 
-async def start_client_booking(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await state.set_state(ClientBookingState.start_date)
-    calendar_message = await message.answer(
-        "🚗 Онлайн-бронирование автомобиля.\n\n"
-        + _calendar_prompt("client_booking", "start"),
-        reply_markup=calendar_keyboard("client_booking", "start"),
+def _client_calendar(stage: str, start_date: datetime.date | None = None) -> SimpleCalendar:
+    calendar = SimpleCalendar(
+        cancel_btn="❌ Отменить / В меню",
+        today_btn="Сегодня",
+        show_alerts=True,
     )
-    await state.update_data(calendar_message_id=calendar_message.message_id)
+    # The package uses the process locale for labels only when explicitly
+    # requested. Keep the client calendar in Russian independently of the host.
+    calendar._labels.days_of_week = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    calendar._labels.months = [
+        "Январь",
+        "Февраль",
+        "Март",
+        "Апрель",
+        "Май",
+        "Июнь",
+        "Июль",
+        "Август",
+        "Сентябрь",
+        "Октябрь",
+        "Ноябрь",
+        "Декабрь",
+    ]
+    minimum = start_date or _now_moscow().date()
+    calendar.set_dates_range(
+        datetime.datetime.combine(minimum, datetime.time.min),
+        datetime.datetime.combine(datetime.date(2099, 12, 31), datetime.time.max),
+    )
+    return calendar
 
 
-async def client_booking_start_date(
+async def _send_client_calendar(
     message: Message,
     state: FSMContext,
+    stage: str,
+    start_date: datetime.date | None = None,
 ) -> None:
-    value = (message.text or "").strip()
-    if not _parse_date(value):
-        await message.answer("Неверный формат. Пример: 2026-09-15.")
-        return
-    selected_date = datetime.date.fromisoformat(value)
-    if selected_date < datetime.date.today():
-        await message.answer("Дата начала не может быть в прошлом.")
-        return
-    await state.update_data(start_date=value)
-    await state.set_state(ClientBookingState.end_date)
+    calendar = _client_calendar(stage, start_date)
+    calendar_date = start_date or _now_moscow().date()
     calendar_message = await message.answer(
-        _calendar_prompt("client_booking", "end", selected_date),
-        reply_markup=calendar_keyboard(
-            "client_booking",
-            "end",
-            minimum_date=selected_date,
-            selected_start_date=selected_date,
+        (
+            "📅 Выберите дату начала аренды:"
+            if stage == "start"
+            else "📅 Выберите дату возврата автомобиля:"
+        ),
+        reply_markup=await calendar.start_calendar(
+            calendar_date.year,
+            calendar_date.month,
         ),
     )
-    await state.update_data(calendar_message_id=calendar_message.message_id)
+    await state.update_data(
+        client_calendar_stage=stage,
+        client_calendar_message_id=calendar_message.message_id,
+    )
 
 
-async def client_booking_end_date(
+def _client_fleet_card_text(car: dict) -> str:
+    daily_rate = _car_daily_rate(car)
+    deposit = _car_base_deposit(car)
+    deposit_text = (
+        f"{_format_number(deposit)} RUB" if deposit is not None else "уточняется"
+    )
+    return (
+        f"🏎 {_car_name(car)}\n\n"
+        f"Класс: {_car_class(car)}\n"
+        f"Цена: {daily_rate} RUB/сутки\n"
+        f"Залог: {deposit_text}\n"
+        f"Суточный пробег: {_car_mileage_limit(car)} км"
+    )
+
+
+async def _load_client_active_cars() -> list[dict]:
+    cars = await asyncio.to_thread(get_active_cars)
+    return [
+        dict(car)
+        for car in cars
+        if str(car.get("Статус", "") or "").strip().casefold()
+        in {"активен", "свободен", "active", "available", ""}
+    ]
+
+
+async def client_fleet_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    try:
+        cars = await _load_client_active_cars()
+    except Exception:
+        logger.exception("Could not load fleet for client")
+        await message.answer(
+            "Не удалось загрузить автопарк. Попробуйте ещё раз позже.",
+            reply_markup=client_welcome_keyboard(),
+        )
+        return
+    if not cars:
+        await message.answer(
+            "Сейчас нет автомобилей, доступных для онлайн-бронирования.",
+            reply_markup=client_welcome_keyboard(),
+        )
+        return
+    for index, car in enumerate(cars):
+        text = _client_fleet_card_text(car)
+        markup = client_car_booking_keyboard(car)
+        if index == 0:
+            markup = markup
+        photo_url = _car_photo_url(car)
+        if photo_url:
+            try:
+                await message.answer_photo(
+                    photo=photo_url,
+                    caption=text,
+                    reply_markup=markup,
+                )
+                continue
+            except Exception:
+                logger.warning("Could not send car photo for %s", _car_name(car))
+        await message.answer(text, reply_markup=markup)
+    await message.answer(
+        "Выберите автомобиль для бронирования кнопкой под его карточкой.",
+        reply_markup=client_welcome_keyboard(),
+    )
+
+
+async def start_client_booking(
+    message: Message,
+    state: FSMContext,
+    preferred_delivery: str | None = None,
+) -> None:
+    await state.clear()
+    try:
+        cars = await _load_client_active_cars()
+    except Exception:
+        logger.exception("Could not load cars for client booking")
+        await message.answer(
+            "Не удалось загрузить автомобили. Попробуйте ещё раз позже.",
+            reply_markup=client_welcome_keyboard(),
+        )
+        return
+    if not cars:
+        await message.answer(
+            "Сейчас нет автомобилей, доступных для онлайн-бронирования.",
+            reply_markup=client_welcome_keyboard(),
+        )
+        return
+    await state.update_data(cars=cars, preferred_delivery=preferred_delivery)
+    await state.set_state(ClientBookingState.car)
+    await message.answer(
+        "📅 Онлайн-бронирование\n\nШаг 1 из 5. Выберите автомобиль:",
+        reply_markup=client_fleet_selection_keyboard(cars),
+    )
+
+
+def _client_car_from_list(cars: list[dict], car_id: str) -> dict | None:
+    normalized = str(car_id).strip()
+    return next(
+        (
+            car
+            for car in cars
+            if _car_id(car).strip() == normalized
+        ),
+        None,
+    )
+
+
+async def client_booking_car_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message or not callback.data:
+        await callback.answer()
+        return
+    car_id = callback.data.removeprefix("client_booking:car:")
+    data = await state.get_data()
+    cars = data.get("cars") or []
+    if not cars:
+        try:
+            cars = await _load_client_active_cars()
+        except Exception:
+            logger.exception("Could not load cars after card callback")
+            await callback.answer("Не удалось загрузить автомобиль.", show_alert=True)
+            return
+    car = _client_car_from_list(cars, car_id)
+    if car is None:
+        await callback.answer(
+            "Автомобиль уже недоступен. Откройте автопарк заново.",
+            show_alert=True,
+        )
+        return
+    daily_rate = safe_int(_car_daily_rate(car))
+    if daily_rate <= 0:
+        await callback.answer("Для автомобиля не указан тариф.", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await state.update_data(
+        car=car,
+        car_id=_car_id(car),
+        car_name=_car_name(car),
+        daily_rate=daily_rate,
+    )
+    await state.set_state(ClientBookingState.start_date)
+    await callback.message.answer(
+        f"Вы выбрали: {_car_name(car)}.\n"
+        "Шаг 2 из 5. Выберите даты аренды кнопками календаря."
+    )
+    await _send_client_calendar(callback.message, state, "start")
+
+
+async def client_calendar_callback(
+    callback: CallbackQuery,
+    callback_data: SimpleCalendarCallback,
+    state: FSMContext,
+) -> None:
+    current_state = await state.get_state()
+    data = await state.get_data()
+    stage = data.get("client_calendar_stage")
+    expected_state = (
+        ClientBookingState.start_date.state
+        if stage == "start"
+        else ClientBookingState.end_date.state
+    )
+    if current_state != expected_state or not callback.message:
+        await callback.answer(
+            "Этот календарь устарел. Начните бронирование заново.",
+            show_alert=True,
+        )
+        return
+    calendar = _client_calendar(
+        stage,
+        datetime.date.fromisoformat(data["start_date"])
+        if stage == "end" and data.get("start_date")
+        else None,
+    )
+    if callback_data.act == SimpleCalAct.cancel:
+        await callback.answer("Бронирование отменено")
+        await state.clear()
+        with suppress(Exception):
+            await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            "Бронирование отменено.",
+            reply_markup=client_welcome_keyboard(),
+        )
+        return
+    selected, selected_date = await calendar.process_selection(
+        callback,
+        callback_data,
+    )
+    if not selected or selected_date is None:
+        return
+    selected_iso = selected_date.date().isoformat()
+    if stage == "start":
+        await state.update_data(start_date=selected_iso)
+        await state.set_state(ClientBookingState.end_date)
+        await callback.message.answer(
+            f"Дата начала: {format_date_ru(selected_iso)}.\n"
+            "Теперь выберите дату возврата:",
+        )
+        await _send_client_calendar(
+            callback.message,
+            state,
+            "end",
+            selected_date.date(),
+        )
+        return
+    start_date = data.get("start_date")
+    if not start_date:
+        await callback.answer("Дата начала потеряна. Начните заново.", show_alert=True)
+        await state.clear()
+        return
+    await state.update_data(end_date=selected_iso)
+    await _finish_client_booking_dates(
+        callback.message,
+        state,
+        start_date,
+        selected_iso,
+    )
+
+
+async def client_booking_date_text(
     message: Message,
     state: FSMContext,
 ) -> None:
-    value = (message.text or "").strip()
-    data = await state.get_data()
-    if not _parse_date(value):
-        await message.answer("Неверный формат. Пример: 2026-09-20.")
-        return
-    if value < data.get("start_date", ""):
-        await message.answer("Дата окончания не может быть раньше даты начала.")
-        return
-    await _finish_client_booking_dates(
-        message,
-        state,
-        data["start_date"],
-        value,
+    await message.answer(
+        "Даты выбираются только кнопками календаря. "
+        "Откройте последний календарь или отмените бронирование.",
+        reply_markup=client_cancel_reply_keyboard(),
     )
 
 
@@ -3640,76 +4026,62 @@ async def _finish_client_booking_dates(
     start_date: str,
     end_date: str,
 ) -> None:
-    try:
-        cars = await asyncio.to_thread(get_available_cars, start_date, end_date)
-    except Exception:
-        logger.exception("Could not load cars for client booking")
+    data = await state.get_data()
+    car = data.get("car")
+    if not car:
         await state.clear()
         await message.answer(
-            "Не удалось проверить доступность автомобилей. Попробуйте позже."
+            "Автомобиль не выбран. Начните бронирование заново.",
+            reply_markup=client_welcome_keyboard(),
         )
         return
-    cars = [
-        car
-        for car in cars
-        if (
-            not str(car.get("Статус", "") or "").strip()
-            or str(car.get("Статус", "")).strip().casefold()
-            in {"активен", "свободен", "active", "available"}
-        )
-    ]
-    if not cars:
-        await state.set_state(ClientBookingState.start_date)
-        await message.answer(
-            "На выбранные даты свободных автомобилей нет. "
-            "Выберите другой период:",
-            reply_markup=calendar_keyboard("client_booking", "start"),
-        )
-        return
-    await state.update_data(
-        start_date=start_date,
-        end_date=end_date,
-        cars=cars,
-    )
-    await state.set_state(ClientBookingState.car)
-    await message.answer(
-        f"📅 Период: {format_date_ru(start_date)} — "
-        f"{format_date_ru(end_date)}\n\nВыберите автомобиль:",
-        reply_markup=client_booking_car_keyboard(cars),
-    )
-
-
-async def client_booking_car(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    cars = data.get("cars", [])
     try:
-        choice = int((message.text or "").split(".", 1)[0])
-        car = cars[choice - 1]
-    except (ValueError, IndexError):
-        await message.answer("Выберите автомобиль кнопкой из списка.")
-        return
-    daily_rate = safe_int(_car_daily_rate(car))
-    if daily_rate <= 0:
+        available_cars = await asyncio.to_thread(
+            get_available_cars,
+            start_date,
+            end_date,
+        )
+    except Exception:
+        logger.exception("Could not check client car availability")
+        await state.clear()
         await message.answer(
-            "У выбранного автомобиля не указан суточный тариф. "
-            "Выберите другой автомобиль."
+            "Не удалось проверить доступность автомобиля. Попробуйте позже.",
+            reply_markup=client_welcome_keyboard(),
         )
         return
-    days = _client_booking_days(data["start_date"], data["end_date"])
-    rent_price = daily_rate * days
+    selected_id = _car_id(car)
+    if not any(_car_id(item).strip() == selected_id.strip() for item in available_cars):
+        await state.clear()
+        await message.answer(
+            "К сожалению, этот автомобиль уже занят на выбранные даты. "
+            "Выберите другой автомобиль.",
+            reply_markup=client_welcome_keyboard(),
+        )
+        return
+    days = _client_booking_days(start_date, end_date)
+    rent_price = int(data["daily_rate"]) * days
     await state.update_data(
-        car=car,
-        car_id=_car_id(car),
-        car_name=_car_name(car),
-        daily_rate=daily_rate,
         days=days,
         rent_price=rent_price,
     )
+    if data.get("preferred_delivery") == "airport":
+        await state.update_data(
+            delivery_address="Пулково",
+            delivery_price=CLIENT_DELIVERY_FEE,
+        )
+        await state.set_state(ClientBookingState.client_name)
+        await message.answer(
+            f"Подача в Пулково выбрана: {_format_number(CLIENT_DELIVERY_FEE)} RUB.\n"
+            "Шаг 4 из 5. Введите имя и фамилию арендатора:",
+            reply_markup=client_cancel_reply_keyboard(),
+        )
+        return
     await state.set_state(ClientBookingState.delivery)
     await message.answer(
+        f"Период: {format_date_ru(start_date)} — {format_date_ru(end_date)}\n"
         f"Автомобиль: {_car_name(car)}\n"
         f"Стоимость аренды: {_format_number(rent_price)} RUB\n\n"
-        "Нужна ли подача/доставка автомобиля?",
+        "Шаг 3 из 5. Выберите способ получения:",
         reply_markup=client_delivery_keyboard(),
     )
 
@@ -3722,94 +4094,135 @@ async def client_delivery_callback(
         await callback.answer()
         return
     if await state.get_state() != ClientBookingState.delivery.state:
-        await callback.answer("Этот выбор устарел. Начните бронирование заново.", show_alert=True)
+        await callback.answer(
+            "Этот выбор устарел. Начните бронирование заново.",
+            show_alert=True,
+        )
         return
     choice = callback.data.removeprefix("client_delivery:")
-    if choice not in {"office", "airport", "address"}:
+    if choice not in {"office", "airport"}:
         await callback.answer("Недоступный вариант.", show_alert=True)
         return
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
-    if choice == "address":
-        await state.update_data(delivery_address="", delivery_price=CLIENT_DELIVERY_FEE)
-        await state.set_state(ClientBookingState.delivery_address)
-        await callback.message.answer("Введите адрес доставки автомобиля:")
-        return
-    delivery_address = "Аэропорт" if choice == "airport" else "Самовывоз"
+    delivery_address = "Пулково" if choice == "airport" else "Офис Leon Rental"
     delivery_price = CLIENT_DELIVERY_FEE if choice == "airport" else 0
     await state.update_data(
         delivery_address=delivery_address,
         delivery_price=delivery_price,
     )
     await state.set_state(ClientBookingState.client_name)
-    await callback.message.answer("Введите ФИО клиента:")
-
-
-async def client_delivery_address(
-    message: Message,
-    state: FSMContext,
-) -> None:
-    address = (message.text or "").strip()
-    if len(address) < 3:
-        await message.answer("Введите полный адрес доставки.")
-        return
-    await state.update_data(delivery_address=address)
-    await state.set_state(ClientBookingState.client_name)
-    await message.answer("Введите ФИО клиента:")
+    await callback.message.answer(
+        "Шаг 4 из 5. Введите имя и фамилию арендатора:",
+        reply_markup=client_cancel_reply_keyboard(),
+    )
 
 
 async def client_booking_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
     if len(name) < 2:
-        await message.answer("Введите ФИО клиента полностью.")
+        await message.answer(
+            "Введите имя и фамилию полностью.",
+            reply_markup=client_cancel_reply_keyboard(),
+        )
         return
     await state.update_data(client_name=name)
     await state.set_state(ClientBookingState.phone)
     await message.answer(
-        "Укажите номер телефона клиента. Можно нажать кнопку "
-        "«Поделиться контактом» или ввести номер текстом:",
+        "Шаг 5 из 5. Отправьте Telegram-контакт кнопкой "
+        "или введите свой username, начиная с @:",
         reply_markup=client_contact_keyboard(),
     )
 
 
 async def client_booking_phone(message: Message, state: FSMContext) -> None:
-    if (message.text or "").strip() == "Ввести номер текстом":
-        await message.answer("Введите номер телефона текстом:", reply_markup=ReplyKeyboardRemove())
-        return
-    phone = (
-        message.contact.phone_number
-        if message.contact is not None
-        else (message.text or "").strip()
-    )
-    if not phone or len(phone.strip()) < 5:
+    text = (message.text or "").strip()
+    if text in {"Ввести Telegram username", "Ввести номер текстом"}:
         await message.answer(
-            "Проверьте номер телефона или поделитесь контактом.",
+            "Введите Telegram username, начиная с @:",
             reply_markup=client_contact_keyboard(),
         )
         return
-    await state.update_data(phone=phone.strip())
+    contact = (
+        message.contact.phone_number
+        if message.contact is not None
+        else text
+    )
+    if not contact or len(contact.strip()) < 5:
+        await message.answer(
+            "Отправьте контакт кнопкой или укажите username вида @username.",
+            reply_markup=client_contact_keyboard(),
+        )
+        return
+    if message.contact is None and not contact.startswith("@"):
+        normalized_phone = re.sub(r"[\s().-]", "", contact)
+        if not re.fullmatch(r"\+?\d{7,15}", normalized_phone):
+            await message.answer(
+                "Укажите username вида @username или корректный номер телефона.",
+                reply_markup=client_contact_keyboard(),
+            )
+            return
+    await state.update_data(phone=contact.strip())
     data = await state.get_data()
     rent_price = int(data["rent_price"])
     delivery_price = int(data.get("delivery_price", 0))
     total_price = rent_price + delivery_price
-    prepayment = _client_prepayment(total_price)
-    await state.update_data(
-        total_price=total_price,
-        prepayment=prepayment,
-    )
-    await state.set_state(ClientBookingState.receipt)
+    await state.update_data(total_price=total_price)
+    await state.set_state(ClientBookingState.confirmation)
     await message.answer(
-        "Расчёт бронирования:\n\n"
-        f"Авто: {data['car_name']} "
-        f"({format_date_ru(data['start_date'])} — "
-        f"{format_date_ru(data['end_date'])})\n"
-        f"Аренда: {_format_number(rent_price)} RUB\n"
-        f"Доставка: {_format_number(delivery_price)} RUB\n"
-        f"ИТОГО к оплате: {_format_number(total_price)} RUB\n"
-        f"Предоплата для фиксации брони: {_format_number(prepayment)} RUB\n\n"
-        f"{_client_payment_instruction(prepayment)}",
-        reply_markup=ReplyKeyboardRemove(),
+        _client_booking_summary_text({**data, "phone": contact.strip(), "total_price": total_price}),
+        reply_markup=client_booking_confirmation_keyboard(),
     )
+
+
+def client_booking_confirmation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить заявку",
+                    callback_data="client_booking:confirm",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отменить / В меню",
+                    callback_data="client_booking:cancel",
+                )
+            ],
+        ]
+    )
+
+
+def _client_booking_summary_text(data: dict) -> str:
+    return (
+        "📋 Проверьте заявку:\n\n"
+        f"Автомобиль: {data.get('car_name', '—')}\n"
+        f"Период: {format_date_ru(data.get('start_date', ''))} — "
+        f"{format_date_ru(data.get('end_date', ''))}\n"
+        f"Получение: {data.get('delivery_address', '—')}\n"
+        f"Арендатор: {data.get('client_name', '—')}\n"
+        f"Контакт: {data.get('phone', '—')}\n\n"
+        f"Аренда: {_format_number(data.get('rent_price', 0))} RUB\n"
+        f"Подача: {_format_number(data.get('delivery_price', 0))} RUB\n"
+        f"Итого: {_format_number(data.get('total_price', 0))} RUB\n\n"
+        "Нажмите «Подтвердить заявку», чтобы отправить запрос менеджеру."
+    )
+
+
+async def client_booking_cancel_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    await callback.answer("Бронирование отменено")
+    await state.clear()
+    if callback.message:
+        with suppress(Exception):
+            await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            "Бронирование отменено.",
+            reply_markup=client_welcome_keyboard(),
+        )
 
 
 def _client_booking_admin_text(
@@ -3817,7 +4230,7 @@ def _client_booking_admin_text(
     data: dict,
 ) -> str:
     return (
-        "🔔 Новая бронь с сайта!\n\n"
+        "🔔 Новая заявка с сайта/бота!\n\n"
         f"Номер заявки: #{booking_id}\n"
         f"Авто: {data.get('car_name', '—')}\n"
         f"Клиент: {data.get('client_name', '—')} "
@@ -3825,8 +4238,86 @@ def _client_booking_admin_text(
         f"Даты: {format_date_ru(data.get('start_date', ''))} — "
         f"{format_date_ru(data.get('end_date', ''))}\n"
         f"Доставка: {data.get('delivery_address', '—')}\n"
-        f"Предоплата: {_format_number(data.get('prepayment', 0))} RUB"
+        f"Итого: {_format_number(data.get('total_price', 0))} RUB\n"
+        "Статус: Заявка с сайта/бота"
     )
+
+
+async def client_booking_confirm_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    admin_bot: Bot | None = None,
+) -> None:
+    if not callback.message or await state.get_state() != ClientBookingState.confirmation.state:
+        await callback.answer(
+            "Заявка уже обработана или устарела.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if not callback.from_user:
+        await callback.answer("Не удалось определить клиента.", show_alert=True)
+        return
+    try:
+        booking_id = await asyncio.to_thread(
+            add_public_booking,
+            car_id=data["car_id"],
+            car_name=data["car_name"],
+            start_date=data["start_date"],
+            end_date=data["end_date"],
+            client_name=data["client_name"],
+            phone=data["phone"],
+            client_telegram_id=callback.from_user.id,
+            price=int(data["rent_price"]),
+            prepayment=0,
+            delivery_address=data.get("delivery_address", "Офис Leon Rental"),
+            delivery_price=int(data.get("delivery_price", 0)),
+            status="Заявка с сайта/бота",
+            source="Сайт",
+        )
+    except ValueError:
+        await state.clear()
+        await callback.answer("Автомобиль уже занят на эти даты.", show_alert=True)
+        await callback.message.answer(
+            "Автомобиль уже заняли на выбранные даты. "
+            "Откройте автопарк и выберите другой вариант.",
+            reply_markup=client_welcome_keyboard(),
+        )
+        return
+    except Exception:
+        logger.exception("Could not save confirmed client booking")
+        await callback.answer("Не удалось сохранить заявку.", show_alert=True)
+        return
+
+    notification_bot = admin_bot or bot
+    admin_text = _client_booking_admin_text(booking_id, data)
+    delivered_to_admin = False
+    for admin_id in _admin_notification_ids():
+        try:
+            await notification_bot.send_message(
+                chat_id=admin_id,
+                text=admin_text,
+                reply_markup=client_admin_booking_keyboard(booking_id),
+            )
+            delivered_to_admin = True
+        except Exception:
+            logger.exception(
+                "Could not notify manager %s about client booking %s",
+                admin_id,
+                booking_id,
+            )
+    await state.clear()
+    await callback.answer("Заявка отправлена менеджеру")
+    with suppress(Exception):
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        f"✅ Заявка #{booking_id} отправлена менеджеру.\n"
+        "Мы свяжемся с вами для подтверждения деталей.",
+        reply_markup=client_welcome_keyboard(),
+    )
+    if not delivered_to_admin:
+        logger.warning("Client booking %s was saved without manager delivery", booking_id)
 
 
 async def client_ai_booking_callback(
@@ -3838,6 +4329,66 @@ async def client_ai_booking_callback(
         return
     await callback.answer()
     await start_client_booking(callback.message, state)
+
+
+async def client_pulkovo_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "✈️ Подача автомобиля в аэропорт Пулково\n\n"
+        f"Стоимость подачи: {_format_number(CLIENT_DELIVERY_FEE)} RUB.\n"
+        "Менеджер согласует точное время и место встречи после заявки.",
+        reply_markup=client_pulkovo_keyboard(),
+    )
+    await message.answer(
+        "Выберите раздел в нижнем меню, чтобы продолжить.",
+        reply_markup=client_welcome_keyboard(),
+    )
+
+
+async def client_pulkovo_booking_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if callback.message:
+        await callback.answer()
+        await start_client_booking(
+            callback.message,
+            state,
+            preferred_delivery="airport",
+        )
+    else:
+        await callback.answer()
+
+
+async def client_rules_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "📋 Условия и залог\n\n"
+        "• Аренда доступна клиентам от 21 года; для отдельных автомобилей "
+        "может потребоваться возраст от 25 лет.\n"
+        "• Для оформления нужны паспорт и водительское удостоверение.\n"
+        "• Страховой залог вносится до выдачи автомобиля и возвращается после "
+        "приёма машины, если нет штрафов, повреждений и задолженностей.\n"
+        "• В стоимость входит суточный лимит пробега, указанный в карточке "
+        "автомобиля. Превышение лимита рассчитывается по тарифу.\n"
+        "• Точный размер залога и дополнительные условия зависят от модели "
+        "и подтверждаются менеджером.",
+        reply_markup=client_welcome_keyboard(),
+    )
+
+
+async def client_manager_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "👤 Связь с менеджером\n\n"
+        "Напишите нам в Telegram или позвоните — поможем выбрать автомобиль, "
+        "проверить даты и оформить аренду.",
+        reply_markup=client_manager_keyboard(),
+    )
+    await message.answer(
+        "Выберите раздел в нижнем меню, чтобы продолжить.",
+        reply_markup=client_welcome_keyboard(),
+    )
 
 
 def _client_local_faq_response(prompt: str) -> str:
@@ -4028,7 +4579,7 @@ async def client_start_handler(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Добро пожаловать в Leon Rental! 🚗\n"
         "Здесь вы можете выбрать премиальный автомобиль, рассчитать стоимость "
-        "и забронировать поездку онлайн.",
+        "и забронировать поездку онлайн. Используйте постоянное меню ниже.",
         reply_markup=client_welcome_keyboard(),
     )
 
@@ -4045,8 +4596,7 @@ async def client_manager_handler(message: Message, state: FSMContext) -> None:
 async def client_cancel_flow(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "Бронирование отменено. Нажмите «🏎 Выбрать автомобиль», "
-        "чтобы начать заново.",
+        "Бронирование отменено. Выберите действие в нижнем меню.",
         reply_markup=client_welcome_keyboard(),
     )
 
@@ -9084,38 +9634,76 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
         F.data.startswith("calendar:"),
     )
     dispatcher.callback_query.register(
+        client_calendar_callback,
+        SimpleCalendarCallback.filter(),
+    )
+    dispatcher.callback_query.register(
         client_delivery_callback,
         F.data.startswith("client_delivery:"),
+    )
+    dispatcher.callback_query.register(
+        client_booking_car_callback,
+        F.data.startswith("client_booking:car:"),
+    )
+    dispatcher.callback_query.register(
+        client_booking_confirm_callback,
+        F.data == "client_booking:confirm",
+    )
+    dispatcher.callback_query.register(
+        client_booking_cancel_callback,
+        F.data == "client_booking:cancel",
+    )
+    dispatcher.callback_query.register(
+        client_pulkovo_booking_callback,
+        F.data == "client_booking:pulkovo",
     )
     dispatcher.callback_query.register(
         client_ai_booking_callback,
         F.data == "client_ai:book",
     )
+    dispatcher.callback_query.register(
+        client_ai_booking_callback,
+        F.data == "client_booking:start",
+    )
     dispatcher.message.register(client_start_handler, CommandStart())
     dispatcher.message.register(client_start_handler, Command("menu"))
+    dispatcher.message.register(start_client_booking, Command("booking"))
     dispatcher.message.register(start_client_booking, Command("cars"))
+    dispatcher.message.register(client_pulkovo_handler, Command("pulkovo"))
+    dispatcher.message.register(client_rules_handler, Command("rules"))
     dispatcher.message.register(client_manager_handler, Command("manager"))
     dispatcher.message.register(
+        client_fleet_handler,
+        F.text == "🏎 Автопарк и цены",
+    )
+    dispatcher.message.register(
         start_client_booking,
-        F.text == "🏎 Выбрать автомобиль",
+        F.text == "📅 Забронировать онлайн",
+    )
+    dispatcher.message.register(
+        client_pulkovo_handler,
+        F.text == "✈️ Подача в Пулково",
+    )
+    dispatcher.message.register(
+        client_rules_handler,
+        F.text == "📋 Условия и залог",
+    )
+    dispatcher.message.register(
+        client_manager_handler,
+        F.text == "👤 Связь с менеджером",
     )
     dispatcher.message.register(
         client_cancel_flow,
-        F.text.casefold() == "отмена",
+        F.text.casefold().in_({"отмена", "❌ отменить / в меню"}),
     )
     dispatcher.message.register(client_cancel_flow, Command("cancel"))
     dispatcher.message.register(
-        client_booking_start_date,
+        client_booking_date_text,
         ClientBookingState.start_date,
     )
     dispatcher.message.register(
-        client_booking_end_date,
+        client_booking_date_text,
         ClientBookingState.end_date,
-    )
-    dispatcher.message.register(client_booking_car, ClientBookingState.car)
-    dispatcher.message.register(
-        client_delivery_address,
-        ClientBookingState.delivery_address,
     )
     dispatcher.message.register(
         client_booking_name,
@@ -9124,10 +9712,6 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
     dispatcher.message.register(
         client_booking_phone,
         ClientBookingState.phone,
-    )
-    dispatcher.message.register(
-        client_receipt_handler,
-        ClientBookingState.receipt,
     )
     dispatcher.message.register(client_ai_message)
     dispatcher.errors.register(error_handler)

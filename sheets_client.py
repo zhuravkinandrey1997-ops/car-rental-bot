@@ -2198,6 +2198,8 @@ def add_public_booking(
     delivery_address: str,
     delivery_price: int,
     receipt_payment_method: str = "Перевод (СБП)",
+    status: str = "Ожидает подтверждения",
+    source: str = "Сайт",
 ) -> int:
     """Create a website booking request after rechecking date availability."""
     available_cars = get_available_cars(start_date, end_date)
@@ -2219,13 +2221,13 @@ def add_public_booking(
         price=price,
         manager_id=client_telegram_id,
         manager_name="Клиент с сайта",
-        status="Ожидает подтверждения",
+        status=status,
         prepayment=prepayment,
         prepayment_pay_type=receipt_payment_method,
         pay_type=receipt_payment_method,
         delivery_address=delivery_address,
         delivery_price=delivery_price,
-        source="Сайт",
+        source=source,
     )
 
 
@@ -2259,7 +2261,7 @@ def update_public_booking_status(
                 break
         if target_row is None:
             raise ValueError(f"Booking {booking_id} was not found")
-        if current_status != "Ожидает подтверждения":
+        if current_status not in {"Ожидает подтверждения", "Заявка с сайта/бота"}:
             raise ValueError(
                 f"Booking {booking_id} is no longer pending "
                 f"(status={current_status})"

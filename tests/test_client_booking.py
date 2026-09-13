@@ -40,13 +40,23 @@ class _FakeMessage:
 
 
 class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
-    def test_client_welcome_keyboard_has_single_booking_entrypoint(self):
+    def test_client_welcome_keyboard_has_persistent_public_menu(self):
         buttons = [
             button.text
             for row in main.client_welcome_keyboard().keyboard
             for button in row
         ]
-        self.assertEqual(buttons, ["🏎 Выбрать автомобиль"])
+        self.assertEqual(
+            buttons,
+            [
+                "🏎 Автопарк и цены",
+                "📅 Забронировать онлайн",
+                "✈️ Подача в Пулково",
+                "📋 Условия и залог",
+                "👤 Связь с менеджером",
+            ],
+        )
+        self.assertTrue(main.client_welcome_keyboard().is_persistent)
 
     def test_ai_booking_keyboard_has_booking_callback(self):
         button = main.client_ai_booking_keyboard().inline_keyboard[0][0]
@@ -126,11 +136,44 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             labels,
             [
-                "🏢 Заберу сам в офисе (Бесплатно)",
-                "✈️ Аэропорт Пулково (+ 3 000 RUB)",
-                "📍 Доставка по адресу в СПб (+ 3 000 RUB)",
+                "✈️ Подача в Пулково (+ 3 000 RUB)",
+                "🏢 Забрать в офисе",
+                "❌ Отменить / В меню",
             ],
         )
+
+    def test_client_car_card_contains_required_catalog_fields(self):
+        card = main._client_fleet_card_text(
+            {
+                "Марка и Модель": "BMW 5",
+                "Класс": "Бизнес",
+                "Цена / сутки (RUB)": "12 000",
+                "Залог (RUB)": "50 000",
+                "Суточный пробег": "300",
+            }
+        )
+        self.assertIn("BMW 5", card)
+        self.assertIn("Класс: Бизнес", card)
+        self.assertIn("Цена: 12 000 RUB/сутки", card)
+        self.assertIn("Залог: 50 000 RUB", card)
+        self.assertIn("Суточный пробег: 300 км", card)
+
+    def test_client_date_states_only_offer_calendar(self):
+        calendar = main._client_calendar("start")
+        self.assertIn("Отменить", calendar._labels.cancel_caption)
+        self.assertEqual(calendar._labels.months[0], "Январь")
+        self.assertEqual(
+            main.ClientBookingState.confirmation.state,
+            "ClientBookingState:confirmation",
+        )
+
+    def test_client_summary_has_confirmation_and_cancel_actions(self):
+        labels = [
+            button.text
+            for row in main.client_booking_confirmation_keyboard().inline_keyboard
+            for button in row
+        ]
+        self.assertEqual(labels, ["✅ Подтвердить заявку", "❌ Отменить / В меню"])
 
     def test_public_booking_uses_pending_status_and_site_source(self):
         with (
