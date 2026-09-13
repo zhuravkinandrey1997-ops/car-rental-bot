@@ -1078,7 +1078,13 @@ def client_delivery_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🏢 Забрать в офисе",
+                    text="📍 Доставка по адресу (+ 3 000 RUB)",
+                    callback_data="client_delivery:address",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏢 Забрать в офисе (Бесплатно)",
                     callback_data="client_delivery:office",
                 )
             ],
@@ -1088,6 +1094,19 @@ def client_delivery_keyboard() -> InlineKeyboardMarkup:
                     callback_data="client_booking:cancel",
                 )
             ],
+        ]
+    )
+
+
+def client_delivery_address_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад к способам получения",
+                    callback_data="client_delivery:back",
+                )
+            ]
         ]
     )
 
@@ -4079,6 +4098,7 @@ async def _finish_client_booking_dates(
     )
     if data.get("preferred_delivery") == "airport":
         await state.update_data(
+            delivery_method="Подача в Пулково",
             delivery_address="Пулково",
             delivery_price=CLIENT_DELIVERY_FEE,
         )
@@ -4106,26 +4126,92 @@ async def client_delivery_callback(
     if not callback.message or not callback.data:
         await callback.answer()
         return
-    if await state.get_state() != ClientBookingState.delivery.state:
+    current_state = await state.get_state()
+    choice = callback.data.removeprefix("client_delivery:")
+    if choice == "back":
+        if current_state != ClientBookingState.delivery_address.state:
+            await callback.answer(
+                "Этот выбор устарел. Начните бронирование заново.",
+                show_alert=True,
+            )
+            return
+        await callback.answer()
+        await state.set_state(ClientBookingState.delivery)
+        with suppress(Exception):
+            await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            "Шаг 3 из 5. Выберите способ получения:",
+            reply_markup=client_delivery_keyboard(),
+        )
+        return
+    if current_state != ClientBookingState.delivery.state:
         await callback.answer(
             "Этот выбор устарел. Начните бронирование заново.",
             show_alert=True,
         )
         return
-    choice = callback.data.removeprefix("client_delivery:")
-    if choice not in {"office", "airport"}:
+    if choice not in {"office", "airport", "address"}:
         await callback.answer("Недоступный вариант.", show_alert=True)
         return
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
+    if choice == "address":
+        await state.update_data(
+            delivery_method="Доставка по адресу",
+            delivery_address="",
+            delivery_price=CLIENT_DELIVERY_FEE,
+        )
+        await state.set_state(ClientBookingState.delivery_address)
+        await callback.message.answer(
+            "📍 Укажите точный адрес доставки автомобиля в Санкт-Петербурге "
+            "(улица, номер дома, отель/ЖК) или отправьте геопозицию:",
+            reply_markup=client_delivery_address_keyboard(),
+        )
+        return
+    delivery_method = "Подача в Пулково" if choice == "airport" else "Забрать в офисе"
     delivery_address = "Пулково" if choice == "airport" else "Офис Leon Rental"
     delivery_price = CLIENT_DELIVERY_FEE if choice == "airport" else 0
     await state.update_data(
+        delivery_method=delivery_method,
         delivery_address=delivery_address,
         delivery_price=delivery_price,
     )
     await state.set_state(ClientBookingState.client_name)
     await callback.message.answer(
+        "Шаг 4 из 5. Введите имя и фамилию арендатора:",
+        reply_markup=client_cancel_reply_keyboard(),
+    )
+
+
+async def client_delivery_address(
+    message: Message,
+    state: FSMContext,
+) -> None:
+    if await state.get_state() != ClientBookingState.delivery_address.state:
+        return
+    if message.location:
+        latitude = message.location.latitude
+        longitude = message.location.longitude
+        address = (
+            f"Геопозиция: {latitude:.6f}, {longitude:.6f}\n"
+            f"https://maps.google.com/?q={latitude},{longitude}"
+        )
+    else:
+        address = (message.text or "").strip()
+    if len(address) < 3:
+        await message.answer(
+            "Укажите полный адрес или отправьте геопозицию.",
+            reply_markup=client_delivery_address_keyboard(),
+        )
+        return
+    await state.update_data(
+        delivery_method="Доставка по адресу",
+        delivery_address=address,
+        delivery_price=CLIENT_DELIVERY_FEE,
+    )
+    await state.set_state(ClientBookingState.client_name)
+    await message.answer(
+        "Адрес доставки сохранён.\n"
         "Шаг 4 из 5. Введите имя и фамилию арендатора:",
         reply_markup=client_cancel_reply_keyboard(),
     )
@@ -4208,12 +4294,20 @@ def client_booking_confirmation_keyboard() -> InlineKeyboardMarkup:
 
 
 def _client_booking_summary_text(data: dict) -> str:
+    delivery_method = data.get("delivery_method") or data.get(
+        "delivery_address",
+        "—",
+    )
+    address_lines = ""
+    if delivery_method == "Доставка по адресу":
+        address_lines = f"Адрес доставки: {data.get('delivery_address', '—')}\n"
     return (
         "📋 Проверьте заявку:\n\n"
         f"Автомобиль: {data.get('car_name', '—')}\n"
         f"Период: {format_date_ru(data.get('start_date', ''))} — "
         f"{format_date_ru(data.get('end_date', ''))}\n"
-        f"Получение: {data.get('delivery_address', '—')}\n"
+        f"Способ получения: {delivery_method}\n"
+        f"{address_lines}"
         f"Арендатор: {data.get('client_name', '—')}\n"
         f"Контакт: {data.get('phone', '—')}\n\n"
         f"Аренда: {_format_number(data.get('rent_price', 0))} RUB\n"
@@ -4242,6 +4336,13 @@ def _client_booking_admin_text(
     booking_id: object,
     data: dict,
 ) -> str:
+    delivery_method = data.get("delivery_method") or data.get(
+        "delivery_address",
+        "—",
+    )
+    address_lines = ""
+    if delivery_method == "Доставка по адресу":
+        address_lines = f"Адрес доставки: {data.get('delivery_address', '—')}\n"
     return (
         "🔔 Новая заявка с сайта/бота!\n\n"
         f"Номер заявки: #{booking_id}\n"
@@ -4250,7 +4351,8 @@ def _client_booking_admin_text(
         f"({data.get('phone', '—')})\n"
         f"Даты: {format_date_ru(data.get('start_date', ''))} — "
         f"{format_date_ru(data.get('end_date', ''))}\n"
-        f"Доставка: {data.get('delivery_address', '—')}\n"
+        f"Способ получения: {delivery_method}\n"
+        f"{address_lines}"
         f"Итого: {_format_number(data.get('total_price', 0))} RUB\n"
         "Статус: Заявка с сайта/бота"
     )
@@ -9716,6 +9818,10 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
     dispatcher.message.register(
         client_booking_name,
         ClientBookingState.client_name,
+    )
+    dispatcher.message.register(
+        client_delivery_address,
+        ClientBookingState.delivery_address,
     )
     dispatcher.message.register(
         client_booking_phone,
