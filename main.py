@@ -3828,6 +3828,107 @@ def _client_booking_admin_text(
     )
 
 
+async def client_ai_booking_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
+    await callback.answer()
+    await start_client_booking(callback.message, state)
+
+
+def _client_ai_fleet_context(cars: list[dict]) -> str:
+    if not cars:
+        return (
+            "Актуальный список активных автомобилей сейчас не получен. "
+            "Не перечисляй автомобили и не называй цены."
+        )
+    lines = []
+    for car in cars:
+        name = _car_name(car).strip()
+        rate = _car_daily_rate(car).strip()
+        if name:
+            lines.append(
+                f"- {name}: {rate or 'суточный тариф не указан'} RUB/сутки"
+            )
+    return (
+        "Актуальный список активных автомобилей из листа «Автомобили»:\n"
+        + ("\n".join(lines) if lines else "список пуст")
+    )
+
+
+def _gemini_generate_content(prompt: str) -> str:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not configured.")
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    body = {
+        "systemInstruction": {
+            "parts": [{"text": CLIENT_AI_SYSTEM_PROMPT}],
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 8192,
+        },
+    }
+    request = Request(
+        endpoint,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Gemini request failed.") from exc
+
+    candidates = payload.get("candidates") or []
+    first_candidate = candidates[0] if candidates else {}
+    parts = first_candidate.get("content", {}).get("parts", [])
+    text = parts[0].get("text", "") if parts else ""
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("Gemini returned an empty response.")
+    return text.strip()
+
+
+async def client_ai_message(message: Message, state: FSMContext) -> None:
+    if await state.get_state():
+        return
+    prompt = (message.text or "").strip()
+    if not prompt:
+        return
+    try:
+        cars = await asyncio.to_thread(get_active_cars)
+        fleet_context = _client_ai_fleet_context(cars)
+        answer = await asyncio.to_thread(
+            _gemini_generate_content,
+            f"{fleet_context}\n\nВопрос клиента:\n{prompt}",
+        )
+    except Exception:
+        logger.exception("Could not answer client AI message")
+        await message.answer(
+            "Сейчас не удалось получить ответ ассистента. "
+            "Позвоните нам: +7 (911) 215-56-62.",
+            reply_markup=client_ai_booking_keyboard(),
+        )
+        return
+    await message.answer(
+        answer[:3900],
+        reply_markup=client_ai_booking_keyboard(),
+    )
+
+
 async def client_booking_receipt(
     message: Message,
     state: FSMContext,

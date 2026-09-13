@@ -30,6 +30,24 @@ class ClientBookingTest(unittest.TestCase):
         ]
         self.assertEqual(buttons, ["🏎 Выбрать автомобиль"])
 
+    def test_ai_booking_keyboard_has_booking_callback(self):
+        button = main.client_ai_booking_keyboard().inline_keyboard[0][0]
+        self.assertEqual(button.text, "🏎 Забронировать автомобиль")
+        self.assertEqual(button.callback_data, "client_ai:book")
+
+    def test_ai_fleet_context_contains_only_current_car_data(self):
+        context = main._client_ai_fleet_context(
+            [
+                {
+                    "Марка и Модель": "Porsche Panamera",
+                    "Цена / сутки (RUB)": "25 000",
+                }
+            ]
+        )
+        self.assertIn("Porsche Panamera", context)
+        self.assertIn("25 000 RUB/сутки", context)
+        self.assertIn("Актуальный список активных автомобилей", context)
+
     def test_public_booking_helpers_calculate_days_and_prepayment(self):
         self.assertEqual(main._client_booking_days("2026-09-15", "2026-09-17"), 3)
         self.assertEqual(main._client_prepayment(100_000), 30_000)
