@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 import gspread
 from dotenv import load_dotenv
@@ -4422,12 +4423,44 @@ def _diagnose_sheets_access_once() -> None:
     else:
         spreadsheet = gc_client.open(SPREADSHEET_NAME)
 
-    worksheet_titles = {worksheet.title for worksheet in spreadsheet.worksheets()}
+    worksheet_titles = _diagnostic_worksheet_titles(spreadsheet)
     conflicts = _worksheet_title_conflicts(worksheet_titles)
     if conflicts:
         raise SheetsStructureError(conflicts)
     if any(title not in worksheet_titles for title in REQUIRED_WORKSHEET_TITLES):
         raise SheetsStructureError()
+
+
+def _diagnostic_worksheet_titles(spreadsheet) -> set[str]:
+    """Read worksheet titles from validated metadata without leaking raw errors."""
+    fetch_metadata = getattr(spreadsheet, "fetch_sheet_metadata", None)
+    if not callable(fetch_metadata):
+        return {worksheet.title for worksheet in spreadsheet.worksheets()}
+
+    metadata = fetch_metadata()
+    if not isinstance(metadata, Mapping):
+        raise SheetsStructureError()
+
+    spreadsheet_properties = metadata.get("properties")
+    if not isinstance(spreadsheet_properties, Mapping):
+        raise SheetsStructureError()
+
+    sheet_data = metadata.get("sheets")
+    if not isinstance(sheet_data, list):
+        raise SheetsStructureError()
+
+    worksheet_titles: set[str] = set()
+    for sheet in sheet_data:
+        if not isinstance(sheet, Mapping):
+            raise SheetsStructureError()
+        properties = sheet.get("properties")
+        if not isinstance(properties, Mapping):
+            raise SheetsStructureError()
+        title = properties.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise SheetsStructureError()
+        worksheet_titles.add(title)
+    return worksheet_titles
 
 
 def diagnose_sheets_access(max_retries: int = 5) -> SheetsStartupStatus:

@@ -166,6 +166,17 @@ class _GspreadMetadataSpreadsheet(sheets_client.gspread.Spreadsheet):
         return deepcopy(self._metadata)
 
 
+class _MalformedMetadataSpreadsheet:
+    def __init__(self, metadata):
+        self._metadata = metadata
+        self.metadata_reads = 0
+
+    def fetch_sheet_metadata(self, params=None):
+        del params
+        self.metadata_reads += 1
+        return deepcopy(self._metadata)
+
+
 class _DiagnosticMessage:
     def __init__(self, user_id):
         self.from_user = SimpleNamespace(id=user_id)
@@ -858,6 +869,47 @@ class SheetsStartupTest(unittest.TestCase):
         self.assertEqual(status.attempts, 1)
         self.assertEqual(client.open_calls, 1)
         self.assertEqual(spreadsheet.write_attempts, 0)
+
+    def test_read_only_diagnostic_classifies_malformed_metadata_safely(self):
+        malformed_metadata = (
+            {"sheets": []},
+            {
+                "properties": {},
+                "sheets": [{"properties": {"sheetId": 1}}],
+            },
+            {
+                "properties": {},
+                "sheets": [{}],
+            },
+        )
+
+        for metadata in malformed_metadata:
+            with self.subTest(metadata=metadata):
+                spreadsheet = _MalformedMetadataSpreadsheet(metadata)
+                client = _ReadOnlySheetsClient(spreadsheet)
+                with (
+                    patch.object(sheets_client, "SERVICE_ACCOUNT_JSON", None),
+                    patch.object(
+                        sheets_client,
+                        "SERVICE_ACCOUNT_FILE",
+                        "credentials.json",
+                    ),
+                    patch.object(
+                        sheets_client.gspread,
+                        "service_account",
+                        return_value=client,
+                    ),
+                ):
+                    status = sheets_client.diagnose_sheets_access()
+
+                self.assertFalse(status.ready)
+                self.assertEqual(status.reason, "structure")
+                self.assertEqual(status.attempts, 1)
+                self.assertIn("обязательные листы", status.hint)
+                self.assertNotIn("KeyError", status.hint)
+                self.assertNotIn("properties", status.hint)
+                self.assertEqual(client.open_calls, 1)
+                self.assertEqual(spreadsheet.metadata_reads, 1)
 
     def test_read_only_diagnostic_retries_quota_without_exposing_error(self):
         spreadsheet = _ReadOnlySpreadsheet(sheets_client.REQUIRED_WORKSHEET_TITLES)
