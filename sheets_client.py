@@ -749,6 +749,67 @@ def get_active_manager_ids() -> list[int]:
     return manager_ids
 
 
+def find_manager_chat_ids(username: str) -> list[int]:
+    """Find active manager chat IDs by Telegram username."""
+    target_username = str(username or "").strip().lstrip("@").casefold()
+    if not target_username:
+        return []
+    manager_ids: list[int] = []
+    seen_ids: set[int] = set()
+    username_fields = (
+        "Username",
+        "username",
+        "Telegram username",
+        "Telegram Username",
+        "Имя пользователя",
+        "Логин",
+    )
+    chat_id_fields = (
+        "Telegram ID",
+        "Chat ID",
+        "chat_id",
+        "ID менеджера",
+        "ID Менеджера",
+    )
+    for manager in _sheets_read(
+        ws_managers.get_all_records,
+        "reading manager chat IDs",
+    ):
+        username_value = next(
+            (
+                manager.get(field)
+                for field in username_fields
+                if manager.get(field)
+            ),
+            "",
+        )
+        if str(username_value).strip().lstrip("@").casefold() != target_username:
+            continue
+        active_value = str(
+            manager.get("Доступ активен", manager.get("Active", "да"))
+        ).strip().casefold()
+        if active_value and active_value not in {"да", "yes", "true", "1"}:
+            continue
+        raw_chat_id = next(
+            (
+                manager.get(field)
+                for field in chat_id_fields
+                if manager.get(field) not in (None, "")
+            ),
+            "",
+        )
+        try:
+            chat_id = int(
+                str(raw_chat_id).strip().replace(" ", "").removesuffix(".0")
+            )
+        except (TypeError, ValueError):
+            continue
+        if chat_id not in seen_ids:
+            seen_ids.add(chat_id)
+            manager_ids.append(chat_id)
+    return manager_ids
+
+
 def get_pending_notification_manager_ids(
     target_date: datetime.date,
 ) -> list[int]:

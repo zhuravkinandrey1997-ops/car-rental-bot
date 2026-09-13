@@ -74,6 +74,7 @@ from sheets_client import (
     get_partner_cars,
     get_partner_expenses,
     get_manager_access,
+    find_manager_chat_ids,
     diagnose_sheets_access,
     ensure_sheets_ready,
     find_worksheet_title_conflicts,
@@ -4865,10 +4866,13 @@ async def client_rules_handler(message: Message, state: FSMContext) -> None:
 
 async def client_manager_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer(
-        "Наш менеджер поможет подобрать автомобиль и оформить аренду.\n"
-        "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
-        reply_markup=client_welcome_keyboard(),
+    await asyncio.gather(
+        message.answer(
+            "Наш менеджер поможет подобрать автомобиль и оформить аренду.\n"
+            "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
+            reply_markup=client_welcome_keyboard(),
+        ),
+        _notify_manager_contact_request(message),
     )
 
 
