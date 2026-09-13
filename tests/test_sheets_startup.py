@@ -203,6 +203,56 @@ class SheetsStartupTest(unittest.TestCase):
             ],
         )
 
+    def test_full_bootstrap_rejects_every_legacy_title_conflict(self):
+        for old_title, new_title in sheets_client.SHEET_TITLE_MAP.items():
+            spreadsheet = _Spreadsheet(
+                _startup_worksheets(old_title, new_title),
+            )
+            with (
+                _patch_startup_worksheets(),
+                patch.object(sheets_client, "sh", spreadsheet),
+            ):
+                with self.assertRaises(sheets_client.SheetsStructureError) as context:
+                    sheets_client._initialize_worksheets()
+
+            self.assertEqual(
+                context.exception.conflicts,
+                ((old_title, new_title),),
+            )
+            self.assertEqual(spreadsheet.metadata_reads, 1)
+            self.assertEqual(
+                [worksheet.title_updates for worksheet in spreadsheet._worksheets],
+                [[], []],
+            )
+
+    def test_full_bootstrap_checks_all_conflicts_before_renaming_any_sheet(self):
+        spreadsheet = _Spreadsheet(
+            _startup_worksheets(
+                "Cars",
+                "Автомобили",
+                "Bookings",
+                "Бронирования",
+            )
+        )
+        with (
+            _patch_startup_worksheets(),
+            patch.object(sheets_client, "sh", spreadsheet),
+        ):
+            with self.assertRaises(sheets_client.SheetsStructureError) as context:
+                sheets_client._initialize_worksheets()
+
+        self.assertEqual(
+            context.exception.conflicts,
+            (
+                ("Cars", "Автомобили"),
+                ("Bookings", "Бронирования"),
+            ),
+        )
+        self.assertEqual(
+            [worksheet.title_updates for worksheet in spreadsheet._worksheets],
+            [[], [], [], []],
+        )
+
     def test_full_bootstrap_creates_missing_service_sheets_only_once(self):
         spreadsheet = _Spreadsheet(
             _startup_worksheets(
@@ -357,6 +407,24 @@ class SheetsStartupTest(unittest.TestCase):
         self.assertEqual(initialize.call_count, 2)
         sleep.assert_called_once_with(3)
 
+    def test_startup_does_not_retry_worksheet_title_conflict_as_quota(self):
+        failure = sheets_client.SheetsStructureError(
+            (("Cars", "Автомобили"),),
+        )
+        with (
+            patch.object(
+                sheets_client,
+                "_initialize_worksheets",
+                side_effect=failure,
+            ) as initialize,
+            patch.object(sheets_client.time, "sleep") as sleep,
+        ):
+            with self.assertRaises(sheets_client.SheetsStructureError):
+                sheets_client._initialize_worksheets_with_retry()
+
+        initialize.assert_called_once_with()
+        sleep.assert_not_called()
+
     def test_exhausted_startup_retries_report_all_attempts(self):
         attempts = [0]
         with (
@@ -421,6 +489,18 @@ class SheetsStartupTest(unittest.TestCase):
 
         self.assertEqual(status.reason, "structure")
         self.assertIn("обязательные листы", status.hint)
+
+    def test_startup_status_classifies_title_conflict_without_raw_exception(self):
+        failure = sheets_client.SheetsStructureError(
+            (("Cars", "Автомобили"),),
+        )
+
+        status = sheets_client._startup_failure_status(failure, 1)
+
+        self.assertEqual(status.reason, "structure")
+        self.assertIn("конфликтующие названия листов", status.hint)
+        self.assertIn("Cars / Автомобили", status.hint)
+        self.assertNotIn("Google Sheets worksheet structure is invalid", status.hint)
 
     def test_read_only_diagnostic_reports_ready_without_writes(self):
         spreadsheet = _ReadOnlySpreadsheet(

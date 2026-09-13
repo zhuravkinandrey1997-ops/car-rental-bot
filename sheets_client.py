@@ -148,7 +148,14 @@ class SheetsStartupError(RuntimeError):
 
 
 class SheetsStructureError(RuntimeError):
-    """Internal marker for a missing required worksheet during diagnostics."""
+    """Internal marker for an invalid worksheet structure during startup."""
+
+    def __init__(
+        self,
+        conflicts: tuple[tuple[str, str], ...] = (),
+    ):
+        self.conflicts = tuple(conflicts)
+        super().__init__("Google Sheets worksheet structure is invalid")
 
 
 SHEETS_STARTUP_HINTS = {
@@ -275,15 +282,13 @@ def _migrate_sheet_titles_from_cache(
     worksheets: dict[str, object],
 ) -> list[tuple[str, str]]:
     """Rename legacy titles using one already-loaded metadata response."""
+    conflicts = _worksheet_title_conflicts(worksheets)
+    if conflicts:
+        raise SheetsStructureError(conflicts)
+
     renamed: list[tuple[str, str]] = []
     for old_title, new_title in SHEET_TITLE_MAP.items():
         source = worksheets.get(old_title)
-        target = worksheets.get(new_title)
-        if source is not None and target is not None:
-            raise RuntimeError(
-                f"Worksheet title conflict: both {old_title!r} and "
-                f"{new_title!r} exist."
-            )
         if source is None:
             continue
         source.update_title(new_title)
@@ -298,6 +303,20 @@ def _migrate_sheet_titles_from_cache(
     else:
         logger.info("Worksheet title migration is already complete")
     return renamed
+
+
+def _worksheet_title_conflicts(
+    worksheets: dict[str, object] | set[str] | tuple[str, ...],
+) -> tuple[tuple[str, str], ...]:
+    """Return every legacy/current title pair present in one metadata snapshot."""
+    titles = set(worksheets)
+    return tuple(
+        (old_title, new_title)
+        for old_title, new_title in SHEET_TITLE_MAP.items()
+        if old_title in titles and new_title in titles
+    )
+
+
 def _column_letter(column_number: int) -> str:
     """Convert a one-based column number to an A1 column label."""
     result = ""
@@ -3502,6 +3521,9 @@ def _initialize_worksheets_with_retry(
 
 def _startup_failure_reason(error: Exception) -> str:
     """Classify a startup failure without exposing its raw error text."""
+    if isinstance(error, SheetsStructureError):
+        return "structure"
+
     response = getattr(error, "response", None)
     status_code = getattr(response, "status_code", None)
     if isinstance(response, dict):
@@ -3519,11 +3541,25 @@ def _startup_failure_reason(error: Exception) -> str:
         return "quota"
     if _is_transient_spreadsheet_error(error):
         return "network"
-    if isinstance(error, SheetsStructureError):
-        return "structure"
     if isinstance(error, gspread.exceptions.WorksheetNotFound):
         return "structure"
     return "configuration"
+
+
+def _startup_failure_hint(error: Exception, reason: str) -> str:
+    """Build a safe startup hint, including only known worksheet titles."""
+    if reason == "structure" and isinstance(error, SheetsStructureError):
+        if error.conflicts:
+            pairs = ", ".join(
+                f"{old_title} / {new_title}"
+                for old_title, new_title in error.conflicts
+            )
+            return (
+                "Обнаружены конфликтующие названия листов: "
+                f"{pairs}. Оставьте только один вариант названия "
+                "для каждой пары и повторите запуск."
+            )
+    return SHEETS_STARTUP_HINTS[reason]
 
 
 def _startup_failure_status(
@@ -3536,7 +3572,7 @@ def _startup_failure_status(
         ready=False,
         reason=reason,
         attempts=max(1, attempts),
-        hint=SHEETS_STARTUP_HINTS[reason],
+        hint=_startup_failure_hint(error, reason),
     )
 
 
@@ -3556,6 +3592,9 @@ def _diagnose_sheets_access_once() -> None:
         spreadsheet = gc_client.open(SPREADSHEET_NAME)
 
     worksheet_titles = {worksheet.title for worksheet in spreadsheet.worksheets()}
+    conflicts = _worksheet_title_conflicts(worksheet_titles)
+    if conflicts:
+        raise SheetsStructureError(conflicts)
     if any(title not in worksheet_titles for title in REQUIRED_WORKSHEET_TITLES):
         raise SheetsStructureError()
 
@@ -3578,7 +3617,7 @@ def diagnose_sheets_access(max_retries: int = 5) -> SheetsStartupStatus:
                     ready=False,
                     reason=reason,
                     attempts=attempts,
-                    hint=SHEETS_STARTUP_HINTS[reason],
+                    hint=_startup_failure_hint(error, reason),
                 )
             time.sleep(3)
         else:
