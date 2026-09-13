@@ -1058,10 +1058,9 @@ def _client_booking_button_text(car: dict) -> str:
         name = re.sub(r"\bMercedes-Benz\b", "MB", name, flags=re.IGNORECASE)
 
     year = _car_year(car)
-    price_value = safe_int(_car_daily_rate(car))
     price_text = (
-        f"{_format_number(price_value)} ₽/сут"
-        if price_value > 0
+        f"{_format_number(_car_rate_for_days(car, 1))} ₽/сут"
+        if _car_rate_for_days(car, 1) > 0
         else "цена уточняется"
     )
     year_text = f" ({year})" if year else ""
@@ -1982,6 +1981,45 @@ def _car_daily_rate(car: dict) -> str:
         "Цена за сутки",
         "Цена",
         "Стоимость",
+    )
+
+
+_CAR_TARIFF_HEADERS = (
+    "Тариф 1 день",
+    "Тариф 2-3 дня",
+    "Тариф 4-6 дней",
+    "Тариф 7-15 дней",
+    "Тариф 16-30 дней",
+)
+
+
+def _car_tariff_rates(car: dict) -> list[int]:
+    fallback = safe_int(_car_daily_rate(car))
+    return [
+        max(0, safe_int(car.get(header)) or fallback)
+        for header in _CAR_TARIFF_HEADERS
+    ]
+
+
+def _car_rate_for_days(car: dict, days: int) -> int:
+    normalized_days = max(1, int(days))
+    rates = _car_tariff_rates(car)
+    if normalized_days == 1:
+        return rates[0]
+    if normalized_days <= 3:
+        return rates[1]
+    if normalized_days <= 6:
+        return rates[2]
+    if normalized_days <= 15:
+        return rates[3]
+    return rates[4]
+
+
+def _client_fleet_price_range_text(car: dict) -> str:
+    rates = _car_tariff_rates(car)
+    return (
+        f"от {_format_number(rates[4])} "
+        f"до {_format_number(rates[0])} RUB/сутки"
     )
 
 
@@ -3873,7 +3911,7 @@ async def show_menu(message: Message, state: FSMContext) -> None:
 def _client_booking_days(start_date: str, end_date: str) -> int:
     start = datetime.date.fromisoformat(start_date)
     end = datetime.date.fromisoformat(end_date)
-    return (end - start).days + 1
+    return max(1, (end - start).days)
 
 
 def _client_period_has_occupied_dates(
@@ -3975,7 +4013,7 @@ async def _send_client_calendar(
 
 
 def _client_fleet_card_text(car: dict) -> str:
-    daily_rate = _car_daily_rate(car)
+    daily_rate = _client_fleet_price_range_text(car)
     deposit = _car_base_deposit(car)
     deposit_text = (
         f"{_format_number(deposit)} RUB" if deposit is not None else "уточняется"
@@ -3984,14 +4022,14 @@ def _client_fleet_card_text(car: dict) -> str:
     return (
         f"🏎 {_car_name(car)} ({year} г.)\n\n"
         f"• Класс: {_car_class(car)}\n"
-        f"• Стоимость: {daily_rate} RUB/сутки\n"
+        f"• Стоимость: {daily_rate}\n"
         f"• Страховой залог: {deposit_text}\n"
         f"• Суточный пробег: {_car_mileage_limit(car)} км"
     )
 
 
 def _client_fleet_card_caption(car: dict) -> str:
-    daily_rate = html.escape(_car_daily_rate(car))
+    daily_rate = html.escape(_client_fleet_price_range_text(car))
     deposit = _car_base_deposit(car)
     deposit_text = (
         f"{_format_number(deposit)} RUB" if deposit is not None else "уточняется"
@@ -4000,7 +4038,7 @@ def _client_fleet_card_caption(car: dict) -> str:
     return (
         f"🏎 <b>{html.escape(_car_name(car))}</b> ({year} г.)\n\n"
         f"• <b>Класс:</b> {html.escape(_car_class(car))}\n"
-        f"• <b>Стоимость:</b> {daily_rate} RUB/сутки\n"
+        f"• <b>Стоимость:</b> {daily_rate}\n"
         f"• <b>Страховой залог:</b> {html.escape(deposit_text)}\n"
         f"• <b>Суточный пробег:</b> "
         f"{html.escape(_car_mileage_limit(car))} км"
@@ -4155,7 +4193,7 @@ async def client_booking_car_callback(
             show_alert=True,
         )
         return
-    daily_rate = safe_int(_car_daily_rate(car))
+    daily_rate = _car_rate_for_days(car, 1)
     if daily_rate <= 0:
         await callback.answer("Для автомобиля не указан тариф.", show_alert=True)
         return
@@ -4180,6 +4218,7 @@ async def client_booking_car_callback(
         car_id=_car_id(car),
         car_name=_car_name(car),
         daily_rate=daily_rate,
+        base_daily_rate=daily_rate,
         client_occupied_dates=occupied_dates,
     )
     await state.set_state(ClientBookingState.start_date)
@@ -4271,6 +4310,28 @@ async def client_booking_date_text(
     )
 
 
+def _client_period_pricing_text(
+    start_date: str,
+    end_date: str,
+    days: int,
+    daily_rate: int,
+    rent_price: int,
+    savings: int,
+) -> str:
+    text = (
+        f"Период: {format_date_ru(start_date)} — "
+        f"{format_date_ru(end_date)} ({days} сут.)\n"
+        f"Суточный тариф: {_format_number(daily_rate)} RUB/сутки\n"
+        f"Итого аренда: {_format_number(rent_price)} RUB"
+    )
+    if savings > 0:
+        text += (
+            f"\n🔥 Скидка за срок аренды: экономия "
+            f"{_format_number(savings)} RUB!"
+        )
+    return text
+
+
 async def _finish_client_booking_dates(
     message: Message,
     state: FSMContext,
@@ -4321,10 +4382,24 @@ async def _finish_client_booking_dates(
         )
         return
     days = _client_booking_days(start_date, end_date)
-    rent_price = int(data["daily_rate"]) * days
+    daily_rate = _car_rate_for_days(car, days)
+    base_daily_rate = _car_rate_for_days(car, 1)
+    rent_price = daily_rate * days
+    savings = max(0, (base_daily_rate * days) - rent_price)
     await state.update_data(
         days=days,
+        daily_rate=daily_rate,
+        base_daily_rate=base_daily_rate,
         rent_price=rent_price,
+        savings=savings,
+    )
+    pricing_text = _client_period_pricing_text(
+        start_date,
+        end_date,
+        days,
+        daily_rate,
+        rent_price,
+        savings,
     )
     if data.get("preferred_delivery") == "airport":
         await state.update_data(
@@ -4334,16 +4409,17 @@ async def _finish_client_booking_dates(
         )
         await state.set_state(ClientBookingState.client_name)
         await message.answer(
-            f"Подача в Пулково выбрана: {_format_number(CLIENT_DELIVERY_FEE)} RUB.\n"
+            f"{pricing_text}\n"
+            f"Подача в Пулково: {_format_number(CLIENT_DELIVERY_FEE)} RUB.\n"
             "Шаг 4 из 5. Введите имя и фамилию арендатора:",
             reply_markup=client_cancel_reply_keyboard(),
         )
         return
     await state.set_state(ClientBookingState.delivery)
     await message.answer(
-        f"Период: {format_date_ru(start_date)} — {format_date_ru(end_date)}\n"
+        f"{pricing_text}\n"
         f"Автомобиль: {_car_name(car)}\n"
-        f"Стоимость аренды: {_format_number(rent_price)} RUB\n\n"
+        "\n"
         "Шаг 3 из 5. Выберите способ получения:",
         reply_markup=client_delivery_keyboard(),
     )
@@ -4531,16 +4607,27 @@ def _client_booking_summary_text(data: dict) -> str:
     address_lines = ""
     if delivery_method == "Доставка по адресу":
         address_lines = f"Адрес доставки: {data.get('delivery_address', '—')}\n"
+    days = max(1, int(data.get("days", 1) or 1))
+    daily_rate = int(data.get("daily_rate", 0) or 0)
+    rent_price = int(data.get("rent_price", 0) or 0)
+    savings = int(data.get("savings", 0) or 0)
+    pricing_text = _client_period_pricing_text(
+        data.get("start_date", ""),
+        data.get("end_date", ""),
+        days,
+        daily_rate,
+        rent_price,
+        savings,
+    )
     return (
         "📋 Проверьте заявку:\n\n"
         f"Автомобиль: {data.get('car_name', '—')}\n"
-        f"Период: {format_date_ru(data.get('start_date', ''))} — "
-        f"{format_date_ru(data.get('end_date', ''))}\n"
+        f"{pricing_text}\n"
         f"Способ получения: {delivery_method}\n"
         f"{address_lines}"
         f"Арендатор: {data.get('client_name', '—')}\n"
         f"Контакт: {data.get('phone', '—')}\n\n"
-        f"Аренда: {_format_number(data.get('rent_price', 0))} RUB\n"
+        f"Аренда: {_format_number(rent_price)} RUB\n"
         f"Подача: {_format_number(data.get('delivery_price', 0))} RUB\n"
         f"Итого: {_format_number(data.get('total_price', 0))} RUB\n\n"
         "Нажмите «Подтвердить заявку», чтобы отправить запрос менеджеру."

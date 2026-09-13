@@ -52,6 +52,31 @@ BOOKING_HEADERS = [
     "Плановое окончание",
     "Источник",
 ]
+CAR_TARIFF_HEADERS = [
+    "Тариф 1 день",
+    "Тариф 2-3 дня",
+    "Тариф 4-6 дней",
+    "Тариф 7-15 дней",
+    "Тариф 16-30 дней",
+]
+CAR_TARIFF_VALUES = {
+    "Jaguar F-Type": [25000, 23500, 22000, 21500, 16000],
+    "Porsche Cayenne Coupe (7805 KT-2)": [18000, 17500, 17000, 16500, 15000],
+    "Porsche Panamera (7882 TP-7)": [30000, 28500, 28000, 27500, 25000],
+    "Mercedes-Benz S500 4Matic": [25000, 24500, 23000, 22500, 20000],
+    "Dodge Challenger": [16000, 15500, 14000, 13000, 11000],
+    "Mercedes-Maybach S580": [50000, 50000, 50000, 50000, 40000],
+    "Lamborghini Urus": [80000, 80000, 80000, 80000, 50000],
+}
+CAR_TARIFF_MATCHES = {
+    "Jaguar F-Type": ("Jaguar F-Type", ""),
+    "Porsche Cayenne Coupe (7805 KT-2)": ("Porsche Cayenne", "7805 KT-2"),
+    "Porsche Panamera (7882 TP-7)": ("Porsche Panamera", "7882 TP-7"),
+    "Mercedes-Benz S500 4Matic": ("Mercedes-Benz S500 4Matic", ""),
+    "Dodge Challenger": ("Dodge Challenger", ""),
+    "Mercedes-Maybach S580": ("Mercedes Maybach S580", ""),
+    "Lamborghini Urus": ("Lamborghini Urus", ""),
+}
 ACCEPTANCE_ACT_HEADERS = [
     "ID Акта",
     "ID Брони",
@@ -3503,6 +3528,131 @@ def get_cancellable_cars() -> list[dict]:
 
 def get_all_cars():
     return _sheets_read(ws_cars.get_all_records, "reading all cars")
+
+
+def _normalized_car_text(value: object) -> str:
+    return " ".join(
+        str(value or "")
+        .strip()
+        .casefold()
+        .replace("-", " ")
+        .split()
+    )
+
+
+def _car_tariff_target_matches(
+    model_text: object,
+    plate_text: object,
+    target: str,
+) -> bool:
+    model = _normalized_car_text(model_text)
+    plate = _normalized_car_text(plate_text)
+    target_model, target_plate = CAR_TARIFF_MATCHES.get(
+        target,
+        (target, ""),
+    )
+    normalized_target = _normalized_car_text(target_model)
+    if target_plate:
+        if _normalized_car_text(target_plate) not in plate:
+            return False
+    target_words = set(normalized_target.split())
+    model_words = set(model.split())
+    return target_words.issubset(model_words)
+
+
+def _ensure_car_tariff_headers(ws) -> list[str]:
+    headers = _sheets_read(
+        lambda: ws.row_values(1),
+        f"reading headers from {getattr(ws, 'title', 'worksheet')}",
+    )
+    missing_headers = [
+        header for header in CAR_TARIFF_HEADERS if header not in headers
+    ]
+    if not missing_headers:
+        return headers
+    price_header = "Цена / сутки (RUB)"
+    if price_header not in headers:
+        raise ValueError(
+            f"Автомобили sheet has no {price_header!r} header"
+        )
+    insert_at = headers.index(price_header) + 2
+    _ensure_column_capacity(ws, len(headers) + len(missing_headers))
+    _sheets_write(
+        lambda: ws.insert_cols(
+            [[""] for _ in missing_headers],
+            col=insert_at,
+            value_input_option="USER_ENTERED",
+        ),
+        "inserting car tariff columns",
+    )
+    headers[insert_at - 1:insert_at - 1] = missing_headers
+    _sheets_write(
+        lambda: ws.update(
+            [headers],
+            range_name=f"A1:{_column_letter(len(headers))}1",
+            value_input_option="USER_ENTERED",
+        ),
+        "updating car tariff headers",
+    )
+    return headers
+
+
+def update_car_tariffs() -> dict[str, int]:
+    """Add the tier columns and apply the agreed tariffs to matching cars."""
+    headers = _ensure_car_tariff_headers(ws_cars)
+    values = _sheets_read(
+        ws_cars.get_all_values,
+        "reading cars for tariff migration",
+    )
+    if not values:
+        raise ValueError("Автомобили sheet is empty")
+
+    model_columns = [
+        index for index, header in enumerate(headers)
+        if header in {
+            "Марка и Модель",
+            "Марка и модель",
+            "Марка Модель",
+            "Название",
+            "Авто",
+            "Модель",
+        }
+    ]
+    plate_columns = [
+        index for index, header in enumerate(headers)
+        if header in {"Госномер", "Номер авто", "Номер", "Plate"}
+    ]
+    if not model_columns:
+        raise ValueError("Автомобили sheet has no model column")
+
+    updated: dict[str, int] = {}
+    for row_number, row in enumerate(values[1:], start=2):
+        model = next(
+            (row[index] for index in model_columns if index < len(row)),
+            "",
+        )
+        plate = next(
+            (row[index] for index in plate_columns if index < len(row)),
+            "",
+        )
+        target = next(
+            (
+                target
+                for target in CAR_TARIFF_VALUES
+                if _car_tariff_target_matches(model, plate, target)
+            ),
+            None,
+        )
+        if target is None:
+            continue
+        _update_row_values(
+            ws_cars,
+            row_number,
+            headers,
+            dict(zip(CAR_TARIFF_HEADERS, CAR_TARIFF_VALUES[target])),
+        )
+        updated[target] = updated.get(target, 0) + 1
+    return updated
 
 
 def _contains_car_keyword(

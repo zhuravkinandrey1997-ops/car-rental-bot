@@ -163,9 +163,40 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.clear_calls, 1)
 
     def test_public_booking_helpers_calculate_days_and_prepayment(self):
-        self.assertEqual(main._client_booking_days("2026-09-15", "2026-09-17"), 3)
+        self.assertEqual(main._client_booking_days("2026-09-15", "2026-09-17"), 2)
+        self.assertEqual(main._client_booking_days("2026-09-15", "2026-09-15"), 1)
         self.assertEqual(main._client_prepayment(100_000), 30_000)
         self.assertGreaterEqual(main._client_prepayment(1), 1)
+
+    def test_client_tariffs_select_by_period_and_show_savings(self):
+        car = {
+            "Цена / сутки (RUB)": "25 000",
+            "Тариф 1 день": "25000",
+            "Тариф 2-3 дня": "23500",
+            "Тариф 4-6 дней": "22000",
+            "Тариф 7-15 дней": "21500",
+            "Тариф 16-30 дней": "16000",
+        }
+
+        self.assertEqual(main._car_rate_for_days(car, 1), 25_000)
+        self.assertEqual(main._car_rate_for_days(car, 3), 23_500)
+        self.assertEqual(main._car_rate_for_days(car, 6), 22_000)
+        self.assertEqual(main._car_rate_for_days(car, 15), 21_500)
+        self.assertEqual(main._car_rate_for_days(car, 30), 16_000)
+        self.assertEqual(
+            main._client_period_pricing_text(
+                "2026-09-15",
+                "2026-09-18",
+                3,
+                23_500,
+                70_500,
+                4_500,
+            ),
+            "Период: 15.09.2026 — 18.09.2026 (3 сут.)\n"
+            "Суточный тариф: 23 500 RUB/сутки\n"
+            "Итого аренда: 70 500 RUB\n"
+            "🔥 Скидка за срок аренды: экономия 4 500 RUB!",
+        )
 
     def test_payment_instruction_contains_official_details_and_receipt_requirement(self):
         instruction = main._client_payment_instruction(30_900)
@@ -206,7 +237,7 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("BMW 5", card)
         self.assertIn("2024 г.", card)
         self.assertIn("Класс: Бизнес", card)
-        self.assertIn("Стоимость: 12 000 RUB/сутки", card)
+        self.assertIn("Стоимость: от 12 000 до 12 000 RUB/сутки", card)
         self.assertIn("Страховой залог: 50 000 RUB", card)
         self.assertIn("Суточный пробег: 300 км", card)
 
@@ -223,7 +254,10 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.assertIn("🏎 <b>Lamborghini Urus</b> (2023 г.)", caption)
-        self.assertIn("• <b>Стоимость:</b> 25 000 RUB/сутки", caption)
+        self.assertIn(
+            "• <b>Стоимость:</b> от 25 000 до 25 000 RUB/сутки",
+            caption,
+        )
         self.assertIn("• <b>Страховой залог:</b> 150 000 RUB", caption)
 
     def test_client_photo_sources_prioritize_url_and_find_model_asset(self):
