@@ -3806,12 +3806,24 @@ def _client_fleet_card_text(car: dict) -> str:
 
 
 async def _load_client_active_cars() -> list[dict]:
-    cars = await asyncio.to_thread(get_active_cars)
+    """Load the public fleet without considering current rental occupancy.
+
+    The client catalog and the first booking step are a showroom: a car that
+    is currently rented must still be visible. Date availability is checked
+    later in ``_finish_client_booking_dates`` after the client chooses dates.
+    """
+    cars = await asyncio.to_thread(get_all_cars)
+    excluded_statuses = {"списан", "в ремонте"}
     return [
         dict(car)
         for car in cars
-        if str(car.get("Статус", "") or "").strip().casefold()
-        in {"активен", "свободен", "active", "available", ""}
+        if str(
+            car.get("Статус")
+            or car.get("Состояние")
+            or car.get("Status")
+            or ""
+        ).strip().casefold()
+        not in excluded_statuses
     ]
 
 
