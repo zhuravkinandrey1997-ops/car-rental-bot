@@ -1891,11 +1891,14 @@ def add_expense(
     name: str,
     note: str,
     expense_date: str,
+    expense_id: str | None = None,
 ) -> str:
-    expense_id = f"EXP-{uuid.uuid4().hex[:16].upper()}"
+    expense_id = expense_id or f"EXP-{uuid.uuid4().hex[:16].upper()}"
     with EXPENSES_LOCK:
-        _append_record(
+        _upsert_record(
             ws_expenses,
+            "ID Записи",
+            expense_id,
             {
                 "ID Записи": expense_id,
                 "Дата": expense_date,

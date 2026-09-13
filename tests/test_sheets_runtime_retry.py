@@ -42,6 +42,35 @@ class _RuntimeWorksheet:
 
 
 class SheetsRuntimeRetryTest(unittest.TestCase):
+    def test_expense_accepts_reusable_idempotency_key(self):
+        with patch.object(sheets_client, "_upsert_record") as upsert:
+            first_id = sheets_client.add_expense(
+                100,
+                "Мойка",
+                "Общие расходы",
+                123,
+                "Менеджер",
+                "Повтор операции",
+                "2026-09-13",
+                "EXP-RETRY-1",
+            )
+            second_id = sheets_client.add_expense(
+                100,
+                "Мойка",
+                "Общие расходы",
+                123,
+                "Менеджер",
+                "Повтор операции",
+                "2026-09-13",
+                "EXP-RETRY-1",
+            )
+
+        self.assertEqual(first_id, "EXP-RETRY-1")
+        self.assertEqual(second_id, "EXP-RETRY-1")
+        self.assertEqual(upsert.call_count, 2)
+        self.assertEqual(upsert.call_args_list[0].args[2], "EXP-RETRY-1")
+        self.assertEqual(upsert.call_args_list[1].args[2], "EXP-RETRY-1")
+
     def test_runtime_retry_retries_all_transient_gspread_api_statuses(self):
         for status_code in (408, 429, 500, 502, 503, 504):
             with self.subTest(status_code=status_code):

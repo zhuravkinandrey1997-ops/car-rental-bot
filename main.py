@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import traceback
+import uuid
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -648,7 +649,21 @@ def _operation_source(data: dict) -> str:
         return HEAVY_LUX_PARTNER_SOURCE
     return data.get("source") or LEON_RENTAL_SOURCE
 
-
+def _sheets_retry_prompt(operation: str, error: Exception) -> str:
+    """Return a safe retry message without exposing provider internals."""
+    try:
+        reason = sheets_operation_failure_hint(error)
+    except Exception:
+        reason = (
+            "Google Sheets временно недоступен. "
+            "Повторите действие позже."
+        )
+    return (
+        f"Не удалось {operation} в Google Sheets.\n"
+        f"Причина: {reason}\n\n"
+        "Введённые данные и текущий шаг сохранены. "
+        "После восстановления нажмите «Подтвердить» ещё раз."
+    )
 def direct_deposit_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -3269,7 +3284,11 @@ async def overdue_return_callback(
             raise ValueError("Автомобиль из брони не найден.")
     except Exception as error:
         logger.exception("Could not open overdue return for booking %s", booking_id)
-        await callback.answer(str(error), show_alert=True)
+        await callback.answer(
+            "Не удалось открыть сценарий возврата. "
+            f"Причина: {sheets_operation_failure_hint(error)}",
+            show_alert=True,
+        )
         return
 
     await callback.answer("Открываем сценарий приёма авто.")
@@ -3351,15 +3370,19 @@ async def overdue_extension_input(
             booking_id,
             planned_end_at,
         )
-    except Exception:
+    except Exception as error:
         logger.exception(
             "Could not extend rental for booking %s",
             booking_id,
         )
-        await state.clear()
         await message.answer(
-            "Не удалось обновить плановое окончание в Google Sheets.",
-            reply_markup=get_main_keyboard(message.from_user.id),
+            _sheets_retry_prompt(
+                "обновить плановое окончание аренды",
+                error,
+            ).replace(
+                "нажмите «Подтвердить» ещё раз.",
+                "повторите отправку этой даты ещё раз.",
+            ),
         )
         return
 
@@ -6121,17 +6144,22 @@ async def expense_category_callback(
         return
     await callback.answer(f"Выбрано: {category}")
     await callback.message.edit_reply_markup(reply_markup=None)
+    await state.update_data(expense_category=category)
     try:
         cars = list(get_all_cars())
-    except Exception:
+    except Exception as error:
         logger.exception("Could not load cars for expense")
-        await state.clear()
-        await callback.message.answer(
-            "Не удалось получить список автомобилей.",
-            reply_markup=get_main_keyboard(callback.from_user.id),
+        retry_message = await callback.message.answer(
+            _sheets_retry_prompt(
+                "загрузить автомобили для расхода",
+                error,
+            ),
+            reply_markup=expense_category_keyboard(),
         )
+        await state.set_state(ExpenseForm.category)
+        await state.update_data(category_message_id=retry_message.message_id)
         return
-    await state.update_data(expense_category=category, expense_cars=cars)
+    await state.update_data(expense_cars=cars)
     await state.set_state(ExpenseForm.vehicle)
     await callback.message.answer(
         "Выберите автомобиль для расхода или общие расходы компании:",
@@ -6215,6 +6243,11 @@ async def expense_confirmation(
     data = await state.get_data()
     user = message.from_user
     expense_date = _now_minsk().strftime("%Y-%m-%d")
+    expense_id = data.get("expense_operation_id")
+    if not expense_id:
+        expense_id = f"EXP-{uuid.uuid4().hex[:16].upper()}"
+        await state.update_data(expense_operation_id=expense_id)
+        data = await state.get_data()
     try:
         expense_id = await asyncio.to_thread(
             add_expense,
@@ -6225,13 +6258,13 @@ async def expense_confirmation(
             _manager_display_name(user),
             data.get("expense_note", ""),
             expense_date,
+            expense_id,
         )
-    except Exception:
+    except Exception as error:
         logger.exception("Could not save expense")
-        await state.clear()
         await message.answer(
-            "Не удалось сохранить расход в Google Sheets.",
-            reply_markup=get_main_keyboard(user.id if user else 0),
+            _sheets_retry_prompt("сохранить расход", error),
+            reply_markup=confirmation_keyboard(),
         )
         return
     await state.clear()
@@ -6368,12 +6401,11 @@ async def expense_cancel_confirmation(
             expense_id,
             expense,
         )
-    except Exception:
+    except Exception as error:
         logger.exception("Could not delete expense %s", expense_id)
-        await state.clear()
         await message.answer(
-            "Не удалось удалить расход из Google Sheets.",
-            reply_markup=get_main_keyboard(message.from_user.id),
+            _sheets_retry_prompt("удалить расход", error),
+            reply_markup=confirmation_keyboard(),
         )
         return
     await state.clear()
@@ -6457,23 +6489,29 @@ async def financial_month_callback(
     await state.update_data(financial_month=month_key)
     if is_heavy_lux_partner_user(callback.from_user.id):
         await callback.message.edit_reply_markup(reply_markup=None)
-        await state.clear()
         try:
             report = await asyncio.to_thread(
                 get_financial_report,
                 month_key,
                 "heavy_lux_cr",
             )
-        except Exception:
+        except Exception as error:
             logger.exception(
                 "Could not build Heavy Lux partner report for %s",
                 month_key,
             )
-            await callback.message.answer(
-                "Не удалось сформировать финансовый отчёт.",
-                reply_markup=get_main_keyboard(callback.from_user.id),
+            retry_message = await callback.message.answer(
+                _sheets_retry_prompt("сформировать финансовый отчёт", error),
+                reply_markup=financial_month_keyboard(
+                    data.get("financial_months", [])
+                ),
+            )
+            await state.set_state(FinancialReportForm.month)
+            await state.update_data(
+                financial_month_message_id=retry_message.message_id,
             )
             return
+        await state.clear()
         await _answer_financial_report(
             callback.message,
             _format_heavy_lux_partner_report(report),
@@ -6525,20 +6563,24 @@ async def financial_report_type_callback(
     if report_type in {"leon", "heavy_lux_cr", "all"}:
         await callback.answer(f"Формирую отчёт за {month_key}")
         await callback.message.edit_reply_markup(reply_markup=None)
-        await state.clear()
         try:
             report = await asyncio.to_thread(
                 get_financial_report,
                 month_key,
                 report_type,
             )
-        except Exception:
+        except Exception as error:
             logger.exception("Could not build financial report for %s", month_key)
-            await callback.message.answer(
-                "Не удалось сформировать финансовый отчёт.",
-                reply_markup=get_main_keyboard(callback.from_user.id),
+            retry_message = await callback.message.answer(
+                _sheets_retry_prompt("сформировать финансовый отчёт", error),
+                reply_markup=financial_report_type_keyboard(),
+            )
+            await state.set_state(FinancialReportForm.report_type)
+            await state.update_data(
+                financial_type_message_id=retry_message.message_id,
             )
             return
+        await state.clear()
         await _answer_financial_report(
             callback.message,
             _format_financial_report(report),
@@ -6548,17 +6590,23 @@ async def financial_report_type_callback(
 
     try:
         cars = await asyncio.to_thread(get_all_cars)
-    except Exception:
+    except Exception as error:
         logger.exception("Could not load cars for financial report")
-        await state.clear()
         await callback.answer(
-            "Не удалось получить список автомобилей.",
+            "Не удалось получить список автомобилей. Повторите позже.",
             show_alert=True,
         )
         await callback.message.edit_reply_markup(reply_markup=None)
-        await callback.message.answer(
-            "Не удалось получить список автомобилей.",
-            reply_markup=get_main_keyboard(callback.from_user.id),
+        retry_message = await callback.message.answer(
+            _sheets_retry_prompt(
+                "загрузить автомобили для финансового отчёта",
+                error,
+            ),
+            reply_markup=financial_report_type_keyboard(),
+        )
+        await state.set_state(FinancialReportForm.report_type)
+        await state.update_data(
+            financial_type_message_id=retry_message.message_id,
         )
         return
     if not cars:
@@ -6680,16 +6728,23 @@ async def financial_car_calculate_callback(
         return
     await callback.answer(f"Формирую отчёт за {month_key}")
     await callback.message.edit_reply_markup(reply_markup=None)
-    await state.clear()
     try:
         report = await asyncio.to_thread(get_financial_report, month_key)
-    except Exception:
+    except Exception as error:
         logger.exception("Could not build car financial report for %s", month_key)
-        await callback.message.answer(
-            "Не удалось сформировать финансовый отчёт.",
-            reply_markup=get_main_keyboard(callback.from_user.id),
+        retry_message = await callback.message.answer(
+            _sheets_retry_prompt("сформировать финансовый отчёт", error),
+            reply_markup=financial_car_selection_keyboard(
+                cars,
+                selected_indexes,
+            ),
+        )
+        await state.set_state(FinancialReportForm.cars)
+        await state.update_data(
+            financial_car_message_id=retry_message.message_id,
         )
         return
+    await state.clear()
     await _answer_financial_report(
         callback.message,
         _format_selected_cars_report(report, selected_car_keys),
@@ -7126,14 +7181,20 @@ async def _finish_booking_dates(
     start_date: str,
     end_date: str,
 ) -> None:
+    await state.update_data(start_date=start_date, end_date=end_date)
     try:
         cars = get_available_cars(start_date, end_date)
-    except Exception:
+    except Exception as error:
         logger.exception("Could not load cars for booking")
-        await state.clear()
+        await state.set_state(BookingForm.end_date)
         await message.answer(
-            "Не удалось получить список авто из Google Sheets.",
-            reply_markup=get_main_keyboard(message.from_user.id),
+            _sheets_retry_prompt(
+                "проверить доступность автомобилей",
+                error,
+            ).replace(
+                "нажмите «Подтвердить» ещё раз.",
+                "повторите ввод даты окончания ещё раз.",
+            ),
         )
         return
     if not cars:
@@ -7143,7 +7204,7 @@ async def _finish_booking_dates(
             reply_markup=get_main_keyboard(message.from_user.id),
         )
         return
-    await state.update_data(end_date=end_date, cars=cars)
+    await state.update_data(cars=cars)
     await state.set_state(BookingForm.car)
     await message.answer("Выберите автомобиль:", reply_markup=car_choice_keyboard(cars))
 
@@ -7267,12 +7328,14 @@ async def cancellation_car(message: Message, state: FSMContext) -> None:
 
     try:
         bookings = get_cancellable_bookings_for_car(_car_id(car), _car_plate(car))
-    except Exception:
+    except Exception as error:
         logger.exception("Could not load bookings for cancellation")
-        await state.clear()
         await message.answer(
-            "Не удалось получить список активных броней.",
-            reply_markup=get_main_keyboard(message.from_user.id),
+            _sheets_retry_prompt(
+                "загрузить активные брони для отмены",
+                error,
+            ),
+            reply_markup=cancellation_car_keyboard(cars),
         )
         return
     if not bookings:
@@ -7470,13 +7533,14 @@ async def cancellation_deposit_callback(
             reason=data.get("cancellation_reason", ""),
             deposit_status=deposit_status,
         )
-    except Exception:
+    except Exception as error:
         logger.exception("Could not cancel booking")
-        await state.clear()
-        await callback.answer("Не удалось отменить бронь.", show_alert=True)
+        await callback.answer(
+            "Не удалось отменить бронь. Данные сохранены, повторите позже.",
+            show_alert=True,
+        )
         await callback.message.answer(
-            "Не удалось обновить бронь в Google Sheets.",
-            reply_markup=get_main_keyboard(callback.from_user.id),
+            _sheets_retry_prompt("отменить бронь", error),
         )
         return
     await state.clear()
@@ -8475,18 +8539,18 @@ async def booking_confirmation(
                 issued_at=data.get("issued_at", _timestamp()),
                 planned_end_at=data.get("planned_end_at", ""),
             )
-    except Exception as e:
-        import html
-        import traceback
-
-        err_text = traceback.format_exc()
-        print("Ошибка сохранения брони:", err_text)
-        await state.clear()
+    except Exception as error:
+        logger.exception("Could not save booking or issuance")
         await message.answer(
-            "❌ Ошибка записи в таблицу:\n"
-            f"<code>{html.escape(str(e))}</code>",
-            parse_mode="HTML",
-            reply_markup=get_main_keyboard(message.from_user.id),
+            _sheets_retry_prompt(
+                (
+                    "сохранить бронь"
+                    if is_reservation
+                    else "сохранить выдачу автомобиля"
+                ),
+                error,
+            ),
+            reply_markup=confirmation_keyboard(),
         )
         return
     await state.clear()
