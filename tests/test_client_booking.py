@@ -68,6 +68,50 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(button.text, "🏎 Забронировать автомобиль")
         self.assertEqual(button.callback_data, "client_ai:book")
 
+    def test_client_booking_selection_buttons_include_year_and_daily_price(self):
+        buttons = [
+            button
+            for row in main.client_fleet_selection_keyboard(
+                [
+                    {
+                        "ID": "1",
+                        "Марка и Модель": "Jaguar F-Type",
+                        "Год": "2020",
+                        "Цена / сутки (RUB)": "22000",
+                    },
+                    {
+                        "ID": "2",
+                        "Марка и Модель": "Mercedes-Benz Maybach S580 4Matic",
+                        "Год": "2022",
+                        "Цена / сутки (RUB)": "50000",
+                    },
+                    {
+                        "ID": "3",
+                        "Марка и Модель": "Porsche Cayenne",
+                        "Цена / сутки (RUB)": "18000",
+                    },
+                ]
+            ).inline_keyboard
+            for button in row
+        ]
+
+        self.assertEqual(
+            [button.text for button in buttons[:3]],
+            [
+                "📅 Jaguar F-Type (2020) — 22 000 ₽/сут",
+                "📅 MB Maybach S580 4Matic (2022) — 50 000 ₽/сут",
+                "📅 Porsche Cayenne — 18 000 ₽/сут",
+            ],
+        )
+        self.assertEqual(
+            [button.callback_data for button in buttons[:3]],
+            [
+                "client_booking:car:1",
+                "client_booking:car:2",
+                "client_booking:car:3",
+            ],
+        )
+
     def test_local_faq_matches_keywords_without_case_sensitivity(self):
         self.assertEqual(
             main._client_local_faq_response("Какой ДЕПОЗИТ и когда возврат?"),

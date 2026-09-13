@@ -1052,6 +1052,22 @@ def client_car_booking_keyboard(car: dict) -> InlineKeyboardMarkup:
     )
 
 
+def _client_booking_button_text(car: dict) -> str:
+    name = _car_name(car)
+    if re.search(r"\bMercedes-Benz\b", name, flags=re.IGNORECASE):
+        name = re.sub(r"\bMercedes-Benz\b", "MB", name, flags=re.IGNORECASE)
+
+    year = _car_year(car)
+    price_value = safe_int(_car_daily_rate(car))
+    price_text = (
+        f"{_format_number(price_value)} ₽/сут"
+        if price_value > 0
+        else "цена уточняется"
+    )
+    year_text = f" ({year})" if year else ""
+    return f"📅 {name}{year_text} — {price_text}"[:64]
+
+
 def client_fleet_selection_keyboard(cars: list[dict]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for car in cars:
@@ -1061,7 +1077,7 @@ def client_fleet_selection_keyboard(cars: list[dict]) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"📅 Забронировать {_car_name(car)}"[:64],
+                    text=_client_booking_button_text(car),
                     callback_data=f"client_booking:car:{car_id}",
                 )
             ]
