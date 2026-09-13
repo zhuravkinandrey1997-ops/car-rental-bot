@@ -256,7 +256,9 @@ def _ensure_all_sheet_widths(spreadsheet) -> None:
         _ensure_column_capacity(worksheet, MIN_OPERATIONAL_COLUMNS)
 
 
-_ensure_all_sheet_widths(sh)
+# Each operational worksheet is expanded immediately after it is resolved
+# below. Avoid an eager all-worksheets metadata read during startup because it
+# can exhaust the Google Sheets per-minute read quota before the bot starts.
 ws_cars = sh.worksheet("Автомобили")
 _ensure_sheet_width(ws_cars)
 
