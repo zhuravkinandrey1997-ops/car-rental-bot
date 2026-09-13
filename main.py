@@ -13,6 +13,7 @@ import math
 import os
 import re
 from contextlib import suppress
+from pathlib import Path
 from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -24,6 +25,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     BufferedInputFile,
+    FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -94,6 +96,8 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("car-rental-bot")
+
+CAR_ASSETS_DIR = Path(__file__).resolve().parent / "assets" / "cars"
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CLIENT_BOT_TOKEN = os.getenv("CLIENT_BOT_TOKEN")
@@ -2017,6 +2021,51 @@ def _car_photo_url(car: dict) -> str:
     ).strip()
 
 
+def _car_year(car: dict) -> str:
+    return _value(
+        car,
+        "Год выпуска",
+        "Год",
+        "Year",
+        "Model Year",
+        default="",
+    ).strip()
+
+
+def _car_asset_stems(car: dict) -> list[str]:
+    raw_values = (
+        str(_car_id(car) or ""),
+        _car_name(car),
+    )
+    stems: list[str] = []
+    for raw_value in raw_values:
+        normalized = re.sub(r"[^a-zA-Z0-9]+", "_", raw_value).strip("_").lower()
+        if normalized and normalized not in stems:
+            stems.append(normalized)
+        for token in normalized.split("_"):
+            if len(token) >= 3 and token not in stems:
+                stems.append(token)
+    return stems
+
+
+def _car_local_photo_paths(car: dict) -> list[Path]:
+    return [
+        CAR_ASSETS_DIR / f"{stem}.jpg"
+        for stem in _car_asset_stems(car)
+    ]
+
+
+def _client_car_photo_sources(car: dict) -> list[str | Path]:
+    sources: list[str | Path] = []
+    photo_url = _car_photo_url(car)
+    if photo_url:
+        sources.append(photo_url)
+    sources.extend(
+        path for path in _car_local_photo_paths(car) if path.is_file()
+    )
+    return sources
+
+
 def _car_label(car: dict) -> str:
     return f"{_car_name(car)} ({_car_plate(car)}) — {_car_daily_rate(car)} RUB/сутки"
 
@@ -3902,12 +3951,30 @@ def _client_fleet_card_text(car: dict) -> str:
     deposit_text = (
         f"{_format_number(deposit)} RUB" if deposit is not None else "уточняется"
     )
+    year = _car_year(car) or "—"
     return (
-        f"🏎 {_car_name(car)}\n\n"
-        f"Класс: {_car_class(car)}\n"
-        f"Цена: {daily_rate} RUB/сутки\n"
-        f"Залог: {deposit_text}\n"
-        f"Суточный пробег: {_car_mileage_limit(car)} км"
+        f"🏎 {_car_name(car)} ({year} г.)\n\n"
+        f"• Класс: {_car_class(car)}\n"
+        f"• Стоимость: {daily_rate} RUB/сутки\n"
+        f"• Страховой залог: {deposit_text}\n"
+        f"• Суточный пробег: {_car_mileage_limit(car)} км"
+    )
+
+
+def _client_fleet_card_caption(car: dict) -> str:
+    daily_rate = html.escape(_car_daily_rate(car))
+    deposit = _car_base_deposit(car)
+    deposit_text = (
+        f"{_format_number(deposit)} RUB" if deposit is not None else "уточняется"
+    )
+    year = html.escape(_car_year(car) or "—")
+    return (
+        f"🏎 <b>{html.escape(_car_name(car))}</b> ({year} г.)\n\n"
+        f"• <b>Класс:</b> {html.escape(_car_class(car))}\n"
+        f"• <b>Стоимость:</b> {daily_rate} RUB/сутки\n"
+        f"• <b>Страховой залог:</b> {html.escape(deposit_text)}\n"
+        f"• <b>Суточный пробег:</b> "
+        f"{html.escape(_car_mileage_limit(car))} км"
     )
 
 
@@ -3952,21 +4019,34 @@ async def client_fleet_handler(message: Message, state: FSMContext) -> None:
         return
     for index, car in enumerate(cars):
         text = _client_fleet_card_text(car)
+        caption = _client_fleet_card_caption(car)
         markup = client_car_booking_keyboard(car)
         if index == 0:
             markup = markup
-        photo_url = _car_photo_url(car)
-        if photo_url:
+        photo_sent = False
+        for photo_source in _client_car_photo_sources(car):
             try:
                 await message.answer_photo(
-                    photo=photo_url,
-                    caption=text,
+                    photo=(
+                        photo_source
+                        if isinstance(photo_source, str)
+                        else FSInputFile(photo_source)
+                    ),
+                    caption=caption,
+                    parse_mode="HTML",
                     reply_markup=markup,
                 )
-                continue
+                photo_sent = True
+                break
             except Exception:
-                logger.warning("Could not send car photo for %s", _car_name(car))
-        await message.answer(text, reply_markup=markup)
+                logger.warning(
+                    "Could not send photo for %s from %s",
+                    _car_name(car),
+                    photo_source,
+                    exc_info=True,
+                )
+        if not photo_sent:
+            await message.answer(text, reply_markup=markup)
     await message.answer(
         "Выберите автомобиль для бронирования кнопкой под его карточкой.",
         reply_markup=client_welcome_keyboard(),

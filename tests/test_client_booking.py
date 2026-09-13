@@ -35,9 +35,13 @@ class _FakeMessage:
 
     def __init__(self):
         self.answers = []
+        self.photos = []
 
     async def answer(self, text, **kwargs):
         self.answers.append((text, kwargs))
+
+    async def answer_photo(self, photo, caption, **kwargs):
+        self.photos.append((photo, caption, kwargs))
 
 
 class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
@@ -148,6 +152,7 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         card = main._client_fleet_card_text(
             {
                 "Марка и Модель": "BMW 5",
+                "Год выпуска": "2024",
                 "Класс": "Бизнес",
                 "Цена / сутки (RUB)": "12 000",
                 "Залог (RUB)": "50 000",
@@ -155,10 +160,61 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.assertIn("BMW 5", card)
+        self.assertIn("2024 г.", card)
         self.assertIn("Класс: Бизнес", card)
-        self.assertIn("Цена: 12 000 RUB/сутки", card)
-        self.assertIn("Залог: 50 000 RUB", card)
+        self.assertIn("Стоимость: 12 000 RUB/сутки", card)
+        self.assertIn("Страховой залог: 50 000 RUB", card)
         self.assertIn("Суточный пробег: 300 км", card)
+
+    def test_client_fleet_caption_contains_premium_html_format(self):
+        caption = main._client_fleet_card_caption(
+            {
+                "ID": "1",
+                "Марка и Модель": "Lamborghini Urus",
+                "Год": "2023",
+                "Класс": "Премиум",
+                "Цена / сутки (RUB)": "25 000",
+                "Залог (RUB)": "150 000",
+                "Суточный пробег": "300",
+            }
+        )
+        self.assertIn("🏎 <b>Lamborghini Urus</b> (2023 г.)", caption)
+        self.assertIn("• <b>Стоимость:</b> 25 000 RUB/сутки", caption)
+        self.assertIn("• <b>Страховой залог:</b> 150 000 RUB", caption)
+
+    def test_client_photo_sources_prioritize_url_and_find_model_asset(self):
+        car = {
+            "ID": "1",
+            "Марка и Модель": "Lamborghini Urus",
+            "Фото": "https://example.com/urus.jpg",
+        }
+        sources = main._client_car_photo_sources(car)
+        self.assertEqual(sources[0], "https://example.com/urus.jpg")
+        self.assertTrue(any(str(source).endswith("assets/cars/urus.jpg") for source in sources))
+
+    async def test_client_fleet_handler_sends_photo_with_booking_markup(self):
+        car = {
+            "ID": "1",
+            "Марка и Модель": "Lamborghini Urus",
+            "Год": "2023",
+            "Класс": "Премиум",
+            "Цена / сутки (RUB)": "25 000",
+            "Залог (RUB)": "150 000",
+            "Суточный пробег": "300",
+        }
+        message = _FakeMessage()
+        state = _FakeState()
+        with patch.object(main, "_load_client_active_cars", return_value=[car]):
+            await main.client_fleet_handler(message, state)
+
+        self.assertEqual(len(message.photos), 1)
+        _, caption, photo_kwargs = message.photos[0]
+        self.assertIn("<b>Lamborghini Urus</b> (2023 г.)", caption)
+        self.assertEqual(photo_kwargs["parse_mode"], "HTML")
+        self.assertEqual(
+            photo_kwargs["reply_markup"].inline_keyboard[0][0].callback_data,
+            "client_booking:car:1",
+        )
 
     async def test_client_fleet_loader_includes_rented_cars_but_excludes_retired(self):
         with patch.object(
