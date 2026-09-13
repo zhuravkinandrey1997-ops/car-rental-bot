@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import main
 import sheets_client
@@ -658,6 +658,84 @@ class SheetsStartupTest(unittest.TestCase):
 
         run_fleet_bot.assert_not_called()
         run_client_bot.assert_not_called()
+
+    def test_run_bot_starts_both_polling_processes_once_after_sheets_are_ready(self):
+        events = []
+        fleet_bot = SimpleNamespace(session=SimpleNamespace(close=AsyncMock()))
+        client_bot = SimpleNamespace(session=SimpleNamespace(close=AsyncMock()))
+
+        def mark_sheets_ready():
+            events.append("sheets_ready")
+
+        async def start_fleet_polling(bot, admin_bot):
+            self.assertIs(bot, fleet_bot)
+            self.assertIs(admin_bot, client_bot)
+            self.assertIn("sheets_ready", events)
+            events.append("fleet_polling")
+
+        async def start_client_polling(bot, admin_bot):
+            self.assertIs(bot, client_bot)
+            self.assertIs(admin_bot, fleet_bot)
+            self.assertIn("sheets_ready", events)
+            events.append("client_polling")
+
+        with (
+            patch.object(main, "TOKEN", "fleet-token"),
+            patch.object(main, "CLIENT_BOT_TOKEN", "client-token"),
+            patch.object(main, "ensure_sheets_ready", side_effect=mark_sheets_ready) as ready,
+            patch.object(main, "Bot", side_effect=[fleet_bot, client_bot]) as bot,
+            patch.object(main, "run_fleet_bot", side_effect=start_fleet_polling) as run_fleet_bot,
+            patch.object(main, "run_client_bot", side_effect=start_client_polling) as run_client_bot,
+        ):
+            asyncio.run(main.run_bot())
+
+        ready.assert_called_once_with()
+        self.assertEqual(bot.call_count, 2)
+        run_fleet_bot.assert_awaited_once_with(fleet_bot, client_bot)
+        run_client_bot.assert_awaited_once_with(client_bot, fleet_bot)
+        self.assertEqual(events[0], "sheets_ready")
+        self.assertCountEqual(events[1:], ["fleet_polling", "client_polling"])
+        fleet_bot.session.close.assert_awaited_once_with()
+        client_bot.session.close.assert_awaited_once_with()
+
+    def test_run_bot_propagates_polling_error_without_reordering_startup(self):
+        events = []
+        fleet_bot = SimpleNamespace(session=SimpleNamespace(close=AsyncMock()))
+        client_bot = SimpleNamespace(session=SimpleNamespace(close=AsyncMock()))
+        polling_error = RuntimeError("fleet polling failed")
+
+        def mark_sheets_ready():
+            events.append("sheets_ready")
+
+        async def fail_fleet_polling(bot, admin_bot):
+            self.assertIs(bot, fleet_bot)
+            self.assertIs(admin_bot, client_bot)
+            self.assertEqual(events, ["sheets_ready"])
+            events.append("fleet_polling")
+            raise polling_error
+
+        async def start_client_polling(bot, admin_bot):
+            self.assertIs(bot, client_bot)
+            self.assertIs(admin_bot, fleet_bot)
+            self.assertEqual(events, ["sheets_ready", "fleet_polling"])
+            events.append("client_polling")
+
+        with (
+            patch.object(main, "TOKEN", "fleet-token"),
+            patch.object(main, "CLIENT_BOT_TOKEN", "client-token"),
+            patch.object(main, "ensure_sheets_ready", side_effect=mark_sheets_ready),
+            patch.object(main, "Bot", side_effect=[fleet_bot, client_bot]),
+            patch.object(main, "run_fleet_bot", side_effect=fail_fleet_polling) as run_fleet_bot,
+            patch.object(main, "run_client_bot", side_effect=start_client_polling) as run_client_bot,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fleet polling failed"):
+                asyncio.run(main.run_bot())
+
+        run_fleet_bot.assert_awaited_once_with(fleet_bot, client_bot)
+        run_client_bot.assert_awaited_once_with(client_bot, fleet_bot)
+        self.assertEqual(events, ["sheets_ready", "fleet_polling", "client_polling"])
+        fleet_bot.session.close.assert_awaited_once_with()
+        client_bot.session.close.assert_awaited_once_with()
 
 
 if __name__ == "__main__":
