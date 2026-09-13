@@ -10250,11 +10250,18 @@ async def run_bot() -> None:
     ensure_sheets_ready()
     fleet_bot = Bot(token=TOKEN)
     client_bot = Bot(token=CLIENT_BOT_TOKEN)
+    polling_tasks = (
+        asyncio.create_task(run_fleet_bot(fleet_bot, client_bot)),
+        asyncio.create_task(run_client_bot(client_bot, fleet_bot)),
+    )
     try:
-        await asyncio.gather(
-            run_fleet_bot(fleet_bot, client_bot),
-            run_client_bot(client_bot, fleet_bot),
-        )
+        await asyncio.gather(*polling_tasks)
+    except BaseException:
+        for polling_task in polling_tasks:
+            if not polling_task.done():
+                polling_task.cancel()
+        await asyncio.gather(*polling_tasks, return_exceptions=True)
+        raise
     finally:
         for bot in (fleet_bot, client_bot):
             with suppress(Exception):

@@ -963,6 +963,54 @@ class SheetsStartupTest(unittest.TestCase):
         fleet_bot.session.close.assert_awaited_once_with()
         client_bot.session.close.assert_awaited_once_with()
 
+    def test_run_bot_cancels_remaining_polling_process_when_neighbor_fails(self):
+        client_started = asyncio.Event()
+        client_cancelled = asyncio.Event()
+        fleet_bot = SimpleNamespace(session=SimpleNamespace(close=AsyncMock()))
+        client_bot = SimpleNamespace(session=SimpleNamespace(close=AsyncMock()))
+        polling_error = RuntimeError("fleet polling failed")
+
+        async def fail_fleet_polling(bot, admin_bot):
+            self.assertIs(bot, fleet_bot)
+            self.assertIs(admin_bot, client_bot)
+            await client_started.wait()
+            raise polling_error
+
+        async def wait_for_cancellation(bot, admin_bot):
+            self.assertIs(bot, client_bot)
+            self.assertIs(admin_bot, fleet_bot)
+            client_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                client_cancelled.set()
+                raise
+
+        with (
+            patch.object(main, "TOKEN", "fleet-token"),
+            patch.object(main, "CLIENT_BOT_TOKEN", "client-token"),
+            patch.object(main, "ensure_sheets_ready"),
+            patch.object(main, "Bot", side_effect=[fleet_bot, client_bot]),
+            patch.object(
+                main,
+                "run_fleet_bot",
+                side_effect=fail_fleet_polling,
+            ) as run_fleet_bot,
+            patch.object(
+                main,
+                "run_client_bot",
+                side_effect=wait_for_cancellation,
+            ) as run_client_bot,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fleet polling failed"):
+                asyncio.run(main.run_bot())
+
+        run_fleet_bot.assert_awaited_once_with(fleet_bot, client_bot)
+        run_client_bot.assert_awaited_once_with(client_bot, fleet_bot)
+        self.assertTrue(client_cancelled.is_set())
+        fleet_bot.session.close.assert_awaited_once_with()
+        client_bot.session.close.assert_awaited_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()
