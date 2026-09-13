@@ -426,6 +426,88 @@ def migrate_sheet_titles(spreadsheet) -> list[tuple[str, str]]:
     }
     return _migrate_sheet_titles_from_cache(worksheets)
 
+
+def _open_configured_spreadsheet():
+    """Open the configured spreadsheet without initializing or changing it."""
+    gc_client = _create_sheets_client()
+    if len(SPREADSHEET_NAME) > 30 and " " not in SPREADSHEET_NAME:
+        return gc_client.open_by_key(SPREADSHEET_NAME)
+    return gc_client.open(SPREADSHEET_NAME)
+
+
+def find_worksheet_title_conflicts(
+    spreadsheet=None,
+) -> tuple[tuple[str, str], ...]:
+    """List legacy/current title pairs using one read-only metadata snapshot."""
+    spreadsheet = spreadsheet or _open_configured_spreadsheet()
+    worksheets = {
+        worksheet.title: worksheet for worksheet in spreadsheet.worksheets()
+    }
+    return _worksheet_title_conflicts(worksheets)
+
+
+def _unique_archive_title(title: str, existing_titles: set[str]) -> str:
+    """Return a non-conflicting title for a worksheet kept for audit purposes."""
+    base = f"{title} (архив)"
+    candidate = base[:100]
+    suffix = 2
+    while candidate in existing_titles:
+        suffix_text = f" {suffix}"
+        candidate = f"{base[:100 - len(suffix_text)]}{suffix_text}"
+        suffix += 1
+    return candidate
+
+
+def resolve_worksheet_title_conflict(
+    old_title: str,
+    new_title: str,
+    *,
+    keep_title: str,
+    confirmed: bool,
+    spreadsheet=None,
+) -> list[tuple[str, str]]:
+    """Resolve one title conflict without deleting or overwriting a worksheet.
+
+    ``keep_title`` identifies the worksheet whose data is authoritative. The
+    other worksheet is renamed to a unique archive title. The canonical title
+    is then available for the selected worksheet, and the next bootstrap can
+    validate the structure normally.
+    """
+    if not confirmed:
+        raise ValueError("Explicit confirmation is required before renaming")
+    expected_pair = (old_title, new_title)
+    if SHEET_TITLE_MAP.get(old_title) != new_title:
+        raise ValueError("Unknown worksheet title conflict")
+    if keep_title not in expected_pair:
+        raise ValueError("The selected worksheet must be part of the conflict")
+
+    spreadsheet = spreadsheet or _open_configured_spreadsheet()
+    worksheet_list = list(spreadsheet.worksheets())
+    worksheets = {worksheet.title: worksheet for worksheet in worksheet_list}
+    if expected_pair not in _worksheet_title_conflicts(worksheets):
+        raise SheetsStructureError((expected_pair,))
+
+    existing_titles = set(worksheets)
+    actions: list[tuple[str, str]] = []
+    if keep_title == new_title:
+        archive_title = _unique_archive_title(old_title, existing_titles)
+        worksheets[old_title].update_title(archive_title)
+        actions.append((old_title, archive_title))
+    else:
+        archive_title = _unique_archive_title(new_title, existing_titles)
+        worksheets[new_title].update_title(archive_title)
+        actions.append((new_title, archive_title))
+        worksheets[old_title].update_title(new_title)
+        actions.append((old_title, new_title))
+
+    logger.warning(
+        "Resolved worksheet title conflict by preserving %s and archiving %s",
+        keep_title,
+        new_title if keep_title == old_title else old_title,
+    )
+    return actions
+
+
 def _migrate_sheet_titles_from_cache(
     worksheets: dict[str, object],
 ) -> list[tuple[str, str]]:
@@ -4062,7 +4144,9 @@ def _startup_failure_hint(error: Exception, reason: str) -> str:
             return (
                 "Обнаружены конфликтующие названия листов: "
                 f"{pairs}. Оставьте только один вариант названия "
-                "для каждой пары и повторите запуск."
+                "без удаления данных: запустите "
+                "`uv run python main.py --recover-sheets-conflicts`, "
+                "выберите сохраняемый лист и подтвердите план."
             )
     return SHEETS_STARTUP_HINTS[reason]
 

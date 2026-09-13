@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import re
+import sys
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -74,6 +75,8 @@ from sheets_client import (
     get_manager_access,
     diagnose_sheets_access,
     ensure_sheets_ready,
+    find_worksheet_title_conflicts,
+    resolve_worksheet_title_conflict,
     SheetsStartupError,
     SheetsStartupStatus,
     is_manager_authorized,
@@ -3791,7 +3794,16 @@ async def sheets_status_handler(message: Message) -> None:
         )
     await message.answer(_format_sheets_diagnostic(status))
 
-
+def _format_sheet_conflicts(
+    conflicts: tuple[tuple[str, str], ...],
+) -> str:
+    """Format only known worksheet titles for an operator."""
+    if not conflicts:
+        return "Конфликтующих названий листов не найдено."
+    lines = ["Конфликтующие пары названий листов:"]
+    for index, (old_title, new_title) in enumerate(conflicts, start=1):
+        lines.append(f"{index}. {old_title} ↔ {new_title}")
+    return "\n".join(lines)
 async def cancel_flow(message: Message, state: FSMContext) -> None:
     # Always discard any partially completed flow before returning to the menu.
     await state.clear()
@@ -10147,6 +10159,10 @@ async def run_bot() -> None:
 
 
 def main() -> None:
+    if "--sheets-conflicts" in sys.argv[1:]:
+        raise SystemExit(_run_sheet_conflict_listing())
+    if "--recover-sheets-conflicts" in sys.argv[1:]:
+        raise SystemExit(_run_sheet_conflict_recovery())
     try:
         asyncio.run(run_bot())
     except SheetsStartupError as error:
@@ -10158,3 +10174,91 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+def _run_sheet_conflict_listing() -> int:
+    """Print the read-only conflict list for operators."""
+    try:
+        conflicts = find_worksheet_title_conflicts()
+    except Exception:
+        print(
+            "Не удалось прочитать названия листов. "
+            "Проверьте доступ сервисного аккаунта и настройки таблицы."
+        )
+        return 1
+    print(_format_sheet_conflicts(conflicts))
+    return 0
+
+def _run_sheet_conflict_recovery(
+    *,
+    input_fn=None,
+    output_fn=None,
+) -> int:
+    """Interactively preserve one worksheet and archive the other."""
+    input_fn = input_fn or input
+    output_fn = output_fn or print
+    try:
+        conflicts = find_worksheet_title_conflicts()
+    except Exception:
+        output_fn(
+            "Не удалось прочитать названия листов. "
+            "Проверьте доступ сервисного аккаунта и настройки таблицы."
+        )
+        return 1
+
+    output_fn(_format_sheet_conflicts(conflicts))
+    if not conflicts:
+        return 0
+
+    choice = input_fn("Выберите номер пары для восстановления: ").strip()
+    try:
+        conflict_index = int(choice) - 1
+        old_title, new_title = conflicts[conflict_index]
+    except (ValueError, IndexError):
+        output_fn("Неверный номер пары. Изменений не выполнено.")
+        return 1
+
+    keep_choice = input_fn(
+        f"Чьи данные сохранить — {old_title} или {new_title}? "
+    ).strip()
+    if keep_choice not in {old_title, new_title}:
+        output_fn("Неверное название листа. Изменений не выполнено.")
+        return 1
+
+    archive_title = f"{new_title if keep_choice == old_title else old_title} (архив)"
+    output_fn(
+        "План операции:\n"
+        f"- сохранить данные листа «{keep_choice}»;\n"
+        f"- переименовать второй лист в уникальное имя на основе "
+        f"«{archive_title}»;\n"
+        + (
+            f"- переименовать «{old_title}» в «{new_title}»."
+            if keep_choice == old_title
+            else f"- оставить «{new_title}» рабочим листом."
+        )
+    )
+    confirmation = input_fn(
+        "Для подтверждения введите ТОЧНО «ПОДТВЕРЖДАЮ»: "
+    ).strip()
+    if confirmation != "ПОДТВЕРЖДАЮ":
+        output_fn("Подтверждение не получено. Изменений не выполнено.")
+        return 0
+
+    try:
+        actions = resolve_worksheet_title_conflict(
+            old_title,
+            new_title,
+            keep_title=keep_choice,
+            confirmed=True,
+        )
+    except Exception:
+        output_fn(
+            "Восстановление не выполнено. "
+            "Состояние таблицы не изменено или требует повторной проверки."
+        )
+        return 1
+    output_fn(
+        "Готово. Выполнены только переименования: "
+        + ", ".join(f"{old} → {new}" for old, new in actions)
+        + ". Повторите запуск bootstrap."
+    )
+    return 0

@@ -35,6 +35,24 @@ and writes the rental, return, expense, and financial-summary worksheets through
    uv run python main.py
    ```
 
+If startup stops because both a legacy and a current worksheet title exist,
+inspect the pairs without changing the table:
+
+```bash
+uv run python main.py --sheets-conflicts
+```
+
+To recover interactively, choose which worksheet's data to preserve and confirm
+the displayed plan explicitly:
+
+```bash
+uv run python main.py --recover-sheets-conflicts
+```
+
+The other worksheet is renamed to a unique archive title. No worksheet is
+deleted, merged, or overwritten. Run the normal bot command again after the
+recovery.
+
 ## Expected sheet structure
 
 The bot expects the headers used by the supplied Google Sheets client. When a new

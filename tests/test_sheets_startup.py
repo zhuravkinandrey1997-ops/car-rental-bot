@@ -253,6 +253,120 @@ class SheetsStartupTest(unittest.TestCase):
             [[], [], [], []],
         )
 
+    def test_conflict_listing_uses_one_read_only_metadata_snapshot(self):
+        spreadsheet = _Spreadsheet(
+            _startup_worksheets("Cars", "Автомобили", "Менеджеры"),
+        )
+
+        conflicts = sheets_client.find_worksheet_title_conflicts(spreadsheet)
+
+        self.assertEqual(conflicts, (("Cars", "Автомобили"),))
+        self.assertEqual(spreadsheet.metadata_reads, 1)
+        self.assertEqual(
+            [worksheet.title_updates for worksheet in spreadsheet._worksheets],
+            [[], [], []],
+        )
+
+    def test_conflict_resolution_requires_confirmation_before_any_write(self):
+        spreadsheet = _Spreadsheet(
+            _startup_worksheets("Cars", "Автомобили"),
+        )
+
+        with self.assertRaises(ValueError):
+            sheets_client.resolve_worksheet_title_conflict(
+                "Cars",
+                "Автомобили",
+                keep_title="Cars",
+                confirmed=False,
+                spreadsheet=spreadsheet,
+            )
+
+        self.assertEqual(
+            [worksheet.title_updates for worksheet in spreadsheet._worksheets],
+            [[], []],
+        )
+
+    def test_conflict_resolution_archives_legacy_sheet_and_bootstrap_can_continue(self):
+        spreadsheet = _Spreadsheet(
+            _startup_worksheets(
+                "Cars",
+                "Автомобили",
+                "Бронирования",
+                "Возвраты_Касса",
+                "Менеджеры",
+            )
+        )
+
+        actions = sheets_client.resolve_worksheet_title_conflict(
+            "Cars",
+            "Автомобили",
+            keep_title="Автомобили",
+            confirmed=True,
+            spreadsheet=spreadsheet,
+        )
+
+        self.assertEqual(actions, [("Cars", "Cars (архив)")])
+        self.assertEqual(
+            {worksheet.title for worksheet in spreadsheet.worksheets()},
+            {"Cars (архив)", "Автомобили", "Бронирования", "Возвраты_Касса", "Менеджеры"},
+        )
+        self.assertEqual(
+            sheets_client.find_worksheet_title_conflicts(spreadsheet),
+            (),
+        )
+
+    def test_conflict_resolution_preserves_legacy_sheet_data_by_moving_current_title(self):
+        spreadsheet = _Spreadsheet(
+            _startup_worksheets("Cars", "Автомобили"),
+        )
+
+        actions = sheets_client.resolve_worksheet_title_conflict(
+            "Cars",
+            "Автомобили",
+            keep_title="Cars",
+            confirmed=True,
+            spreadsheet=spreadsheet,
+        )
+
+        self.assertEqual(
+            actions,
+            [
+                ("Автомобили", "Автомобили (архив)"),
+                ("Cars", "Автомобили"),
+            ],
+        )
+        self.assertEqual(
+            {worksheet.title for worksheet in spreadsheet.worksheets()},
+            {"Автомобили", "Автомобили (архив)"},
+        )
+        self.assertEqual(
+            sheets_client.find_worksheet_title_conflicts(spreadsheet),
+            (),
+        )
+
+    def test_conflict_resolution_uses_a_new_archive_title_when_archive_exists(self):
+        spreadsheet = _Spreadsheet(
+            _startup_worksheets(
+                "Cars",
+                "Автомобили",
+                "Cars (архив)",
+            ),
+        )
+
+        actions = sheets_client.resolve_worksheet_title_conflict(
+            "Cars",
+            "Автомобили",
+            keep_title="Автомобили",
+            confirmed=True,
+            spreadsheet=spreadsheet,
+        )
+
+        self.assertEqual(actions, [("Cars", "Cars (архив) 2")])
+        self.assertEqual(
+            {worksheet.title for worksheet in spreadsheet.worksheets()},
+            {"Cars (архив)", "Cars (архив) 2", "Автомобили"},
+        )
+
     def test_full_bootstrap_creates_missing_service_sheets_only_once(self):
         spreadsheet = _Spreadsheet(
             _startup_worksheets(
