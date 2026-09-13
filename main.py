@@ -3514,9 +3514,10 @@ async def cancel_flow(message: Message, state: FSMContext) -> None:
 
 
 async def show_menu(message: Message, state: FSMContext) -> None:
+    # Clear stale FSM data before any authorization or menu processing.
+    await state.clear()
     user = message.from_user
     if user and is_partner_user(user.id):
-        await state.clear()
         await message.answer(
             (
                 "Панель управления автопрокатом готова. Выберите операцию:"
@@ -3528,7 +3529,6 @@ async def show_menu(message: Message, state: FSMContext) -> None:
         return
     if not await ensure_manager(message):
         return
-    await state.clear()
     access = _manager_access_for_user(message.from_user.id)
     if (
         access
@@ -4029,6 +4029,15 @@ async def client_start_handler(message: Message, state: FSMContext) -> None:
         "Добро пожаловать в Leon Rental! 🚗\n"
         "Здесь вы можете выбрать премиальный автомобиль, рассчитать стоимость "
         "и забронировать поездку онлайн.",
+        reply_markup=client_welcome_keyboard(),
+    )
+
+
+async def client_manager_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "Наш менеджер поможет подобрать автомобиль и оформить аренду.\n"
+        "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
         reply_markup=client_welcome_keyboard(),
     )
 
@@ -8929,6 +8938,7 @@ def create_dispatcher(client_bot: Bot | None = None) -> Dispatcher:
     )
     dispatcher.message.register(start_handler, CommandStart())
     dispatcher.message.register(show_menu, Command("menu"))
+    dispatcher.message.register(cancel_flow, Command("cancel"))
     dispatcher.message.register(cancel_flow, F.text.casefold() == "отмена")
 
     dispatcher.message.register(partner_bookings, F.text == "🔎 Брони Dodge")
@@ -9082,6 +9092,9 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
         F.data == "client_ai:book",
     )
     dispatcher.message.register(client_start_handler, CommandStart())
+    dispatcher.message.register(client_start_handler, Command("menu"))
+    dispatcher.message.register(start_client_booking, Command("cars"))
+    dispatcher.message.register(client_manager_handler, Command("manager"))
     dispatcher.message.register(
         start_client_booking,
         F.text == "🏎 Выбрать автомобиль",
@@ -9090,6 +9103,7 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
         client_cancel_flow,
         F.text.casefold() == "отмена",
     )
+    dispatcher.message.register(client_cancel_flow, Command("cancel"))
     dispatcher.message.register(
         client_booking_start_date,
         ClientBookingState.start_date,

@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import main
 import sheets_client
@@ -21,7 +21,25 @@ class _BookingsSheet:
         self.values[row - 1][column - 1] = value
 
 
-class ClientBookingTest(unittest.TestCase):
+class _FakeState:
+    def __init__(self):
+        self.clear_calls = 0
+
+    async def clear(self):
+        self.clear_calls += 1
+
+
+class _FakeMessage:
+    from_user = type("User", (), {"id": 123456})()
+
+    def __init__(self):
+        self.answers = []
+
+    async def answer(self, text, **kwargs):
+        self.answers.append((text, kwargs))
+
+
+class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
     def test_client_welcome_keyboard_has_single_booking_entrypoint(self):
         buttons = [
             button.text
@@ -62,6 +80,28 @@ class ClientBookingTest(unittest.TestCase):
             main._client_local_faq_response("Можно ли арендовать машину с собакой?"),
             main.CLIENT_FAQ_FALLBACK,
         )
+
+    async def test_client_escape_handlers_clear_fsm_state(self):
+        state = _FakeState()
+        message = _FakeMessage()
+        await main.client_start_handler(message, state)
+        await main.client_cancel_flow(message, state)
+        await main.client_manager_handler(message, state)
+        self.assertEqual(state.clear_calls, 3)
+
+    async def test_menu_clears_fsm_before_access_check(self):
+        state = _FakeState()
+        message = _FakeMessage()
+        with (
+            patch.object(main, "is_partner_user", return_value=False),
+            patch.object(
+                main,
+                "ensure_manager",
+                new=AsyncMock(return_value=False),
+            ),
+        ):
+            await main.show_menu(message, state)
+        self.assertEqual(state.clear_calls, 1)
 
     def test_public_booking_helpers_calculate_days_and_prepayment(self):
         self.assertEqual(main._client_booking_days("2026-09-15", "2026-09-17"), 3)
