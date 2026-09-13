@@ -16,4 +16,5 @@
 - [Google Sheets startup](google-sheets-startup.md) — share one worksheet metadata snapshot and recover temporary startup quota failures in-process.
 - [Google Sheets startup throttling](google-sheets-startup-throttling.md) — avoid repeated workflow restarts while gspread metadata reads are under the per-minute quota.
 - [Google Sheets safe reader](google-sheets-safe-reader.md) — read legacy sheets with blank or duplicate headers through normalized get_all_values rows.
+- [Runtime Sheets recovery](runtime-sheets-retry.md) — retry reads and absolute updates; verify append/delete state before repeating ambiguous writes.
 - [Heavy Lux partner boundary](heavy-lux-partner-mode.md) — partner_heavy_lux uses heavy_lux_cr and sees only operational data and FSM steps.

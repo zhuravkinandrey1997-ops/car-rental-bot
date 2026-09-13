@@ -5,7 +5,6 @@ import logging
 import socket
 import threading
 import time
-import traceback
 import uuid
 from dataclasses import dataclass
 import gspread
@@ -124,6 +123,8 @@ BOOKINGS_LOCK = threading.Lock()
 MIN_OPERATIONAL_COLUMNS = 35
 TARGET_OPERATIONAL_COLUMNS = 35
 COLUMN_EXPANSION_STEP = 5
+RUNTIME_OPERATION_MAX_RETRIES = 3
+RUNTIME_RETRY_DELAYS = (1, 3)
 
 
 @dataclass(frozen=True)
@@ -196,7 +197,7 @@ def _is_transient_spreadsheet_error(error: Exception) -> bool:
         status_code = int(status_code)
     except (TypeError, ValueError):
         status_code = None
-    if status_code in {429, 500, 502, 503}:
+    if status_code in {408, 429, 500, 502, 503, 504}:
         return True
     if isinstance(error, (TimeoutError, ConnectionError, socket.timeout)):
         return True
@@ -209,7 +210,12 @@ def _is_transient_spreadsheet_error(error: Exception) -> bool:
         or "timed out" in error_text
         or "temporarily unavailable" in error_text
         or "service unavailable" in error_text
-        or any(code in error_text for code in ("500", "502", "503"))
+        or "connection reset" in error_text
+        or "connection aborted" in error_text
+        or any(
+            marker in error_text
+            for marker in (" 408", " 429", " 500", " 502", " 503", " 504")
+        )
     )
 
 def _retry_transient_operation(
@@ -232,7 +238,16 @@ def _retry_transient_operation(
             return operation()
         except Exception as error:
             is_last_attempt = attempt == max_retries - 1
-            if is_last_attempt or not _is_transient_spreadsheet_error(error):
+            if is_last_attempt:
+                logger.error(
+                    "Google Sheets operation failed after %s attempts: "
+                    "operation=%s; reason=%s",
+                    max_retries,
+                    operation_name,
+                    _startup_failure_reason(error),
+                )
+                raise
+            if not _is_transient_spreadsheet_error(error):
                 raise
             logger.warning(
                 "Temporary Google Sheets failure during %s "
@@ -243,6 +258,139 @@ def _retry_transient_operation(
                 max_retries,
             )
             time.sleep(3)
+
+
+def _retry_runtime_operation(
+    operation,
+    operation_name: str,
+    max_retries: int = RUNTIME_OPERATION_MAX_RETRIES,
+):
+    """Run a runtime Sheets operation with a short, bounded retry budget."""
+    if max_retries < 1:
+        raise ValueError("max_retries must be at least 1")
+
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except Exception as error:
+            is_last_attempt = attempt == max_retries - 1
+            if is_last_attempt or not _is_transient_spreadsheet_error(error):
+                raise
+            logger.warning(
+                "Temporary Google Sheets failure during %s "
+                "(reason=%s; attempt %s/%s); retrying",
+                operation_name,
+                _startup_failure_reason(error),
+                attempt + 1,
+                max_retries,
+            )
+            time.sleep(
+                RUNTIME_RETRY_DELAYS[
+                    min(attempt, len(RUNTIME_RETRY_DELAYS) - 1)
+                ]
+            )
+
+
+def _sheets_read(operation, operation_name: str):
+    """Read from Sheets while recovering short-lived API failures."""
+    return _retry_runtime_operation(operation, operation_name)
+
+
+def _sheets_write(operation, operation_name: str):
+    """Repeat an idempotent absolute Sheets update on transient failures."""
+    return _retry_runtime_operation(operation, operation_name)
+
+
+def _row_matches_key(
+    headers: list[object],
+    row: list[object],
+    key_fields: tuple[tuple[str, ...], ...],
+    key_values: tuple[object, ...],
+) -> bool:
+    if len(key_fields) != len(key_values):
+        raise ValueError("Key fields and values must have the same length")
+    for aliases, expected in zip(key_fields, key_values):
+        column = next(
+            (
+                index
+                for index, header in enumerate(headers)
+                if str(header or "").strip() in aliases
+            ),
+            None,
+        )
+        if column is None or column >= len(row):
+            return False
+        if str(row[column] or "").strip() != str(expected).strip():
+            return False
+    return True
+
+
+def _row_with_key_exists(
+    ws,
+    key_fields: tuple[tuple[str, ...], ...],
+    key_values: tuple[object, ...],
+) -> bool:
+    """Confirm an append reached Sheets after an ambiguous write response."""
+    if not key_fields:
+        return False
+    all_values = _sheets_read(
+        ws.get_all_values,
+        f"checking persisted row in {getattr(ws, 'title', 'worksheet')}",
+    )
+    if not all_values:
+        return False
+    headers = list(all_values[0])
+    return any(
+        _row_matches_key(headers, row, key_fields, key_values)
+        for row in all_values[1:]
+    )
+
+
+def _append_row_with_recovery(
+    ws,
+    row_values: list[object],
+    *,
+    key_fields: tuple[tuple[str, ...], ...],
+    key_values: tuple[object, ...],
+    operation_name: str,
+    value_input_option: str | None = None,
+) -> None:
+    """Append once per attempt, checking the idempotency key after failures."""
+    for attempt in range(RUNTIME_OPERATION_MAX_RETRIES):
+        try:
+            if value_input_option is None:
+                ws.append_row(row_values)
+            else:
+                ws.append_row(
+                    row_values,
+                    value_input_option=value_input_option,
+                )
+            return
+        except Exception as error:
+            if not _is_transient_spreadsheet_error(error):
+                raise
+            if _row_with_key_exists(ws, key_fields, key_values):
+                logger.info(
+                    "Google Sheets append during %s completed before "
+                    "the response was received",
+                    operation_name,
+                )
+                return
+            if attempt == RUNTIME_OPERATION_MAX_RETRIES - 1:
+                raise
+            logger.warning(
+                "Temporary Google Sheets failure during %s "
+                "(reason=%s; attempt %s/%s); retrying",
+                operation_name,
+                _startup_failure_reason(error),
+                attempt + 1,
+                RUNTIME_OPERATION_MAX_RETRIES,
+            )
+            time.sleep(
+                RUNTIME_RETRY_DELAYS[
+                    min(attempt, len(RUNTIME_RETRY_DELAYS) - 1)
+                ]
+            )
 def get_spreadsheet_with_retry(
     gc_client,
     spreadsheet_key: str,
@@ -337,7 +485,31 @@ def _ensure_column_capacity(ws, required_columns: int) -> None:
         COLUMN_EXPANSION_STEP,
         required_columns - current_columns,
     )
-    ws.add_cols(columns_to_add)
+    operation_name = f"expanding {getattr(ws, 'title', 'worksheet')}"
+    for attempt in range(RUNTIME_OPERATION_MAX_RETRIES):
+        try:
+            ws.add_cols(columns_to_add)
+            return
+        except Exception as error:
+            if not _is_transient_spreadsheet_error(error):
+                raise
+            if int(getattr(ws, "col_count", 0) or 0) >= required_columns:
+                return
+            if attempt == RUNTIME_OPERATION_MAX_RETRIES - 1:
+                raise
+            logger.warning(
+                "Temporary Google Sheets failure during %s "
+                "(reason=%s; attempt %s/%s); retrying",
+                operation_name,
+                _startup_failure_reason(error),
+                attempt + 1,
+                RUNTIME_OPERATION_MAX_RETRIES,
+            )
+            time.sleep(
+                RUNTIME_RETRY_DELAYS[
+                    min(attempt, len(RUNTIME_RETRY_DELAYS) - 1)
+                ]
+            )
 
 
 def _ensure_sheet_width(ws) -> None:
@@ -364,8 +536,12 @@ def _get_bookings_sheet():
                 rows=1000,
                 cols=TARGET_OPERATIONAL_COLUMNS,
             )
-            worksheet.append_row(
+            _append_row_with_recovery(
+                worksheet,
                 BOOKING_HEADERS,
+                key_fields=(),
+                key_values=(),
+                operation_name="creating bookings headers",
                 value_input_option="USER_ENTERED",
             )
             _worksheet_cache["Бронирования"] = worksheet
@@ -377,7 +553,10 @@ def get_manager_access(tg_id: int) -> dict | None:
     """Return normalized access data for a Telegram ID from Менеджеры."""
     clean_user_id = str(tg_id).strip()
     role = ""
-    for manager in ws_managers.get_all_records():
+    for manager in _sheets_read(
+        ws_managers.get_all_records,
+        "reading manager access",
+    ):
         sheet_id = (
             str(manager.get("Telegram ID", ""))
             .strip()
@@ -426,7 +605,10 @@ def is_partner_authorized(tg_id: int) -> bool:
 def get_active_manager_ids() -> list[int]:
     manager_ids = []
     seen_ids = set()
-    for manager in ws_managers.get_all_records():
+    for manager in _sheets_read(
+        ws_managers.get_all_records,
+        "reading active managers",
+    ):
         access = str(manager.get("Доступ активен", "")).strip().lower()
         if access not in {"да", "yes", "true"}:
             continue
@@ -451,7 +633,10 @@ def get_pending_notification_manager_ids(
 ) -> list[int]:
     sent_date = target_date.isoformat()
     recipients: dict[int, bool] = {}
-    for manager in ws_managers.get_all_records():
+    for manager in _sheets_read(
+        ws_managers.get_all_records,
+        "reading pending notification recipients",
+    ):
         access = str(manager.get("Доступ активен", "")).strip().lower()
         if access not in {"да", "yes", "true"}:
             continue
@@ -479,7 +664,10 @@ def mark_notification_sent(
     manager_id: int,
     target_date: datetime.date,
 ) -> None:
-    records = ws_managers.get_all_records()
+    records = _sheets_read(
+        ws_managers.get_all_records,
+        "reading manager notification state",
+    )
     headers = _ensure_headers(ws_managers, ["Последний план на дату"])
     column = headers.index("Последний план на дату") + 1
     for row_number, manager in enumerate(records, start=2):
@@ -490,10 +678,13 @@ def mark_notification_sent(
             .replace(".0", "")
         )
         if sheet_id == str(manager_id).strip():
-            ws_managers.update_cell(
-                row_number,
-                column,
-                target_date.isoformat(),
+            _sheets_write(
+                lambda: ws_managers.update_cell(
+                    row_number,
+                    column,
+                    target_date.isoformat(),
+                ),
+                "saving manager notification state",
             )
 
 
@@ -586,7 +777,10 @@ def has_open_rental_for_car(car_id: str = "", plate: str = "") -> bool:
 def get_available_cars(start_date_str: str, end_date_str: str):
     req_start = datetime.datetime.strptime(start_date_str, "%Y-%m-%d").date()
     req_end = datetime.datetime.strptime(end_date_str, "%Y-%m-%d").date()
-    all_cars = ws_cars.get_all_records()
+    all_cars = _sheets_read(
+        ws_cars.get_all_records,
+        "reading cars",
+    )
     all_bookings = _get_sheet_records_safely(
         ws_bookings,
         "Бронирования",
@@ -641,7 +835,10 @@ def get_available_cars(start_date_str: str, end_date_str: str):
 
 def _ensure_headers(ws, required_headers: list[str]) -> list[str]:
     _ensure_sheet_width(ws)
-    headers = ws.row_values(1)
+    headers = _sheets_read(
+        lambda: ws.row_values(1),
+        f"reading headers from {getattr(ws, 'title', 'worksheet')}",
+    )
     missing_headers = sum(
         header not in headers
         for header in required_headers
@@ -656,10 +853,13 @@ def _ensure_headers(ws, required_headers: list[str]) -> list[str]:
     if missing_headers:
         headers.extend(missing_headers)
         _ensure_column_capacity(ws, len(headers))
-        ws.update(
-            [headers],
-            range_name=f"A1:{_column_letter(len(headers))}1",
-            value_input_option="USER_ENTERED",
+        _sheets_write(
+            lambda: ws.update(
+                [headers],
+                range_name=f"A1:{_column_letter(len(headers))}1",
+                value_input_option="USER_ENTERED",
+            ),
+            f"updating headers in {getattr(ws, 'title', 'worksheet')}",
         )
     return headers
 
@@ -670,7 +870,10 @@ def _ensure_header_aliases(
 ) -> list[str]:
     """Ensure one header from each alias group exists without duplicating it."""
     _ensure_sheet_width(ws)
-    headers = ws.row_values(1)
+    headers = _sheets_read(
+        lambda: ws.row_values(1),
+        f"reading aliases from {getattr(ws, 'title', 'worksheet')}",
+    )
     missing_aliases = sum(
         not any(alias in headers for alias in aliases)
         for aliases in required_aliases
@@ -685,10 +888,13 @@ def _ensure_header_aliases(
         missing_headers.append(header)
     if missing_headers:
         _ensure_column_capacity(ws, len(headers))
-        ws.update(
-            [headers],
-            range_name=f"A1:{_column_letter(len(headers))}1",
-            value_input_option="USER_ENTERED",
+        _sheets_write(
+            lambda: ws.update(
+                [headers],
+                range_name=f"A1:{_column_letter(len(headers))}1",
+                value_input_option="USER_ENTERED",
+            ),
+            f"updating aliases in {getattr(ws, 'title', 'worksheet')}",
         )
     return headers
 
@@ -699,7 +905,10 @@ def _update_existing_headers(
     fields: list[tuple[tuple[str, ...], object, bool]],
 ) -> None:
     """Update only columns that are already present in the worksheet."""
-    headers = ws.row_values(1)
+    headers = _sheets_read(
+        lambda: ws.row_values(1),
+        f"reading row headers from {getattr(ws, 'title', 'worksheet')}",
+    )
     _ensure_column_capacity(ws, len(headers))
     resolved_updates: list[tuple[int, object]] = []
     missing_required: list[str] = []
@@ -722,7 +931,10 @@ def _update_existing_headers(
             + ", ".join(missing_required)
         )
     for column_number, value in resolved_updates:
-        ws.update_cell(row_number, column_number, value)
+        _sheets_write(
+            lambda: ws.update_cell(row_number, column_number, value),
+            f"updating row {row_number} in {getattr(ws, 'title', 'worksheet')}",
+        )
 
 
 def _records_from_values(
@@ -785,7 +997,13 @@ def _records_from_values(
 
 def _get_sheet_records_safely(ws, sheet_name: str) -> list[dict]:
     """Read a worksheet without gspread's duplicate/blank-header validation."""
-    return _records_from_values(ws.get_all_values(), sheet_name)
+    return _records_from_values(
+        _sheets_read(
+            ws.get_all_values,
+            f"reading {sheet_name}",
+        ),
+        sheet_name,
+    )
 
 
 def _is_heavy_lux_booking(source: object = "", client_name: object = "") -> bool:
@@ -896,12 +1114,18 @@ def colorize_booking_row(
         source,
         end_column_index=_booking_color_end_column(ws_bookings),
     )
-    sh.batch_update({"requests": [request]})
+    _sheets_write(
+        lambda: sh.batch_update({"requests": [request]}),
+        "coloring booking row",
+    )
 
 
 def colorize_existing_booking_rows() -> int:
     """Color every existing booking row in one Google Sheets batchUpdate."""
-    all_values = ws_bookings.get_all_values()
+    all_values = _sheets_read(
+        ws_bookings.get_all_values,
+        "reading booking rows for coloring",
+    )
     if len(all_values) <= 1:
         return 0
 
@@ -924,7 +1148,10 @@ def colorize_existing_booking_rows() -> int:
             )
         )
     if requests:
-        sh.batch_update({"requests": requests})
+        _sheets_write(
+            lambda: sh.batch_update({"requests": requests}),
+            "coloring existing booking rows",
+        )
     return len(requests)
 
 
@@ -953,7 +1180,10 @@ def _get_financial_booking_records() -> list[dict]:
     lookup is not reliable for the financial source and accepted amounts.
     Keep the full A:BT read wide enough to preserve those fixed positions.
     """
-    all_values = ws_bookings.get(BOOKINGS_FINANCIAL_RANGE)
+    all_values = _sheets_read(
+        lambda: ws_bookings.get(BOOKINGS_FINANCIAL_RANGE),
+        "reading booking financial columns",
+    )
     records = _records_from_values(all_values, "Бронирования")
     for row_offset, record in enumerate(records, start=1):
         row = all_values[row_offset] if row_offset < len(all_values) else []
@@ -987,7 +1217,31 @@ def _append_record(ws, values: dict[str, object], required_headers: list[str]) -
     headers = _ensure_headers(ws, required_headers)
     row_values = [values.get(header, "") for header in headers]
     _ensure_column_capacity(ws, len(row_values))
-    ws.append_row(row_values, value_input_option="USER_ENTERED")
+    key_fields: tuple[tuple[str, ...], ...] = ()
+    key_values: tuple[object, ...] = ()
+    if values.get("Тип уведомления") and values.get("ID Брони"):
+        key_fields = (("Тип уведомления",), ("ID Брони",))
+        key_values = (
+            values["Тип уведомления"],
+            values["ID Брони"],
+        )
+    elif values.get("ID внепланового возврата"):
+        key_fields = (("ID внепланового возврата",),)
+        key_values = (values["ID внепланового возврата"],)
+    elif values.get("ID Брони"):
+        key_fields = (("ID Брони",),)
+        key_values = (values["ID Брони"],)
+    elif values.get("ID Записи"):
+        key_fields = (("ID Записи",),)
+        key_values = (values["ID Записи"],)
+    _append_row_with_recovery(
+        ws,
+        row_values,
+        key_fields=key_fields,
+        key_values=key_values,
+        operation_name=f"appending to {getattr(ws, 'title', 'worksheet')}",
+        value_input_option="USER_ENTERED",
+    )
 
 
 def _update_row_values(
@@ -997,7 +1251,10 @@ def _update_row_values(
     updates: dict[str, object],
 ) -> None:
     """Update several fields in one Sheets request without losing other cells."""
-    row_values = ws.row_values(row_number)
+    row_values = _sheets_read(
+        lambda: ws.row_values(row_number),
+        f"reading row {row_number} from {getattr(ws, 'title', 'worksheet')}",
+    )
     if len(row_values) < len(headers):
         row_values.extend([""] * (len(headers) - len(row_values)))
     for header, value in updates.items():
@@ -1005,12 +1262,15 @@ def _update_row_values(
             raise KeyError(f"Column {header!r} was not found")
         row_values[headers.index(header)] = value
     _ensure_column_capacity(ws, len(headers))
-    ws.update(
-        [row_values[: len(headers)]],
-        range_name=(
-            f"A{row_number}:{_column_letter(len(headers))}{row_number}"
+    _sheets_write(
+        lambda: ws.update(
+            [row_values[: len(headers)]],
+            range_name=(
+                f"A{row_number}:{_column_letter(len(headers))}{row_number}"
+            ),
+            value_input_option="USER_ENTERED",
         ),
-        value_input_option="USER_ENTERED",
+        f"updating row {row_number} in {getattr(ws, 'title', 'worksheet')}",
     )
 
 
@@ -1053,7 +1313,10 @@ def _initialize_worksheets() -> None:
         )
         _worksheet_cache["Acceptance_Acts"] = ws_acceptance_acts
     _ensure_sheet_width(ws_acceptance_acts)
-    acceptance_sheet_headers = ws_acceptance_acts.row_values(1)
+    acceptance_sheet_headers = _sheets_read(
+        lambda: ws_acceptance_acts.row_values(1),
+        "reading acceptance-act headers",
+    )
     missing_acceptance_headers = [
         header
         for header in ACCEPTANCE_ACT_HEADERS
@@ -1065,12 +1328,15 @@ def _initialize_worksheets() -> None:
             ws_acceptance_acts,
             len(acceptance_sheet_headers),
         )
-        ws_acceptance_acts.update(
-            [acceptance_sheet_headers],
-            range_name=(
-                f"A1:{_column_letter(len(acceptance_sheet_headers))}1"
+        _sheets_write(
+            lambda: ws_acceptance_acts.update(
+                [acceptance_sheet_headers],
+                range_name=(
+                    f"A1:{_column_letter(len(acceptance_sheet_headers))}1"
+                ),
+                value_input_option="USER_ENTERED",
             ),
-            value_input_option="USER_ENTERED",
+            "updating acceptance-act headers",
         )
 
     ws_expenses = _get_or_create_sheet("Затраты", EXPENSE_HEADERS)
@@ -1133,11 +1399,68 @@ def _cleanup_expired_rental_alert_rows(
         if sent_at is None or sent_at < cutoff:
             row_number = record.get("__row_number__")
             if row_number:
-                expired_rows.append(int(row_number))
+                expired_rows.append(
+                    (
+                        int(row_number),
+                        str(record.get("Тип уведомления", "")).strip(),
+                        str(record.get("ID Брони", "")).strip(),
+                        str(record.get("Отправлено в UTC", "")).strip(),
+                    )
+                )
 
     # Delete from the bottom up so earlier row numbers remain valid.
-    for row_number in sorted(expired_rows, reverse=True):
-        ws_notification_state.delete_rows(row_number)
+    for row_number, alert_type, booking_id, sent_at in sorted(
+        expired_rows,
+        reverse=True,
+    ):
+        _delete_notification_state_row_with_recovery(
+            row_number,
+            alert_type,
+            booking_id,
+            sent_at,
+        )
+
+
+def _delete_notification_state_row_with_recovery(
+    row_number: int,
+    alert_type: str,
+    booking_id: str,
+    sent_at: str,
+) -> None:
+    """Delete one notification row without repeating a successful delete."""
+    for attempt in range(RUNTIME_OPERATION_MAX_RETRIES):
+        try:
+            ws_notification_state.delete_rows(row_number)
+            return
+        except Exception as error:
+            if not _is_transient_spreadsheet_error(error):
+                raise
+            remaining = _get_sheet_records_safely(
+                ws_notification_state,
+                "Состояние_уведомлений",
+            )
+            still_present = any(
+                str(record.get("Тип уведомления", "")).strip() == alert_type
+                and str(record.get("ID Брони", "")).strip() == booking_id
+                and str(record.get("Отправлено в UTC", "")).strip() == sent_at
+                for record in remaining
+            )
+            if not still_present:
+                return
+            if attempt == RUNTIME_OPERATION_MAX_RETRIES - 1:
+                raise
+            logger.warning(
+                "Temporary Google Sheets failure during deleting "
+                "notification state (reason=%s; attempt %s/%s); retrying",
+                _startup_failure_reason(error),
+                attempt + 1,
+                RUNTIME_OPERATION_MAX_RETRIES,
+            )
+            time.sleep(
+                RUNTIME_RETRY_DELAYS[
+                    min(attempt, len(RUNTIME_RETRY_DELAYS) - 1)
+                ]
+            )
 
 
 def get_expiring_rental_alerted_booking_ids(
@@ -1277,7 +1600,10 @@ def get_available_expense_months(
     current_month = reference_date.strftime("%Y-%m")
     previous_month_date = reference_date.replace(day=1) - datetime.timedelta(days=1)
     months = {current_month, previous_month_date.strftime("%Y-%m")}
-    for record in ws_expenses.get_all_records():
+    for record in _sheets_read(
+        ws_expenses.get_all_records,
+        "reading expense months",
+    ):
         month = _month_from_record(record, "Дата")
         if month:
             months.add(month)
@@ -1288,7 +1614,10 @@ def get_expenses_for_month(
     month_key: str,
     vehicle_filter: str | None = None,
 ) -> list[dict]:
-    records = ws_expenses.get_all_records()
+    records = _sheets_read(
+        ws_expenses.get_all_records,
+        "reading expenses",
+    )
     normalized_filter = str(vehicle_filter or "").strip().casefold()
     general_values = {
         "",
@@ -1341,7 +1670,10 @@ def _upsert_record_by_keys(
 ) -> None:
     if len(key_headers) != len(key_values):
         raise ValueError("Key headers and values must have the same length")
-    records = ws.get_all_records()
+    records = _sheets_read(
+        ws.get_all_records,
+        f"reading records from {getattr(ws, 'title', 'worksheet')}",
+    )
     headers = _ensure_headers(ws, required_headers)
     target_row = None
     for row_number, record in enumerate(records, start=2):
@@ -1352,7 +1684,13 @@ def _upsert_record_by_keys(
             target_row = row_number
             break
     if target_row is None:
-        ws.append_row([values.get(header, "") for header in headers])
+        _append_row_with_recovery(
+            ws,
+            [values.get(header, "") for header in headers],
+            key_fields=tuple((header,) for header in key_headers),
+            key_values=key_values,
+            operation_name=f"appending to {getattr(ws, 'title', 'worksheet')}",
+        )
         return
     updates = {
         header: value
@@ -1393,7 +1731,10 @@ def add_expense(
 
 def get_recent_expenses(limit: int = 10) -> list[dict]:
     with EXPENSES_LOCK:
-        records = ws_expenses.get_all_records()
+        records = _sheets_read(
+            ws_expenses.get_all_records,
+            "reading recent expenses",
+        )
     recent: list[dict] = []
     start_row = max(2, len(records) + 2 - max(limit, 0))
     for row_number, record in enumerate(records[start_row - 2 :], start=start_row):
@@ -1411,6 +1752,51 @@ def _expense_fingerprint(record: dict) -> tuple[str, ...]:
     )
 
 
+def _delete_expense_row_with_recovery(
+    row_number: int,
+    expense_id: object,
+    expected_fingerprint: tuple[str, ...] | None,
+    current_record: dict,
+) -> None:
+    """Delete one expense without repeating a successful row deletion."""
+    for attempt in range(RUNTIME_OPERATION_MAX_RETRIES):
+        try:
+            ws_expenses.delete_rows(row_number)
+            return
+        except Exception as error:
+            if not _is_transient_spreadsheet_error(error):
+                raise
+            remaining = _sheets_read(
+                ws_expenses.get_all_records,
+                "checking expense deletion",
+            )
+            still_present = any(
+                str(record.get("ID Записи", "")).strip()
+                == str(expense_id).strip()
+                and (
+                    expected_fingerprint is None
+                    or _expense_fingerprint(record) == expected_fingerprint
+                )
+                for record in remaining
+            )
+            if not still_present:
+                return
+            if attempt == RUNTIME_OPERATION_MAX_RETRIES - 1:
+                raise
+            logger.warning(
+                "Temporary Google Sheets failure during deleting expense "
+                "(reason=%s; attempt %s/%s); retrying",
+                _startup_failure_reason(error),
+                attempt + 1,
+                RUNTIME_OPERATION_MAX_RETRIES,
+            )
+            time.sleep(
+                RUNTIME_RETRY_DELAYS[
+                    min(attempt, len(RUNTIME_RETRY_DELAYS) - 1)
+                ]
+            )
+
+
 def delete_expense(
     expense_id: object,
     expected_record: dict | None = None,
@@ -1421,7 +1807,10 @@ def delete_expense(
         else None
     )
     with EXPENSES_LOCK:
-        records = ws_expenses.get_all_records()
+        records = _sheets_read(
+            ws_expenses.get_all_records,
+            "reading expenses for deletion",
+        )
         headers = _ensure_headers(ws_expenses, EXPENSE_HEADERS)
         for row_number, record in enumerate(records, start=2):
             if str(record.get("ID Записи", "")).strip() != str(expense_id).strip():
@@ -1431,7 +1820,10 @@ def delete_expense(
                 and _expense_fingerprint(record) != expected_fingerprint
             ):
                 return False
-            current_values = ws_expenses.row_values(row_number)
+            current_values = _sheets_read(
+                lambda: ws_expenses.row_values(row_number),
+                f"reading expense row {row_number}",
+            )
             current_record = dict(zip(headers, current_values))
             if str(current_record.get("ID Записи", "")).strip() != str(
                 expense_id
@@ -1442,7 +1834,12 @@ def delete_expense(
                 and _expense_fingerprint(current_record) != expected_fingerprint
             ):
                 return False
-            ws_expenses.delete_rows(row_number)
+            _delete_expense_row_with_recovery(
+                row_number,
+                expense_id,
+                expected_fingerprint,
+                current_record,
+            )
             return True
     return False
 
@@ -1462,7 +1859,10 @@ def get_available_financial_months(
         )
         if month:
             months.add(month)
-    for record in ws_expenses.get_all_records():
+    for record in _sheets_read(
+        ws_expenses.get_all_records,
+        "reading financial expense months",
+    ):
         month = _month_from_record(record, "Дата")
         if month:
             months.add(month)
@@ -2250,8 +2650,12 @@ def add_new_booking(
                 legacy_values.get(header, "")
                 for header in headers
             ]
-        bookings_sheet.append_row(
+        _append_row_with_recovery(
+            bookings_sheet,
             row_to_append,
+            key_fields=(("ID Брони", "ID", "Booking ID"),),
+            key_values=(new_booking_id,),
+            operation_name=f"creating booking {new_booking_id}",
             value_input_option="USER_ENTERED",
         )
         booking_row = (
@@ -2272,8 +2676,11 @@ def add_new_booking(
                 new_booking_id,
             )
         return new_booking_id
-    except Exception:
-        traceback.print_exc()
+    except Exception as error:
+        logger.error(
+            "Booking creation failed: reason=%s",
+            _startup_failure_reason(error),
+        )
         raise
 
 
@@ -2340,7 +2747,10 @@ def update_public_booking_status(
 ) -> dict:
     """Atomically update a pending public booking and return its row data."""
     try:
-        all_values = ws_bookings.get_all_values()
+        all_values = _sheets_read(
+            ws_bookings.get_all_values,
+            f"reading booking {booking_id} for status update",
+        )
         if not all_values:
             raise ValueError("Бронирования sheet is empty")
         headers = all_values[0]
@@ -2369,7 +2779,14 @@ def update_public_booking_status(
                 f"Booking {booking_id} is no longer pending "
                 f"(status={current_status})"
             )
-        ws_bookings.update_cell(target_row, status_column + 1, status)
+        _sheets_write(
+            lambda: ws_bookings.update_cell(
+                target_row,
+                status_column + 1,
+                status,
+            ),
+            f"updating booking {booking_id} status",
+        )
         target_values.extend([""] * max(0, len(headers) - len(target_values)))
         target_values[status_column] = status
         return dict(zip(headers, target_values))
@@ -2384,7 +2801,10 @@ def update_public_booking_status(
 
 def get_available_cars_for_direct_issuance() -> list[dict]:
     """Return every car with open-booking status taking precedence."""
-    cars = ws_cars.get_all_records()
+    cars = _sheets_read(
+        ws_cars.get_all_records,
+        "reading cars for direct issuance",
+    )
     bookings = _get_sheet_records_safely(ws_bookings, "Бронирования")
     rented_ids, rented_plates = _open_rental_car_identifiers(bookings)
     result = []
@@ -2415,7 +2835,10 @@ def update_car_status(
 ) -> None:
     """Update a car's status and, when provided, its current mileage."""
     _ensure_headers(ws_cars, ["Статус"])
-    values = ws_cars.get_all_values()
+    values = _sheets_read(
+        ws_cars.get_all_values,
+        "reading cars for status update",
+    )
     if not values:
         raise ValueError("Автомобили sheet is empty")
     headers = values[0]
@@ -2505,6 +2928,40 @@ def save_direct_issuance(
             bookings_sheet,
             "Бронирования",
         )
+        existing_booking = next(
+            (
+                record
+                for record in records
+                if str(record.get("Статус", "")).strip() == "В аренде"
+                and _normalized_car_identifier(
+                    record.get("ID Авто")
+                    or record.get("Car ID")
+                    or record.get("ID")
+                )
+                == _normalized_car_identifier(car_id)
+                and str(
+                    record.get("ФИО Клиента")
+                    or record.get("Клиент")
+                    or record.get("Клиент ФИО")
+                    or ""
+                ).strip()
+                == str(client_name or "").strip()
+                and str(
+                    record.get("Дата окончания")
+                    or record.get("Дата окончания (ГГГГ-ММ-ДД)")
+                    or ""
+                ).strip()
+                == str(end_date or "").strip()
+                and safe_int(
+                    record.get("Сумма брони (RUB)")
+                    or record.get("Цена")
+                    or record.get("Стоимость")
+                    or 0
+                )
+                == int(price)
+            ),
+            None,
+        )
         booking_ids = []
         for record in records:
             try:
@@ -2519,7 +2976,18 @@ def save_direct_issuance(
                 )
             except (TypeError, ValueError):
                 continue
-        booking_id = max(booking_ids, default=100) + 1
+        existing_booking_id = (
+            existing_booking.get("ID Брони")
+            or existing_booking.get("ID")
+            or existing_booking.get("Booking ID")
+            if existing_booking
+            else None
+        )
+        booking_id = (
+            int(str(existing_booking_id).replace(" ", ""))
+            if existing_booking_id is not None
+            else max(booking_ids, default=100) + 1
+        )
         today = datetime.date.today().isoformat()
         required_headers = [
             ("ID Брони", "ID", "Booking ID"),
@@ -2601,11 +3069,18 @@ def save_direct_issuance(
             "Плановая дата и время окончания": planned_end_at,
             "Источник": source,
         }
-        bookings_sheet.append_row(
-            [values.get(header, "") for header in headers],
-            value_input_option="USER_ENTERED",
-        )
-        booking_row = len(records) + 2
+        if existing_booking is None:
+            _append_row_with_recovery(
+                bookings_sheet,
+                [values.get(header, "") for header in headers],
+                key_fields=(("ID Брони", "ID", "Booking ID"),),
+                key_values=(booking_id,),
+                operation_name=f"creating direct issuance {booking_id}",
+                value_input_option="USER_ENTERED",
+            )
+            booking_row = len(records) + 2
+        else:
+            booking_row = int(existing_booking["__row_number__"])
         try:
             colorize_booking_row(
                 getattr(sh, "id", SPREADSHEET_NAME),
@@ -2635,7 +3110,10 @@ def save_direct_issuance(
 
 def _attach_car_references(bookings: list[dict]) -> list[dict]:
     """Attach справочник values once for a list of booking records."""
-    cars = ws_cars.get_all_records()
+    cars = _sheets_read(
+        ws_cars.get_all_records,
+        "reading cars for cancellable bookings",
+    )
     enriched_bookings = []
     for booking in bookings:
         enriched = dict(booking)
@@ -2852,7 +3330,7 @@ def issue_booking(
 
 
 def get_active_cars():
-    all_cars = ws_cars.get_all_records()
+    all_cars = _sheets_read(ws_cars.get_all_records, "reading active cars")
     return [car for car in all_cars if car.get("Статус") == "Активен"]
 
 
@@ -2873,7 +3351,10 @@ def get_cancellable_cars() -> list[dict]:
     if not bookings:
         return []
 
-    cars = ws_cars.get_all_records()
+    cars = _sheets_read(
+        ws_cars.get_all_records,
+        "reading cars for cancellable bookings",
+    )
     cars_by_id = {
         _normalized_car_identifier(
             car.get("ID") or car.get("ID Авто") or car.get("Car ID")
@@ -2939,7 +3420,7 @@ def get_cancellable_cars() -> list[dict]:
 
 
 def get_all_cars():
-    return ws_cars.get_all_records()
+    return _sheets_read(ws_cars.get_all_records, "reading all cars")
 
 
 def _contains_car_keyword(
@@ -2960,7 +3441,10 @@ def get_partner_cars(keyword: str) -> list[dict]:
     """Return cars matching a partner make/model keyword or source."""
     return [
         dict(car)
-        for car in ws_cars.get_all_records()
+        for car in _sheets_read(
+            ws_cars.get_all_records,
+            "reading partner cars",
+        )
         if _contains_car_keyword(
             car,
             keyword,
@@ -3031,7 +3515,10 @@ def get_partner_expenses(keyword: str) -> list[dict]:
         )
 
     expenses = []
-    for expense in ws_expenses.get_all_records():
+    for expense in _sheets_read(
+        ws_expenses.get_all_records,
+        "reading partner expenses",
+    ):
         vehicle = str(
             expense.get("Автомобиль (Госномер / Общие)")
             or expense.get("Автомобиль")
@@ -3088,7 +3575,10 @@ def cancel_booking(
     deposit_status: str,
 ) -> None:
     try:
-        all_values = ws_bookings.get_all_values()
+        all_values = _sheets_read(
+            ws_bookings.get_all_values,
+            f"reading booking {booking_id} for cancellation",
+        )
         if not all_values:
             raise ValueError("Бронирования sheet is empty")
 
@@ -3120,10 +3610,13 @@ def cancel_booking(
         }
         headers = _ensure_headers(ws_bookings, list(updates))
         for header, value in updates.items():
-            ws_bookings.update_cell(
-                booking_row,
-                headers.index(header) + 1,
-                value,
+            _sheets_write(
+                lambda: ws_bookings.update_cell(
+                    booking_row,
+                    headers.index(header) + 1,
+                    value,
+                ),
+                f"updating cancelled booking {booking_id}",
             )
     except Exception:
         logger.exception(
@@ -3134,7 +3627,10 @@ def cancel_booking(
 
 
 def get_car_by_id(car_id: str):
-    all_cars = ws_cars.get_all_records()
+    all_cars = _sheets_read(
+        ws_cars.get_all_records,
+        "reading car by ID",
+    )
     for car in all_cars:
         if str(car.get("ID")) == str(car_id):
             return car
@@ -3142,7 +3638,10 @@ def get_car_by_id(car_id: str):
 
 
 def get_car_by_plate(plate: str):
-    all_cars = ws_cars.get_all_records()
+    all_cars = _sheets_read(
+        ws_cars.get_all_records,
+        "reading car by plate",
+    )
     for car in all_cars:
         if str(car.get("Госномер", "")).strip() == str(plate).strip():
             return car
@@ -3240,7 +3739,10 @@ def save_actual_return(
         == return_key
         for record in returns_records
     ) if return_key else False
-    acceptance_records = ws_acceptance_acts.get_all_records()
+    acceptance_records = _sheets_read(
+        ws_acceptance_acts.get_all_records,
+        "reading acceptance acts",
+    )
     acceptance_already_saved = any(
         str(record.get("ID Брони", "")).strip()
         == str(booking_id).strip()
@@ -3485,10 +3987,13 @@ def save_actual_return(
     )
 
     if booking_row is not None:
-        ws_bookings.update_cell(
-            booking_row,
-            booking_headers.index("Статус") + 1,
-            "Завершена",
+        _sheets_write(
+            lambda: ws_bookings.update_cell(
+                booking_row,
+                booking_headers.index("Статус") + 1,
+                "Завершена",
+            ),
+            f"completing booking {booking_id}",
         )
         try:
             colorize_booking_row(
@@ -3560,6 +4065,29 @@ def _startup_failure_hint(error: Exception, reason: str) -> str:
                 "для каждой пары и повторите запуск."
             )
     return SHEETS_STARTUP_HINTS[reason]
+
+
+def sheets_operation_failure_hint(error: Exception) -> str:
+    """Return a safe operator hint for an exhausted runtime operation."""
+    reason = _startup_failure_reason(error)
+    return {
+        "quota": (
+            "Google Sheets временно ограничил частоту запросов. "
+            "Повторите действие через минуту."
+        ),
+        "network": (
+            "Google Sheets временно недоступен по сети. "
+            "Повторите действие через несколько секунд."
+        ),
+        "structure": (
+            "Структура Google Sheets не соответствует ожидаемой. "
+            "Проверьте обязательные листы и заголовки."
+        ),
+        "configuration": (
+            "Не удалось выполнить операцию Google Sheets. "
+            "Проверьте доступ сервисного аккаунта и настройки таблицы."
+        ),
+    }[reason]
 
 
 def _startup_failure_status(

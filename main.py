@@ -84,6 +84,7 @@ from sheets_client import (
     save_actual_return,
     save_direct_issuance,
     safe_int,
+    sheets_operation_failure_hint,
     add_public_booking,
     update_public_booking_status,
     update_booking_planned_end,
@@ -9622,20 +9623,8 @@ async def _save_return(
         )
         return
     except Exception as error:
-        logging.error(
-            f"[RETURN_ERROR] Ошибка записи возврата: {error}",
-            exc_info=True,
-        )
-        error_text = str(error)
-        if "429" in error_text or "quota exceeded" in error_text.casefold():
-            reason = (
-                "Google Sheets временно отклонил запись из-за превышения "
-                "лимита запросов (429). Повторите сохранение через минуту."
-            )
-        elif isinstance(error, KeyError):
-            reason = f"Не найдена колонка Google Sheets: {error}"
-        else:
-            reason = f"{type(error).__name__}: {error}"
+        logger.exception("[RETURN_ERROR] Google Sheets return save failed")
+        reason = sheets_operation_failure_hint(error)
         await message.answer(
             "Не удалось сохранить возврат в Google Sheets.\n"
             f"Причина: {reason}\n\n"
