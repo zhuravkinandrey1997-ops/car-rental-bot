@@ -1,4 +1,5 @@
 import unittest
+import datetime
 from unittest.mock import AsyncMock, patch
 
 import main
@@ -184,6 +185,58 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             main.ClientBookingState.confirmation.state,
             "ClientBookingState:confirmation",
+        )
+
+    def test_client_calendar_marks_busy_dates_and_disables_past_dates(self):
+        keyboard = main.calendar_keyboard(
+            "client_booking",
+            "start",
+            minimum_date=datetime.date(2026, 10, 15),
+            year=2026,
+            month=10,
+            occupied_dates={"2026-10-20": ["501"]},
+        )
+        buttons = {
+            button.text: button
+            for row in keyboard.inline_keyboard
+            for button in row
+        }
+
+        busy_button = next(
+            button
+            for button in buttons.values()
+            if button.callback_data == "calendar:client_booking:start:busy:2026-10-20"
+        )
+        self.assertIn("🔴", busy_button.text)
+        self.assertEqual(
+            buttons["·"].callback_data,
+            "calendar:noop",
+        )
+        free_button = next(
+            button
+            for button in buttons.values()
+            if button.callback_data == "calendar:client_booking:start:day:2026-10-21"
+        )
+        self.assertEqual(free_button.text, "21")
+
+    def test_client_period_check_includes_every_day_between_dates(self):
+        occupied_dates = {
+            "2026-10-16": ["501"],
+            "2026-10-20": ["501"],
+        }
+        self.assertTrue(
+            main._client_period_has_occupied_dates(
+                "2026-10-15",
+                "2026-10-18",
+                occupied_dates,
+            )
+        )
+        self.assertFalse(
+            main._client_period_has_occupied_dates(
+                "2026-10-21",
+                "2026-10-22",
+                occupied_dates,
+            )
         )
 
     def test_client_summary_has_confirmation_and_cancel_actions(self):

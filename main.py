@@ -405,6 +405,10 @@ def calendar_keyboard(
                         callback_data=day_callback(current_date),
                     )
                 )
+            elif minimum_date and current_date < minimum_date:
+                row.append(InlineKeyboardButton(text="·", callback_data="calendar:noop"))
+            elif maximum_date and current_date > maximum_date:
+                row.append(InlineKeyboardButton(text="·", callback_data="calendar:noop"))
             elif occupied_dates and current_date.isoformat() in occupied_dates:
                 row.append(
                     InlineKeyboardButton(
@@ -412,10 +416,6 @@ def calendar_keyboard(
                         callback_data=day_callback(current_date, "busy"),
                     )
                 )
-            elif minimum_date and current_date < minimum_date:
-                row.append(InlineKeyboardButton(text="·", callback_data="calendar:noop"))
-            elif maximum_date and current_date > maximum_date:
-                row.append(InlineKeyboardButton(text="·", callback_data="calendar:noop"))
             else:
                 row.append(
                     InlineKeyboardButton(
@@ -3735,6 +3735,22 @@ def _client_booking_days(start_date: str, end_date: str) -> int:
     return (end - start).days + 1
 
 
+def _client_period_has_occupied_dates(
+    start_date: str,
+    end_date: str,
+    occupied_dates: dict[str, list[str]] | set[str] | list[str],
+) -> bool:
+    start = datetime.date.fromisoformat(start_date)
+    end = datetime.date.fromisoformat(end_date)
+    if end < start:
+        return False
+    occupied = set(occupied_dates)
+    return any(
+        (start + datetime.timedelta(days=offset)).isoformat() in occupied
+        for offset in range((end - start).days + 1)
+    )
+
+
 def _client_prepayment(total_price: int) -> int:
     return max(1, math.ceil(total_price * CLIENT_PREPAYMENT_RATE))
 
@@ -3790,22 +3806,30 @@ async def _send_client_calendar(
     stage: str,
     start_date: datetime.date | None = None,
 ) -> None:
-    calendar = _client_calendar(stage, start_date)
+    data = await state.get_data()
+    minimum_date = start_date or _now_moscow().date()
     calendar_date = start_date or _now_moscow().date()
+    occupied_dates = data.get("client_occupied_dates", {})
     calendar_message = await message.answer(
         (
             "📅 Выберите дату начала аренды:"
             if stage == "start"
             else "📅 Выберите дату возврата автомобиля:"
         ),
-        reply_markup=await calendar.start_calendar(
-            calendar_date.year,
-            calendar_date.month,
+        reply_markup=calendar_keyboard(
+            "client_booking",
+            stage,
+            minimum_date=minimum_date,
+            year=calendar_date.year,
+            month=calendar_date.month,
+            occupied_dates=occupied_dates,
+            selected_start_date=start_date if stage == "end" else None,
         ),
     )
     await state.update_data(
         client_calendar_stage=stage,
         client_calendar_message_id=calendar_message.message_id,
+        calendar_message_id=calendar_message.message_id,
     )
 
 
@@ -3955,6 +3979,20 @@ async def client_booking_car_callback(
     if daily_rate <= 0:
         await callback.answer("Для автомобиля не указан тариф.", show_alert=True)
         return
+    try:
+        active_bookings = await asyncio.to_thread(
+            get_active_bookings_for_car,
+            _car_id(car),
+            _car_plate(car),
+        )
+    except Exception:
+        logger.exception("Could not load client car bookings for calendar")
+        await callback.answer(
+            "Не удалось загрузить занятые даты автомобиля.",
+            show_alert=True,
+        )
+        return
+    occupied_dates = _occupied_dates(active_bookings)
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
     await state.update_data(
@@ -3962,6 +4000,7 @@ async def client_booking_car_callback(
         car_id=_car_id(car),
         car_name=_car_name(car),
         daily_rate=daily_rate,
+        client_occupied_dates=occupied_dates,
     )
     await state.set_state(ClientBookingState.start_date)
     await callback.message.answer(
@@ -4065,6 +4104,17 @@ async def _finish_client_booking_dates(
         await message.answer(
             "Автомобиль не выбран. Начните бронирование заново.",
             reply_markup=client_welcome_keyboard(),
+        )
+        return
+    if _client_period_has_occupied_dates(
+        start_date,
+        end_date,
+        data.get("client_occupied_dates", {}),
+    ):
+        await message.answer(
+            "В выбранный период попадают уже занятые даты. "
+            "Выберите другой период.",
+            reply_markup=client_cancel_reply_keyboard(),
         )
         return
     try:
@@ -7209,6 +7259,8 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
                 occupied_dates=(
                     _occupied_dates(data.get("occupancy_bookings", []))
                     if flow == "occupancy"
+                    else data.get("client_occupied_dates", {})
+                    if flow == "client_booking"
                     else None
                 ),
                 selected_start_date=(
@@ -7221,6 +7273,13 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     if len(parts) == 5 and parts[3] == "busy":
+        if flow == "client_booking":
+            await callback.answer(
+                "⚠️ На эту дату автомобиль уже забронирован. "
+                "Пожалуйста, выберите другой день",
+                show_alert=True,
+            )
+            return
         try:
             selected_date = datetime.date.fromisoformat(parts[4])
         except ValueError:
@@ -7283,6 +7342,27 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     selected_value = selected_date.isoformat()
+    if flow == "client_booking":
+        occupied_dates = data.get("client_occupied_dates", {}) or {}
+        if selected_value in occupied_dates:
+            await callback.answer(
+                "⚠️ На эту дату автомобиль уже забронирован. "
+                "Пожалуйста, выберите другой день",
+                show_alert=True,
+            )
+            return
+        if stage == "end" and data.get("start_date"):
+            if _client_period_has_occupied_dates(
+                data["start_date"],
+                selected_value,
+                occupied_dates,
+            ):
+                await callback.answer(
+                    "В выбранный период попадают уже занятые даты. "
+                    "Выберите другой период",
+                    show_alert=True,
+                )
+                return
     if flow == "occupancy" and stage == "calendar":
         await callback.answer(
             f"Свободная дата: {format_date_ru(selected_value)}"
@@ -7339,6 +7419,7 @@ async def calendar_callback(callback: CallbackQuery, state: FSMContext) -> None:
                 "end",
                 minimum_date=selected_date,
                 selected_start_date=selected_date,
+                occupied_dates=data.get("client_occupied_dates", {}),
             ),
         )
         return
