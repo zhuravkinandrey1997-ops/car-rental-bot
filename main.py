@@ -69,6 +69,7 @@ from sheets_client import (
     get_expiring_rental_alerted_booking_ids,
     get_recent_expenses,
     get_pending_notification_manager_ids,
+    get_active_manager_ids,
     get_returnable_rentals,
     get_tomorrow_bookings,
     get_partner_bookings,
@@ -3013,6 +3014,20 @@ def _admin_notification_ids() -> list[int]:
     return list(dict.fromkeys([*NOTIFY_MANAGERS, *ADMIN_IDS]))
 
 
+async def _booking_notification_ids() -> list[int]:
+    """Return configured and active Sheets managers for fleet notifications."""
+    recipients = _configured_manager_chat_ids()
+    try:
+        sheet_recipients = await asyncio.to_thread(get_active_manager_ids)
+    except Exception:
+        logger.exception("Could not read active manager IDs from Менеджеры")
+        sheet_recipients = []
+    for chat_id in [*sheet_recipients, *_admin_notification_ids()]:
+        if chat_id not in recipients:
+            recipients.append(chat_id)
+    return recipients
+
+
 def _configured_manager_chat_ids() -> list[int]:
     chat_ids: list[int] = []
     for variable_name in (
@@ -4124,20 +4139,61 @@ def _client_booking_manager_request_text(
     data: dict,
     client_telegram_id: int,
 ) -> str:
-    delivery_method = data.get("delivery_method") or "—"
+    return _client_booking_fleet_text(
+        data,
+        status="Ожидает связи",
+        client_telegram_id=client_telegram_id,
+    )
+
+
+def _client_booking_fleet_text(
+    data: dict,
+    *,
+    status: str,
+    client_telegram_id: int | None = None,
+    booking_id: object | None = None,
+) -> str:
+    delivery_type = data.get("delivery_method") or "—"
     delivery_address = data.get("delivery_address") or "—"
-    delivery_text = f"{delivery_method} {delivery_address}".strip()
+    try:
+        days = _client_booking_days(
+            str(data.get("start_date", "")),
+            str(data.get("end_date", "")),
+        )
+    except (TypeError, ValueError):
+        days = data.get("days", "—")
+    telegram_contact = data.get("phone") or "—"
+    if client_telegram_id is not None:
+        telegram_contact = f"{telegram_contact} (ID: {client_telegram_id})"
+    booking_line = (
+        f"• <b>Номер заявки:</b> #{html.escape(str(booking_id))}\n"
+        if booking_id is not None
+        else ""
+    )
+    unpaid_note = (
+        "\n⚠️ <b>БЕЗ ОПЛАТЫ / ждёт звонка</b>\n"
+        if status == "Ожидает связи"
+        else ""
+    )
     return (
-        "⚠️ <b>Новая заявка на бронирование "
-        "(БЕЗ ОПЛАТЫ / ждёт звонка)</b>\n\n"
-        f"• Авто: {html.escape(str(data.get('car_name', '—')))}\n"
-        f"• Даты: {html.escape(format_date_ru(data.get('start_date', '')))} — "
-        f"{html.escape(format_date_ru(data.get('end_date', '')))}\n"
-        f"• Сумма: {_format_number(data.get('total_price', 0))} RUB\n"
-        f"• Получение: {html.escape(delivery_text)}\n"
-        f"• Клиент: {html.escape(str(data.get('client_name', '—')))}\n"
-        f"• Контакт: {html.escape(str(data.get('phone', '—')))}\n"
-        f"• Telegram ID: <code>{client_telegram_id}</code>"
+        "🔔 <b>Новая заявка из клиентского бота!</b>\n\n"
+        f"{unpaid_note}"
+        f"{booking_line}"
+        f"• <b>Автомобиль:</b> "
+        f"{html.escape(str(data.get('car_name', '—')))}\n"
+        f"• <b>Период:</b> "
+        f"{html.escape(format_date_ru(data.get('start_date', '')))} — "
+        f"{html.escape(format_date_ru(data.get('end_date', '')))} "
+        f"({html.escape(str(days))} сут.)\n"
+        f"• <b>Сумма к оплате:</b> "
+        f"{_format_number(data.get('total_price', 0))} RUB\n"
+        f"• <b>Получение:</b> "
+        f"{html.escape(str(delivery_type))} "
+        f"({html.escape(str(delivery_address))})\n"
+        f"• <b>Клиент:</b> "
+        f"{html.escape(str(data.get('client_name', '—')))}\n"
+        f"• <b>Telegram:</b> {html.escape(str(telegram_contact))}\n"
+        f"• <b>Статус оплаты:</b> {html.escape(str(status))}"
     )
 
 
@@ -4986,7 +5042,7 @@ async def client_booking_manager_callback(
         data,
         callback.from_user.id,
     )
-    for admin_id in _admin_notification_ids():
+    for admin_id in await _booking_notification_ids():
         try:
             await notification_bot.send_message(
                 chat_id=admin_id,
@@ -5156,37 +5212,91 @@ async def client_booking_receipt(
         )
         return
 
-    admin_text = _client_booking_admin_text(
-        booking_id,
-        {**data, "booking_status": "Подтверждена"},
+    admin_text = _client_booking_fleet_text(
+        data,
+        status="Чек прикреплен",
+        client_telegram_id=message.from_user.id,
+        booking_id=booking_id,
     )
     delivered_to_admin = False
     notification_bot = admin_bot or bot
-    for admin_id in _admin_notification_ids():
+    for admin_id in await _booking_notification_ids():
         try:
-            await bot.forward_message(
-                chat_id=admin_id,
-                from_chat_id=message.chat.id,
-                message_id=message.message_id,
-            )
-            await notification_bot.send_message(
-                chat_id=admin_id,
-                text=admin_text,
+            await _send_receipt_to_fleet(
+                source_bot=bot,
+                fleet_bot=notification_bot,
+                message=message,
+                admin_id=admin_id,
+                caption=admin_text,
                 reply_markup=client_admin_booking_keyboard(booking_id),
             )
             delivered_to_admin = True
         except Exception:
             logger.exception(
-                "Could not forward client receipt for booking %s to %s",
+                "Could not deliver client receipt to fleet manager %s for booking %s",
                 booking_id,
                 admin_id,
             )
+            with suppress(Exception):
+                await notification_bot.send_message(
+                    chat_id=admin_id,
+                    text=admin_text,
+                    parse_mode="HTML",
+                    reply_markup=client_admin_booking_keyboard(booking_id),
+                )
+                delivered_to_admin = True
     await state.clear()
     await message.answer(
         "✅ Чек получен! Бронирование успешно подтверждено, даты зафиксированы "
         "за вами. Наш менеджер свяжется с вами перед выдачей авто.",
         reply_markup=client_welcome_keyboard(),
     )
+
+
+async def _send_receipt_to_fleet(
+    *,
+    source_bot: Bot,
+    fleet_bot: Bot,
+    message: Message,
+    admin_id: int,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup,
+) -> None:
+    """Deliver the receipt into a manager chat using the fleet bot.
+
+    The client bot must first download the file because the fleet bot cannot
+    access a message from the client's private chat. The fallback still keeps
+    the service card on the fleet bot if Telegram file download is unavailable.
+    """
+    if message.photo:
+        photo = message.photo[-1]
+        file_info = await source_bot.get_file(photo.file_id)
+        buffer = io.BytesIO()
+        await source_bot.download(file_info, destination=buffer)
+        await fleet_bot.send_photo(
+            chat_id=admin_id,
+            photo=BufferedInputFile(buffer.getvalue(), filename="receipt.jpg"),
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+        return
+    if message.document is not None:
+        file_info = await source_bot.get_file(message.document.file_id)
+        buffer = io.BytesIO()
+        await source_bot.download(file_info, destination=buffer)
+        await fleet_bot.send_document(
+            chat_id=admin_id,
+            document=BufferedInputFile(
+                buffer.getvalue(),
+                filename=message.document.file_name or "receipt.pdf",
+            ),
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+        return
+    raise ValueError("Receipt message contains neither photo nor document")
 
 
 async def client_booking_admin_callback(
@@ -10394,6 +10504,18 @@ def create_dispatcher(client_bot: Bot | None = None) -> Dispatcher:
 def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
     dispatcher = Dispatcher()
 
+    async def client_manager_booking_handler(
+        callback: CallbackQuery,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        await client_booking_manager_callback(
+            callback,
+            state,
+            bot,
+            admin_bot=admin_bot,
+        )
+
     async def client_receipt_handler(
         message: Message,
         state: FSMContext,
@@ -10431,7 +10553,7 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
         F.data == "client_booking:deposit",
     )
     dispatcher.callback_query.register(
-        client_booking_manager_callback,
+        client_manager_booking_handler,
         F.data == "client_booking:manager",
     )
     dispatcher.callback_query.register(

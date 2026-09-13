@@ -792,24 +792,26 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         manager_bot = SimpleNamespace(send_message=AsyncMock())
+        client_bot = SimpleNamespace(send_message=AsyncMock())
         with (
-            patch.object(main, "_admin_notification_ids", return_value=[987654]),
+            patch.object(main, "_booking_notification_ids", AsyncMock(return_value=[987654])),
             patch.object(main, "add_public_booking") as add_booking,
         ):
             await main.client_booking_manager_callback(
                 callback,
                 state,
-                bot=SimpleNamespace(),
+                bot=client_bot,
                 admin_bot=manager_bot,
             )
 
         add_booking.assert_not_called()
         manager_bot.send_message.assert_awaited_once()
+        client_bot.send_message.assert_not_awaited()
         manager_text = manager_bot.send_message.await_args.kwargs["text"]
         self.assertIn("БЕЗ ОПЛАТЫ / ждёт звонка", manager_text)
         self.assertIn("Porsche Panamera", manager_text)
         self.assertIn("Невский проспект, дом 1", manager_text)
-        self.assertIn("<code>123456</code>", manager_text)
+        self.assertIn("ID: 123456", manager_text)
         self.assertEqual(
             callback_message.answer.await_args.args[0],
             "Спасибо за обращение! Менеджер Leon Rental свяжется с вами "
@@ -819,7 +821,10 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_receipt_creates_confirmed_booking_and_notifies_managers(self):
         message = SimpleNamespace(
-            document=SimpleNamespace(file_id="receipt.pdf"),
+            document=SimpleNamespace(
+                file_id="receipt.pdf",
+                file_name="receipt.pdf",
+            ),
             photo=[],
             from_user=SimpleNamespace(id=123456),
             chat=SimpleNamespace(id=555),
@@ -842,13 +847,18 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         client_bot = SimpleNamespace(
+            get_file=AsyncMock(return_value=SimpleNamespace()),
+            download=AsyncMock(),
             forward_message=AsyncMock(),
             send_message=AsyncMock(),
         )
-        manager_bot = SimpleNamespace(send_message=AsyncMock())
+        manager_bot = SimpleNamespace(
+            send_document=AsyncMock(),
+            send_message=AsyncMock(),
+        )
         with (
             patch.object(main, "add_public_booking", return_value=701) as add_booking,
-            patch.object(main, "_admin_notification_ids", return_value=[987654]),
+            patch.object(main, "_booking_notification_ids", AsyncMock(return_value=[987654])),
         ):
             await main.client_booking_receipt(
                 message,
@@ -861,13 +871,11 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["prepayment"], 3_000)
         self.assertEqual(kwargs["status"], "Подтверждена")
         self.assertEqual(kwargs["receipt_payment_method"], "Перевод (СБП)")
-        client_bot.forward_message.assert_awaited_once_with(
-            chat_id=987654,
-            from_chat_id=555,
-            message_id=42,
+        manager_bot.send_document.assert_awaited_once()
+        self.assertIn(
+            "Статус оплаты:</b> Чек прикреплен",
+            manager_bot.send_document.await_args.kwargs["caption"],
         )
-        manager_bot.send_message.assert_awaited_once()
-        self.assertIn("Статус: Подтверждена", manager_bot.send_message.await_args.kwargs["text"])
         self.assertIn(
             "✅ Чек получен! Бронирование успешно подтверждено",
             message.answer.await_args.args[0],
