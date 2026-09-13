@@ -1,10 +1,12 @@
 import asyncio
+from copy import deepcopy
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
 import sheets_client
+from gspread.http_client import HTTPClient
 
 
 class _QuotaError(Exception):
@@ -115,6 +117,51 @@ class _ReadOnlySheetsClient:
         if self.failures:
             raise self.failures.pop(0)
         return self.spreadsheet
+
+
+class _MetadataHTTPClient(HTTPClient):
+    """HTTP client marker needed to construct real gspread worksheets."""
+
+    def __init__(self):
+        pass
+
+
+class _GspreadMetadataSpreadsheet(sheets_client.gspread.Spreadsheet):
+    """Build gspread Worksheet objects from a Sheets API-like response."""
+
+    def __init__(self, titles):
+        self._metadata = {
+            "spreadsheetId": "spreadsheet-id",
+            "properties": {
+                "title": "rental-fleet",
+                "spreadsheetId": "spreadsheet-id",
+            },
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": index,
+                        "title": title,
+                        "index": index,
+                        "sheetType": "GRID",
+                        "gridProperties": {
+                            "rowCount": 1000,
+                            "columnCount": 26,
+                        },
+                    }
+                }
+                for index, title in enumerate(titles)
+            ],
+        }
+        self.metadata_reads = 0
+        super().__init__(
+            _MetadataHTTPClient(),
+            {"id": "spreadsheet-id", "title": "rental-fleet"},
+        )
+
+    def fetch_sheet_metadata(self, params=None):
+        del params
+        self.metadata_reads += 1
+        return deepcopy(self._metadata)
 
 
 class _DiagnosticMessage:
@@ -251,6 +298,71 @@ class SheetsStartupTest(unittest.TestCase):
         self.assertEqual(
             [worksheet.title_updates for worksheet in spreadsheet._worksheets],
             [[], [], [], []],
+        )
+
+    def test_bootstrap_handles_real_gspread_metadata_conflicts_without_retry_or_partial_rename(
+        self,
+    ):
+        spreadsheet = _GspreadMetadataSpreadsheet(
+            (
+                "Cars",
+                "Автомобили",
+                "Bookings",
+                "Бронирования",
+                "Возвраты_Касса",
+                "Менеджеры",
+            )
+        )
+        # Spreadsheet construction itself validates metadata once; isolate the
+        # read performed by the bootstrap under test.
+        spreadsheet.metadata_reads = 0
+        sheets_client_client = _SheetsClient(spreadsheet)
+
+        with (
+            _patch_startup_worksheets(),
+            patch.object(sheets_client, "SHEETS_READY", False),
+            patch.object(sheets_client, "SERVICE_ACCOUNT_JSON", None),
+            patch.object(sheets_client, "SPREADSHEET_NAME", "a" * 40),
+            patch.object(
+                sheets_client.gspread,
+                "service_account",
+                return_value=sheets_client_client,
+            ),
+            patch.object(sheets_client.time, "sleep") as sleep,
+            self.assertLogs("car-rental-sheets", level="ERROR") as logs,
+        ):
+            self.assertFalse(sheets_client._run_sheets_startup())
+
+        self.assertEqual(sheets_client_client.open_calls, 1)
+        self.assertEqual(spreadsheet.metadata_reads, 1)
+        self.assertEqual(
+            sheets_client.SHEETS_STARTUP_STATUS.reason,
+            "structure",
+        )
+        self.assertEqual(sheets_client.SHEETS_STARTUP_STATUS.attempts, 1)
+        self.assertIn("Cars / Автомобили", sheets_client.SHEETS_STARTUP_STATUS.hint)
+        self.assertIn(
+            "Bookings / Бронирования",
+            sheets_client.SHEETS_STARTUP_STATUS.hint,
+        )
+        sleep.assert_not_called()
+        self.assertEqual(
+            [
+                worksheet.title
+                for worksheet in spreadsheet.worksheets()
+            ],
+            [
+                "Cars",
+                "Автомобили",
+                "Bookings",
+                "Бронирования",
+                "Возвраты_Касса",
+                "Менеджеры",
+            ],
+        )
+        self.assertNotIn(
+            "Google Sheets worksheet structure is invalid",
+            "\n".join(logs.output),
         )
 
     def test_conflict_listing_uses_one_read_only_metadata_snapshot(self):
