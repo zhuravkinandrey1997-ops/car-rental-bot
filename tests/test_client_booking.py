@@ -32,7 +32,15 @@ class _FakeState:
 
 
 class _FakeMessage:
-    from_user = type("User", (), {"id": 123456})()
+    from_user = type(
+        "User",
+        (),
+        {
+            "id": 123456,
+            "full_name": "Иван Иванов",
+            "username": "ivan",
+        },
+    )()
 
     def __init__(self):
         self.answers = []
@@ -109,6 +117,51 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
                 ["📋 Условия и залог", "👤 Связь с менеджером"],
             ],
         )
+
+    async def test_manager_contact_sends_client_message_and_html_notification(self):
+        message = _FakeMessage()
+        state = _FakeState()
+        bot = SimpleNamespace(send_message=AsyncMock())
+
+        with patch.object(
+            main,
+            "_manager_contact_notification_ids",
+            new=AsyncMock(return_value=[987654]),
+        ):
+            await main.client_manager_handler(message, state, bot)
+
+        self.assertEqual(state.clear_calls, 1)
+        self.assertEqual(
+            message.answers[-1][0],
+            "Наш менеджер поможет подобрать автомобиль и оформить аренду.\n"
+            "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
+        )
+        bot.send_message.assert_awaited_once()
+        notification = bot.send_message.await_args.kwargs
+        self.assertEqual(notification["chat_id"], 987654)
+        self.assertEqual(notification["parse_mode"], "HTML")
+        self.assertIn("🔔 <b>Запрос связи с менеджером!</b>", notification["text"])
+        self.assertIn("• Имя: Иван Иванов", notification["text"])
+        self.assertIn("• Username: @ivan", notification["text"])
+        self.assertIn("• ID клиента: <code>123456</code>", notification["text"])
+        self.assertRegex(notification["text"], r"• Время: \d{2}\.\d{2}\.\d{4} \d{2}:\d{2} МСК")
+
+    async def test_manager_contact_survives_manager_send_error(self):
+        message = _FakeMessage()
+        state = _FakeState()
+        bot = SimpleNamespace(
+            send_message=AsyncMock(side_effect=RuntimeError("blocked by Telegram"))
+        )
+
+        with patch.object(
+            main,
+            "_manager_contact_notification_ids",
+            new=AsyncMock(return_value=[987654]),
+        ):
+            await main.client_manager_handler(message, state, bot)
+
+        self.assertEqual(len(message.answers), 1)
+        self.assertIn("Наш менеджер поможет подобрать автомобиль", message.answers[0][0])
 
     def test_ai_booking_keyboard_has_booking_callback(self):
         button = main.client_ai_booking_keyboard().inline_keyboard[0][0]

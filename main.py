@@ -3012,6 +3012,90 @@ def _admin_notification_ids() -> list[int]:
     return list(dict.fromkeys([*NOTIFY_MANAGERS, *ADMIN_IDS]))
 
 
+def _configured_manager_chat_ids() -> list[int]:
+    chat_ids: list[int] = []
+    for variable_name in (
+        "MANAGER_CHAT_ID",
+        "ADMIN_CHAT_ID",
+        "MANAGER_CHAT_IDS",
+        "ADMIN_CHAT_IDS",
+    ):
+        raw_value = os.getenv(variable_name, "")
+        for candidate in re.split(r"[,;\s]+", raw_value):
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            try:
+                chat_id = int(candidate)
+            except ValueError:
+                continue
+            if chat_id not in chat_ids:
+                chat_ids.append(chat_id)
+    return chat_ids
+
+
+async def _manager_contact_notification_ids() -> list[int]:
+    recipients = _configured_manager_chat_ids()
+    try:
+        sheet_recipients = await asyncio.to_thread(
+            find_manager_chat_ids,
+            "leonRentalSPB",
+        )
+    except Exception:
+        logger.exception(
+            "Could not find manager chat ID for @leonRentalSPB in Менеджеры"
+        )
+        sheet_recipients = []
+    for chat_id in sheet_recipients:
+        if chat_id not in recipients:
+            recipients.append(chat_id)
+    if not recipients:
+        recipients = list(dict.fromkeys(NOTIFY_MANAGERS))
+    return recipients
+
+
+async def _notify_manager_contact_request(
+    message: Message,
+    bot: Bot | None = None,
+) -> None:
+    if bot is None or message.from_user is None:
+        logger.warning(
+            "Manager contact request could not be delivered: "
+            "bot or client is missing"
+        )
+        return
+    user = message.from_user
+    username = getattr(user, "username", None)
+    username_text = (
+        f"@{html.escape(username)}"
+        if username
+        else "отсутствует"
+    )
+    full_name = html.escape(user.full_name or "Не указано")
+    moscow_now = datetime.datetime.now(NOTIFICATION_TZ)
+    notification = (
+        "🔔 <b>Запрос связи с менеджером!</b>\n\n"
+        "Клиент запросил консультацию:\n"
+        f"• Имя: {full_name}\n"
+        f"• Username: {username_text}\n"
+        f"• ID клиента: <code>{user.id}</code>\n"
+        f"• Время: {moscow_now.strftime('%d.%m.%Y %H:%M')} МСК"
+    )
+    recipients = await _manager_contact_notification_ids()
+    for chat_id in recipients:
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=notification,
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.exception(
+                "Could not send manager contact request to chat %s",
+                chat_id,
+            )
+
+
 def build_overdue_rental_notification(booking: dict) -> str:
     """Build the overdue alert without any financial information."""
     booking_id = _booking_id(booking)
@@ -4887,7 +4971,11 @@ async def client_rules_handler(message: Message, state: FSMContext) -> None:
     )
 
 
-async def client_manager_handler(message: Message, state: FSMContext) -> None:
+async def client_manager_handler(
+    message: Message,
+    state: FSMContext,
+    bot: Bot | None = None,
+) -> None:
     await state.clear()
     await asyncio.gather(
         message.answer(
@@ -4895,7 +4983,7 @@ async def client_manager_handler(message: Message, state: FSMContext) -> None:
             "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
             reply_markup=client_welcome_keyboard(),
         ),
-        _notify_manager_contact_request(message),
+        _notify_manager_contact_request(message, bot),
     )
 
 
@@ -5099,12 +5187,19 @@ async def client_start_handler(message: Message, state: FSMContext) -> None:
     )
 
 
-async def client_manager_handler(message: Message, state: FSMContext) -> None:
+async def client_manager_handler(
+    message: Message,
+    state: FSMContext,
+    bot: Bot | None = None,
+) -> None:
     await state.clear()
-    await message.answer(
-        "Наш менеджер поможет подобрать автомобиль и оформить аренду.\n"
-        "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
-        reply_markup=client_welcome_keyboard(),
+    await asyncio.gather(
+        message.answer(
+            "Наш менеджер поможет подобрать автомобиль и оформить аренду.\n"
+            "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
+            reply_markup=client_welcome_keyboard(),
+        ),
+        _notify_manager_contact_request(message, bot),
     )
 
 
