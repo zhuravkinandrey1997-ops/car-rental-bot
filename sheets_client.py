@@ -533,7 +533,11 @@ def get_available_cars(start_date_str: str, end_date_str: str):
     busy_car_ids: set[str] = set()
     for b in all_bookings:
         status = str(b.get("Статус", "")).strip().casefold()
-        if status not in {"подтверждена", "в аренде"}:
+        if status not in {
+            "подтверждена",
+            "в аренде",
+            "ожидает подтверждения",
+        }:
             continue
         b_start = _first_booking_date(
             b,
@@ -2165,6 +2169,109 @@ def add_new_booking(
         return new_booking_id
     except Exception:
         traceback.print_exc()
+        raise
+
+
+def get_booking_by_id(booking_id: int | str) -> dict | None:
+    """Return one booking by ID using the safe legacy-sheet reader."""
+    normalized_id = _normalized_car_identifier(booking_id)
+    for booking in _get_sheet_records_safely(ws_bookings, "Бронирования"):
+        candidate = booking.get("ID Брони") or booking.get("ID") or ""
+        if _normalized_car_identifier(candidate) == normalized_id:
+            return dict(booking)
+    return None
+
+
+def add_public_booking(
+    *,
+    car_id: int | str,
+    car_name: str,
+    start_date: str,
+    end_date: str,
+    client_name: str,
+    phone: str,
+    client_telegram_id: int,
+    price: int,
+    prepayment: int,
+    delivery_address: str,
+    delivery_price: int,
+    receipt_payment_method: str = "Перевод (СБП)",
+) -> int:
+    """Create a website booking request after rechecking date availability."""
+    available_cars = get_available_cars(start_date, end_date)
+    normalized_car_id = _normalized_car_identifier(car_id)
+    if not any(
+        _normalized_car_identifier(car.get("ID")) == normalized_car_id
+        for car in available_cars
+    ):
+        raise ValueError(
+            "The selected car is no longer available for the requested dates"
+        )
+    return add_new_booking(
+        car_id=int(str(car_id).replace(" ", "").removesuffix(".0")),
+        car_name=car_name,
+        start_date=start_date,
+        end_date=end_date,
+        client_name=client_name,
+        phone=phone,
+        price=price,
+        manager_id=client_telegram_id,
+        manager_name="Клиент с сайта",
+        status="Ожидает подтверждения",
+        prepayment=prepayment,
+        prepayment_pay_type=receipt_payment_method,
+        pay_type=receipt_payment_method,
+        delivery_address=delivery_address,
+        delivery_price=delivery_price,
+        source="Сайт",
+    )
+
+
+def update_public_booking_status(
+    booking_id: int | str,
+    status: str,
+) -> dict:
+    """Atomically update a pending public booking and return its row data."""
+    try:
+        all_values = ws_bookings.get_all_values()
+        if not all_values:
+            raise ValueError("Бронирования sheet is empty")
+        headers = all_values[0]
+        status_column = headers.index("Статус") if "Статус" in headers else None
+        if status_column is None:
+            raise ValueError("Бронирования sheet has no Статус header")
+        normalized_id = _normalized_car_identifier(booking_id)
+        target_row = None
+        current_status = ""
+        target_values: list[str] = []
+        for row_number, row in enumerate(all_values[1:], start=2):
+            candidate = row[0] if row else ""
+            if _normalized_car_identifier(candidate) == normalized_id:
+                target_row = row_number
+                target_values = list(row)
+                current_status = (
+                    str(row[status_column]).strip()
+                    if status_column < len(row)
+                    else ""
+                )
+                break
+        if target_row is None:
+            raise ValueError(f"Booking {booking_id} was not found")
+        if current_status != "Ожидает подтверждения":
+            raise ValueError(
+                f"Booking {booking_id} is no longer pending "
+                f"(status={current_status})"
+            )
+        ws_bookings.update_cell(target_row, status_column + 1, status)
+        target_values.extend([""] * max(0, len(headers) - len(target_values)))
+        target_values[status_column] = status
+        return dict(zip(headers, target_values))
+    except Exception:
+        logger.exception(
+            "Failed to update public booking %s to %s",
+            booking_id,
+            status,
+        )
         raise
 
 
