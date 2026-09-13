@@ -48,7 +48,6 @@ from sheets_client import (
     get_active_rentals,
     get_partner_active_rentals,
     get_active_bookings_for_car,
-    get_active_cars,
     get_all_cars,
     get_available_cars,
     get_available_cars_for_direct_issuance,

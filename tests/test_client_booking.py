@@ -158,6 +158,24 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Залог: 50 000 RUB", card)
         self.assertIn("Суточный пробег: 300 км", card)
 
+    async def test_client_fleet_loader_includes_rented_cars_but_excludes_retired(self):
+        with patch.object(
+            main,
+            "get_all_cars",
+            return_value=[
+                {"ID": "1", "Марка и Модель": "Urus", "Статус": "В аренде"},
+                {"ID": "2", "Марка и Модель": "Maybach", "Статус": "Активен"},
+                {"ID": "3", "Марка и Модель": "Списанный авто", "Статус": "Списан"},
+                {"ID": "4", "Марка и Модель": "Ремонтный авто", "Статус": "В ремонте"},
+            ],
+        ):
+            cars = await main._load_client_active_cars()
+
+        self.assertEqual(
+            [car["Марка и Модель"] for car in cars],
+            ["Urus", "Maybach"],
+        )
+
     def test_client_date_states_only_offer_calendar(self):
         calendar = main._client_calendar("start")
         self.assertIn("Отменить", calendar._labels.cancel_caption)
