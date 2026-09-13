@@ -13,6 +13,7 @@ import math
 import os
 import re
 import sys
+import traceback
 from contextlib import suppress
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -4717,10 +4718,12 @@ def _client_booking_admin_text(
         f"({data.get('phone', '—')})\n"
         f"Даты: {format_date_ru(data.get('start_date', ''))} — "
         f"{format_date_ru(data.get('end_date', ''))}\n"
+        f"Сумма аренды: {_format_number(data.get('rent_price', 0))} RUB\n"
+        f"Доставка: {_format_number(data.get('delivery_price', 0))} RUB\n"
+        f"Итоговая сумма: {_format_number(data.get('total_price', 0))} RUB\n"
         f"Способ получения: {delivery_method}\n"
         f"{address_lines}"
-        f"Итого: {_format_number(data.get('total_price', 0))} RUB\n"
-        "Статус: Заявка с сайта/бота"
+        "Статус: Новая заявка"
     )
 
 
@@ -4752,9 +4755,10 @@ async def client_booking_confirm_callback(
             client_telegram_id=callback.from_user.id,
             price=int(data["rent_price"]),
             prepayment=0,
+            plate=data.get("plate") or data.get("car_plate", ""),
             delivery_address=data.get("delivery_address", "Офис Leon Rental"),
             delivery_price=int(data.get("delivery_price", 0)),
-            status="Заявка с сайта/бота",
+            status="Новая заявка",
             source="Сайт",
         )
     except ValueError:
@@ -4766,7 +4770,8 @@ async def client_booking_confirm_callback(
             reply_markup=client_welcome_keyboard(),
         )
         return
-    except Exception:
+    except Exception as error:
+        traceback.print_exc()
         logger.exception("Could not save confirmed client booking")
         await callback.answer("Не удалось сохранить заявку.", show_alert=True)
         return
@@ -4793,8 +4798,8 @@ async def client_booking_confirm_callback(
     with suppress(Exception):
         await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        f"✅ Заявка #{booking_id} отправлена менеджеру.\n"
-        "Мы свяжемся с вами для подтверждения деталей.",
+        "✅ Ваша заявка успешно принята! Наш менеджер свяжется с вами "
+        "в течение 10-15 минут для подтверждения бронирования.",
         reply_markup=client_welcome_keyboard(),
     )
     if not delivered_to_admin:

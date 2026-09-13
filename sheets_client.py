@@ -52,6 +52,20 @@ BOOKING_HEADERS = [
     "Плановое окончание",
     "Источник",
 ]
+PUBLIC_BOOKING_HEADERS = [
+    "ID брони",
+    "Автомобиль/ID авто",
+    "Госномер",
+    "Дата начала",
+    "Дата окончания",
+    "Арендатор (ФИО)",
+    "Контакт/Телефон",
+    "Сумма аренды",
+    "Доставка",
+    "Итоговая сумма",
+    "Способ получения/Адрес",
+    "Статус",
+]
 CAR_TARIFF_HEADERS = [
     "Тариф 1 день",
     "Тариф 2-3 дня",
@@ -2625,6 +2639,7 @@ def add_new_booking(
     delivery_address: str = "Самовывоз",
     delivery_price: int = 0,
     source: str = "Леон Рентал",
+    plate: str = "",
 ):
     try:
         bookings_sheet = _get_bookings_sheet()
@@ -2651,7 +2666,7 @@ def add_new_booking(
                 )
             except (TypeError, ValueError):
                 continue
-        new_booking_id = max(booking_ids, default=100) + 1
+        new_booking_id = max(booking_ids, default=0) + 1
 
         booking_deposit = prepayment if prepayment else deposit
         booking_deposit_pay_type = (
@@ -2678,85 +2693,69 @@ def add_new_booking(
         start_mileage_value = int(
             str(start_mileage or 0).replace(" ", "")
         )
-        row = [
-            new_booking_id,
-            car_id_value,
-            str(car_name or ""),
-            str(start_date or ""),
-            str(end_date or ""),
-            str(client_name or ""),
-            str(phone or ""),
-            total_price_value,
-            booking_deposit_value,
-            str(booking_deposit_pay_type or "Без оплаты"),
-            manager_id_value,
-            str(status or "Подтверждена"),
-            delivery_address_value,
-            delivery_price_value,
-            "",
-            "",
-            "",
-            f"{str(end_date or '')} 23:59",
-            str(source or ""),
-        ]
         headers = _ensure_headers(bookings_sheet, BOOKING_HEADERS)
-
-        row_to_append = row
-        if headers[: len(BOOKING_HEADERS)] != BOOKING_HEADERS:
-            legacy_values = {
-                "ID Брони": new_booking_id,
-                "ID": new_booking_id,
-                "ID Авто": car_id_value,
-                "Автомобиль": str(car_name or ""),
-                "Авто": str(car_name or ""),
-                "Дата начала": str(start_date or ""),
-                "Дата начала (ГГГГ-ММ-ДД)": str(start_date or ""),
-                "Дата окончания": str(end_date or ""),
-                "Дата окончания (ГГГГ-ММ-ДД)": str(end_date or ""),
-                "ФИО Клиента": str(client_name or ""),
-                "Клиент": str(client_name or ""),
-                "Телефон": str(phone or ""),
-                "Сумма брони (RUB)": total_price_value,
-                "Цена": total_price_value,
-                "Адрес доставки": delivery_address_value,
-                "Стоимость доставки (RUB)": delivery_price_value,
-                "ID Менеджера": manager_id_value,
-                "Telegram ID Менеджера": manager_id_value,
-                "Имя менеджера": str(manager_name or manager_id),
-                "Менеджер": str(manager_name or manager_id),
-                "Статус": str(status or "Подтверждена"),
-                "Задаток (RUB)": booking_deposit_value,
-                "Залог/Предоплата": booking_deposit_value,
-                "Задаток/Предоплата": booking_deposit_value,
-                "Способ оплаты задатка": str(
-                    booking_deposit_pay_type or "Без оплаты"
-                ),
-                "Тип оплаты залога": str(
-                    booking_deposit_pay_type or "Без оплаты"
-                ),
-                "Дата и время выдачи": str(issued_at or ""),
-                "Пробег при выдаче (км)": start_mileage_value,
-                "Принятая сумма аренды (RUB)": total_price_value,
-                "Залог (RUB)": insurance_deposit_value,
-                "Внесенный залог": insurance_deposit_value,
-                "Страховой залог": insurance_deposit_value,
-                "Способ оплаты": str(pay_type or "Без оплаты"),
-                "Способ оплаты залога": str(
-                    deposit_pay_type or "Без оплаты"
-                ),
-                "Способ оплаты страхового залога": str(
-                    deposit_pay_type or "Без оплаты"
-                ),
-                "Плановое окончание": f"{str(end_date or '')} 23:59",
-                "Дата выдачи": "",
-                "Время выдачи": "",
-                "Время возврата": "",
-                "Источник": str(source or ""),
-            }
-            row_to_append = [
-                legacy_values.get(header, "")
-                for header in headers
-            ]
+        status_value = str(status or "Новая заявка")
+        header_values = {
+            "ID Брони": new_booking_id,
+            "ID брони": new_booking_id,
+            "ID": new_booking_id,
+            "Booking ID": new_booking_id,
+            "ID Авто": car_id_value,
+            "Car ID": car_id_value,
+            "Автомобиль": str(car_name or ""),
+            "Авто": str(car_name or ""),
+            "Автомобиль/ID авто": (
+                f"{str(car_name or '').strip()} / ID {car_id_value}"
+            ),
+            "Госномер": str(plate or ""),
+            "Номер авто": str(plate or ""),
+            "Дата начала": str(start_date or ""),
+            "Дата начала (ГГГГ-ММ-ДД)": str(start_date or ""),
+            "Дата окончания": str(end_date or ""),
+            "Дата окончания (ГГГГ-ММ-ДД)": str(end_date or ""),
+            "ФИО Клиента": str(client_name or ""),
+            "Клиент": str(client_name or ""),
+            "Арендатор (ФИО)": str(client_name or ""),
+            "Телефон": str(phone or ""),
+            "Контакт/Телефон": str(phone or ""),
+            "Сумма брони (RUB)": total_price_value,
+            "Цена": total_price_value,
+            "Сумма аренды": rent_price_value,
+            "Задаток (RUB)": booking_deposit_value,
+            "Залог/Предоплата": booking_deposit_value,
+            "Способ оплаты задатка": str(
+                booking_deposit_pay_type or "Без оплаты"
+            ),
+            "ID Менеджера": manager_id_value,
+            "Telegram ID Менеджера": manager_id_value,
+            "Статус": status_value,
+            "Адрес доставки": delivery_address_value,
+            "Способ получения/Адрес": delivery_address_value,
+            "Стоимость доставки (RUB)": delivery_price_value,
+            "Доставка": delivery_price_value,
+            "Итоговая сумма": total_price_value,
+            "Дата и время выдачи": str(issued_at or ""),
+            "Пробег при выдаче (км)": start_mileage_value,
+            "Принятая сумма аренды (RUB)": total_price_value,
+            "Залог (RUB)": insurance_deposit_value,
+            "Внесенный залог": insurance_deposit_value,
+            "Страховой залог": insurance_deposit_value,
+            "Способ оплаты": str(pay_type or "Без оплаты"),
+            "Способ оплаты залога": str(deposit_pay_type or "Без оплаты"),
+            "Плановое окончание": f"{str(end_date or '')} 23:59",
+            "Дата выдачи": "",
+            "Время выдачи": "",
+            "Время возврата": "",
+            "Источник": str(source or ""),
+        }
+        normalized_header_values = {
+            str(header).strip().casefold(): value
+            for header, value in header_values.items()
+        }
+        row_to_append = [
+            normalized_header_values.get(str(header).strip().casefold(), "")
+            for header in headers
+        ]
         _append_row_with_recovery(
             bookings_sheet,
             row_to_append,
@@ -2814,8 +2813,9 @@ def add_public_booking(
     prepayment: int,
     delivery_address: str,
     delivery_price: int,
+    plate: str = "",
     receipt_payment_method: str = "Перевод (СБП)",
-    status: str = "Ожидает подтверждения",
+    status: str = "Новая заявка",
     source: str = "Сайт",
 ) -> int:
     """Create a website booking request after rechecking date availability."""
@@ -2844,6 +2844,7 @@ def add_public_booking(
         pay_type=receipt_payment_method,
         delivery_address=delivery_address,
         delivery_price=delivery_price,
+        plate=plate,
         source=source,
     )
 
@@ -2881,7 +2882,11 @@ def update_public_booking_status(
                 break
         if target_row is None:
             raise ValueError(f"Booking {booking_id} was not found")
-        if current_status not in {"Ожидает подтверждения", "Заявка с сайта/бота"}:
+        if current_status not in {
+            "Ожидает подтверждения",
+            "Заявка с сайта/бота",
+            "Новая заявка",
+        }:
             raise ValueError(
                 f"Booking {booking_id} is no longer pending "
                 f"(status={current_status})"

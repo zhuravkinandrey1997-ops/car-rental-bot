@@ -1,5 +1,6 @@
 import unittest
 import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
@@ -42,6 +43,21 @@ class _FakeMessage:
 
     async def answer_photo(self, photo, caption, **kwargs):
         self.photos.append((photo, caption, kwargs))
+
+
+class _BookingState:
+    def __init__(self, data=None):
+        self.data = data or {}
+        self.cleared = False
+
+    async def get_state(self):
+        return main.ClientBookingState.confirmation.state
+
+    async def get_data(self):
+        return dict(self.data)
+
+    async def clear(self):
+        self.cleared = True
 
 
 class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
@@ -559,11 +575,157 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, 501)
         kwargs = add_booking.call_args.kwargs
-        self.assertEqual(kwargs["status"], "Ожидает подтверждения")
+        self.assertEqual(kwargs["status"], "Новая заявка")
         self.assertEqual(kwargs["source"], "Сайт")
         self.assertEqual(kwargs["manager_id"], 123456)
         self.assertEqual(kwargs["prepayment"], 30_000)
         self.assertEqual(kwargs["delivery_price"], 3_000)
+
+    def test_public_booking_headers_and_id_fallback_are_safe(self):
+        appended = []
+        sheet = object()
+        records = [{"ID Брони": "not-a-number", "__row_number__": 2}]
+        with (
+            patch.object(sheets_client, "_get_bookings_sheet", return_value=sheet),
+            patch.object(
+                sheets_client,
+                "_get_sheet_records_safely",
+                return_value=records,
+            ),
+            patch.object(
+                sheets_client,
+                "_ensure_headers",
+                return_value=sheets_client.PUBLIC_BOOKING_HEADERS,
+            ),
+            patch.object(
+                sheets_client,
+                "_append_row_with_recovery",
+                side_effect=lambda _sheet, row, **_kwargs: appended.append(row),
+            ),
+            patch.object(sheets_client, "colorize_booking_row"),
+        ):
+            booking_id = sheets_client.add_new_booking(
+                car_id=7,
+                car_name="Porsche Panamera",
+                plate="A123BC",
+                start_date="2026-09-15",
+                end_date="2026-09-17",
+                client_name="Иван Иванов",
+                phone="+375291112233",
+                price=100_000,
+                manager_id=123456,
+                delivery_address="Санкт-Петербург, Невский проспект, дом 1",
+                delivery_price=3_000,
+                status="Новая заявка",
+            )
+
+        self.assertEqual(booking_id, 1)
+        self.assertEqual(
+            appended,
+            [[
+                1,
+                "Porsche Panamera / ID 7",
+                "A123BC",
+                "2026-09-15",
+                "2026-09-17",
+                "Иван Иванов",
+                "+375291112233",
+                100_000,
+                3_000,
+                103_000,
+                "Санкт-Петербург, Невский проспект, дом 1",
+                "Новая заявка",
+            ]],
+        )
+
+    async def test_confirm_error_prints_traceback_and_keeps_state(self):
+        callback = SimpleNamespace(
+            message=SimpleNamespace(),
+            from_user=SimpleNamespace(id=123456),
+            answer=AsyncMock(),
+        )
+        state = _BookingState(
+            {
+                "car_id": "7",
+                "car_name": "Porsche Panamera",
+                "start_date": "2026-09-15",
+                "end_date": "2026-09-17",
+                "client_name": "Иван Иванов",
+                "phone": "+375291112233",
+                "rent_price": 100_000,
+            }
+        )
+        with (
+            patch.object(
+                main,
+                "add_public_booking",
+                side_effect=RuntimeError("sheets failed"),
+            ),
+            patch.object(main.traceback, "print_exc") as print_exc,
+        ):
+            await main.client_booking_confirm_callback(
+                callback,
+                state,
+                bot=SimpleNamespace(),
+            )
+
+        print_exc.assert_called_once_with()
+        callback.answer.assert_awaited_once_with(
+            "Не удалось сохранить заявку.",
+            show_alert=True,
+        )
+        self.assertFalse(state.cleared)
+
+    async def test_confirm_success_notifies_manager_and_shows_success_text(self):
+        callback_message = SimpleNamespace(
+            edit_reply_markup=AsyncMock(),
+            answer=AsyncMock(),
+        )
+        callback = SimpleNamespace(
+            message=callback_message,
+            from_user=SimpleNamespace(id=123456),
+            answer=AsyncMock(),
+        )
+        state = _BookingState(
+            {
+                "car_id": "7",
+                "car_name": "Porsche Panamera",
+                "start_date": "2026-09-15",
+                "end_date": "2026-09-17",
+                "client_name": "Иван Иванов",
+                "phone": "+375291112233",
+                "rent_price": 100_000,
+                "delivery_price": 3_000,
+                "total_price": 103_000,
+                "delivery_method": "Доставка по адресу",
+                "delivery_address": "Невский проспект, дом 1",
+            }
+        )
+        manager_bot = SimpleNamespace(send_message=AsyncMock())
+        with (
+            patch.object(main, "add_public_booking", return_value=501),
+            patch.object(main, "_admin_notification_ids", return_value=[987654]),
+        ):
+            await main.client_booking_confirm_callback(
+                callback,
+                state,
+                bot=SimpleNamespace(),
+                admin_bot=manager_bot,
+            )
+
+        manager_bot.send_message.assert_awaited_once()
+        manager_text = manager_bot.send_message.await_args.kwargs["text"]
+        self.assertIn("Porsche Panamera", manager_text)
+        self.assertIn("100 000 RUB", manager_text)
+        self.assertIn("103 000 RUB", manager_text)
+        self.assertIn("Невский проспект, дом 1", manager_text)
+        callback_message.answer.assert_awaited_once()
+        self.assertEqual(
+            callback_message.answer.await_args.args[0],
+            "✅ Ваша заявка успешно принята! Наш менеджер свяжется с вами "
+            "в течение 10-15 минут для подтверждения бронирования.",
+        )
+        self.assertTrue(state.cleared)
 
     def test_public_booking_status_update_requires_pending_status(self):
         sheet = _BookingsSheet()
