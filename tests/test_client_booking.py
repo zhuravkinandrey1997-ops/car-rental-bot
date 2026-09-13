@@ -137,7 +137,8 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             labels,
             [
                 "✈️ Подача в Пулково (+ 3 000 RUB)",
-                "🏢 Забрать в офисе",
+                "📍 Доставка по адресу (+ 3 000 RUB)",
+                "🏢 Забрать в офисе (Бесплатно)",
                 "❌ Отменить / В меню",
             ],
         )
@@ -192,6 +193,30 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             for button in row
         ]
         self.assertEqual(labels, ["✅ Подтвердить заявку", "❌ Отменить / В меню"])
+
+    def test_address_delivery_is_visible_in_summary_and_manager_notification(self):
+        data = {
+            "car_name": "Porsche Panamera",
+            "start_date": "2026-09-15",
+            "end_date": "2026-09-17",
+            "delivery_method": "Доставка по адресу",
+            "delivery_address": "Санкт-Петербург, Невский проспект, дом 1, отель",
+            "client_name": "Иван Иванов",
+            "phone": "@ivan",
+            "rent_price": 100_000,
+            "delivery_price": 3_000,
+            "total_price": 103_000,
+        }
+
+        summary = main._client_booking_summary_text(data)
+        manager_text = main._client_booking_admin_text(501, data)
+
+        for text in (summary, manager_text):
+            self.assertIn("Способ получения: Доставка по адресу", text)
+            self.assertIn(
+                "Адрес доставки: Санкт-Петербург, Невский проспект, дом 1, отель",
+                text,
+            )
 
     def test_public_booking_uses_pending_status_and_site_source(self):
         with (
