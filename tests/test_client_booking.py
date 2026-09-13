@@ -27,6 +27,15 @@ class ClientBookingTest(unittest.TestCase):
         self.assertEqual(main._client_prepayment(100_000), 30_000)
         self.assertGreaterEqual(main._client_prepayment(1), 1)
 
+    def test_payment_instruction_contains_official_details_and_receipt_requirement(self):
+        instruction = main._client_payment_instruction(30_900)
+        self.assertIn("Банк: Сбербанк", instruction)
+        self.assertIn("Номер телефона: +79110326262", instruction)
+        self.assertIn("Получатель: Лунева К.Д.", instruction)
+        self.assertIn("Сумма к оплате: 30 900 RUB", instruction)
+        self.assertIn("скриншот или PDF чека об оплате", instruction)
+        self.assertIn("Предоставление чека фиксирует бронь за вами!", instruction)
+
     def test_delivery_keyboard_contains_required_fixed_options(self):
         labels = [
             button.text

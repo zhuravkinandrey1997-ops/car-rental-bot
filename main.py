@@ -101,10 +101,9 @@ LEON_RENTAL_SOURCE = "Леон Рентал"
 CLIENT_BOOKING_SOURCE = "Сайт"
 CLIENT_DELIVERY_FEE = 3000
 CLIENT_PREPAYMENT_RATE = 0.30
-CLIENT_PAYMENT_DETAILS = os.getenv(
-    "CLIENT_PAYMENT_DETAILS",
-    "Реквизиты для оплаты уточните у менеджера в этом чате.",
-)
+CLIENT_PAYMENT_BANK = "Сбербанк"
+CLIENT_PAYMENT_PHONE = "+79110326262"
+CLIENT_PAYMENT_RECIPIENT = "Лунева К.Д."
 SOURCE_SELECTION_PROMPT = "От чьего имени оформляется операция?"
 
 MONTH_NAMES = (
@@ -3515,6 +3514,20 @@ def _client_prepayment(total_price: int) -> int:
     return max(1, math.ceil(total_price * CLIENT_PREPAYMENT_RATE))
 
 
+def _client_payment_instruction(prepayment: int) -> str:
+    return (
+        "💳 РЕКВИЗИТЫ ДЛЯ ВНЕСЕНИЯ ПРЕДОПЛАТЫ:\n"
+        f"Банк: {CLIENT_PAYMENT_BANK}\n"
+        f"Номер телефона: {CLIENT_PAYMENT_PHONE}\n"
+        f"Получатель: {CLIENT_PAYMENT_RECIPIENT}\n"
+        f"Сумма к оплате: {_format_number(prepayment)} RUB\n\n"
+        "⚠️ Важно:\n"
+        "После перевода обязательно отправьте в этот чат скриншот или PDF "
+        "чека об оплате.\n"
+        "Предоставление чека фиксирует бронь за вами!"
+    )
+
+
 async def start_client_booking(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(ClientBookingState.start_date)
@@ -3745,9 +3758,7 @@ async def client_booking_phone(message: Message, state: FSMContext) -> None:
         f"Доставка: {_format_number(delivery_price)} RUB\n"
         f"ИТОГО к оплате: {_format_number(total_price)} RUB\n"
         f"Предоплата для фиксации брони: {_format_number(prepayment)} RUB\n\n"
-        f"{CLIENT_PAYMENT_DETAILS}\n\n"
-        "Для подтверждения бронирования, пожалуйста, отправьте фото "
-        "или PDF чека об оплате предоплаты.",
+        f"{_client_payment_instruction(prepayment)}",
         reply_markup=ReplyKeyboardRemove(),
     )
 
