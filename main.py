@@ -1061,7 +1061,7 @@ def _client_booking_button_text(car: dict) -> str:
     price_text = (
         f"{_format_number(_car_rate_for_days(car, 1))} ₽/сут"
         if _car_rate_for_days(car, 1) > 0
-        else "цена уточняется"
+        else "цена не указана"
     )
     year_text = f" ({year})" if year else ""
     return f"📅 {name}{year_text} — {price_text}"[:64]
@@ -2038,6 +2038,22 @@ def _car_base_deposit(car: dict) -> int | None:
         return None
     parsed, _ = _parse_int(raw, "базовый залог", minimum=0)
     return parsed
+
+
+def _client_car_deposit_text(car: dict) -> str:
+    raw_deposit = str(car.get("Залог") or "").strip()
+    if not raw_deposit:
+        return "от 15 000 RUB"
+    try:
+        numeric_deposit = int(float(raw_deposit.replace(" ", "").replace(",", ".")))
+    except (TypeError, ValueError):
+        return raw_deposit
+    return f"{numeric_deposit:,} RUB".replace(",", " ")
+
+
+def _client_car_mileage_text(car: dict) -> str:
+    raw_mileage = str(car.get("Суточный пробег") or "").strip()
+    return f"{raw_mileage} км" if raw_mileage else "250 км"
 
 
 def _car_class(car: dict) -> str:
@@ -4014,34 +4030,29 @@ async def _send_client_calendar(
 
 def _client_fleet_card_text(car: dict) -> str:
     daily_rate = _client_fleet_price_range_text(car)
-    deposit = _car_base_deposit(car)
-    deposit_text = (
-        f"{_format_number(deposit)} RUB" if deposit is not None else "уточняется"
-    )
+    deposit_text = _client_car_deposit_text(car)
+    mileage_text = _client_car_mileage_text(car)
     year = _car_year(car) or "—"
     return (
         f"🏎 {_car_name(car)} ({year} г.)\n\n"
         f"• Класс: {_car_class(car)}\n"
         f"• Стоимость: {daily_rate}\n"
         f"• Страховой залог: {deposit_text}\n"
-        f"• Суточный пробег: {_car_mileage_limit(car)} км"
+        f"• Суточный пробег: {mileage_text}"
     )
 
 
 def _client_fleet_card_caption(car: dict) -> str:
     daily_rate = html.escape(_client_fleet_price_range_text(car))
-    deposit = _car_base_deposit(car)
-    deposit_text = (
-        f"{_format_number(deposit)} RUB" if deposit is not None else "уточняется"
-    )
+    deposit_text = html.escape(_client_car_deposit_text(car))
+    mileage_text = html.escape(_client_car_mileage_text(car))
     year = html.escape(_car_year(car) or "—")
     return (
         f"🏎 <b>{html.escape(_car_name(car))}</b> ({year} г.)\n\n"
         f"• <b>Класс:</b> {html.escape(_car_class(car))}\n"
         f"• <b>Стоимость:</b> {daily_rate}\n"
-        f"• <b>Страховой залог:</b> {html.escape(deposit_text)}\n"
-        f"• <b>Суточный пробег:</b> "
-        f"{html.escape(_car_mileage_limit(car))} км"
+        f"• <b>Страховой залог:</b> {deposit_text}\n"
+        f"• <b>Суточный пробег:</b> {mileage_text}"
     )
 
 

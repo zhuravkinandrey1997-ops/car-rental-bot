@@ -230,7 +230,7 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
                 "Год выпуска": "2024",
                 "Класс": "Бизнес",
                 "Цена / сутки (RUB)": "12 000",
-                "Залог (RUB)": "50 000",
+                "Залог": "50000.0",
                 "Суточный пробег": "300",
             }
         )
@@ -241,6 +241,32 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Страховой залог: 50 000 RUB", card)
         self.assertIn("Суточный пробег: 300 км", card)
 
+    def test_client_car_characteristics_use_exact_sheet_columns_and_defaults(self):
+        self.assertEqual(
+            main._client_car_deposit_text({"Залог": "50000.0"}),
+            "50 000 RUB",
+        )
+        self.assertEqual(
+            main._client_car_deposit_text({"Залог": "по договору"}),
+            "по договору",
+        )
+        self.assertEqual(
+            main._client_car_deposit_text({}),
+            "от 15 000 RUB",
+        )
+        self.assertEqual(
+            main._client_car_mileage_text({"Суточный пробег": "350"}),
+            "350 км",
+        )
+        self.assertEqual(
+            main._client_car_mileage_text({}),
+            "250 км",
+        )
+        self.assertNotIn(
+            "уточняется",
+            main._client_fleet_card_text({}),
+        )
+
     def test_client_fleet_caption_contains_premium_html_format(self):
         caption = main._client_fleet_card_caption(
             {
@@ -249,7 +275,7 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
                 "Год": "2023",
                 "Класс": "Премиум",
                 "Цена / сутки (RUB)": "25 000",
-                "Залог (RUB)": "150 000",
+                "Залог": "150000",
                 "Суточный пробег": "300",
             }
         )
@@ -277,7 +303,7 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             "Год": "2023",
             "Класс": "Премиум",
             "Цена / сутки (RUB)": "25 000",
-            "Залог (RUB)": "150 000",
+            "Залог": "150000",
             "Суточный пробег": "300",
         }
         message = _FakeMessage()
