@@ -8,12 +8,15 @@ import csv
 import datetime
 import html
 import io
+import json
 import logging
 import math
 import os
 import re
 from contextlib import suppress
 from urllib.parse import quote, unquote
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, Dispatcher, F
@@ -92,6 +95,8 @@ logger = logging.getLogger("car-rental-bot")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CLIENT_BOT_TOKEN = os.getenv("CLIENT_BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = "gemini-2.0-flash"
 NOTIFY_MANAGERS = [661842368, 952125424, 1574781782]
 PARTNER_ID = 226694751
 PARTNER_CAR_KEYWORD = "Dodge"
@@ -106,6 +111,26 @@ CLIENT_PAYMENT_BANK = "Сбербанк"
 CLIENT_PAYMENT_PHONE = "+79110326262"
 CLIENT_PAYMENT_RECIPIENT = "Лунева К.Д."
 SOURCE_SELECTION_PROMPT = "От чьего имени оформляется операция?"
+CLIENT_AI_SYSTEM_PROMPT = """Ты — премиальный консьерж автопроката Leon Rental
+в Санкт-Петербурге.
+
+Отвечай на русском языке вежливо, уверенно, делово и лаконично.
+Источник общих сведений: https://leon-rental.ru/ru/contacts
+
+Правила компании:
+- Локация: Санкт-Петербург и Ленинградская область.
+- Режим работы: круглосуточно, 7 дней в неделю (24/7).
+- Телефон для связи: +7 (911) 215-56-62.
+- Реквизиты для бронирования: Сбербанк, +79110326262.
+- Доставка по Санкт-Петербургу и в аэропорт Пулково доступна круглосуточно.
+- Стоимость доставки: офис — бесплатно, аэропорт Пулково или адрес в СПб —
+  3 000 RUB.
+
+Не выдумывай автомобили, цены, наличие или условия. Называй автомобили только
+из актуального списка автопарка, переданного в контексте запроса. Если нужной
+информации нет в контексте, честно скажи, что её нужно уточнить у менеджера.
+Для онлайн-бронирования предложи клиенту воспользоваться кнопкой под ответом.
+"""
 
 MONTH_NAMES = (
     "Январь",
@@ -947,6 +972,19 @@ def client_welcome_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🏎 Выбрать автомобиль")],
         ],
         resize_keyboard=True,
+    )
+
+
+def client_ai_booking_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🏎 Забронировать автомобиль",
+                    callback_data="client_ai:book",
+                )
+            ]
+        ]
     )
 
 
@@ -9006,6 +9044,10 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
         client_delivery_callback,
         F.data.startswith("client_delivery:"),
     )
+    dispatcher.callback_query.register(
+        client_ai_booking_callback,
+        F.data == "client_ai:book",
+    )
     dispatcher.message.register(client_start_handler, CommandStart())
     dispatcher.message.register(
         start_client_booking,
@@ -9040,6 +9082,7 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
         client_receipt_handler,
         ClientBookingState.receipt,
     )
+    dispatcher.message.register(client_ai_message)
     dispatcher.errors.register(error_handler)
     return dispatcher
 
