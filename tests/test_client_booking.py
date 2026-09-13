@@ -62,6 +62,38 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(main.client_welcome_keyboard().is_persistent)
 
+    async def test_client_start_sends_html_welcome_with_persistent_menu(self):
+        message = _FakeMessage()
+        state = _FakeState()
+
+        await main.client_start_handler(message, state)
+
+        text, kwargs = message.answers[-1]
+        self.assertEqual(
+            text,
+            "✨ <b>Добро пожаловать в Leon Rental!</b>\n\n"
+            "Премиальный автопарк в Санкт-Петербурге: спорткары, "
+            "представительские седаны и люксовые внедорожники без лишних формальностей.\n\n"
+            "• <b>Идеальное состояние:</b> авто передаются чистыми и с полным баком.\n"
+            "• <b>Прозрачные тарифы:</b> автоматическая скидка при аренде от 2 суток.\n"
+            "• <b>Подача 24/7:</b> доставим автомобиль к терминалу Пулково, "
+            "в отель или к дому.\n\n"
+            "Выберите автомобиль в каталоге или забронируйте поездку онлайн "
+            "через меню ниже 👇",
+        )
+        self.assertEqual(kwargs["parse_mode"], "HTML")
+        self.assertTrue(kwargs["reply_markup"].is_persistent)
+        self.assertEqual(
+            [
+                [button.text for button in row]
+                for row in kwargs["reply_markup"].keyboard
+            ],
+            [
+                ["🏎 Автопарк и цены", "📅 Забронировать онлайн"],
+                ["📋 Условия и залог", "👤 Связь с менеджером"],
+            ],
+        )
+
     def test_ai_booking_keyboard_has_booking_callback(self):
         button = main.client_ai_booking_keyboard().inline_keyboard[0][0]
         self.assertEqual(button.text, "🏎 Забронировать автомобиль")
