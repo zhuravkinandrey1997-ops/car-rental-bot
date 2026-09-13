@@ -221,10 +221,41 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             main,
             "get_all_cars",
             return_value=[
-                {"ID": "1", "Марка и Модель": "Urus", "Статус": "В аренде"},
-                {"ID": "2", "Марка и Модель": "Maybach", "Статус": "Активен"},
-                {"ID": "3", "Марка и Модель": "Списанный авто", "Статус": "Списан"},
-                {"ID": "4", "Марка и Модель": "Ремонтный авто", "Статус": "В ремонте"},
+                {
+                    "ID": "1",
+                    "Марка и Модель": "Urus",
+                    "Статус": "В аренде",
+                    "Показывать в клиентботе": "Да",
+                },
+                {
+                    "ID": "2",
+                    "Марка и Модель": "Maybach",
+                    "Статус": "Активен",
+                    "Показывать в клиентботе": "yes",
+                },
+                {
+                    "ID": "3",
+                    "Марка и Модель": "Списанный авто",
+                    "Статус": "Списан",
+                    "Показывать в клиентботе": "Да",
+                },
+                {
+                    "ID": "4",
+                    "Марка и Модель": "Ремонтный авто",
+                    "Статус": "В ремонте",
+                    "Показывать в клиентботе": "Да",
+                },
+                {
+                    "ID": "5",
+                    "Марка и Модель": "Hidden",
+                    "Статус": "Активен",
+                    "Показывать в клиентботе": "Нет",
+                },
+                {
+                    "ID": "6",
+                    "Марка и Модель": "Blank",
+                    "Статус": "Активен",
+                },
             ],
         ):
             cars = await main._load_client_active_cars()
@@ -233,6 +264,15 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             [car["Марка и Модель"] for car in cars],
             ["Urus", "Maybach"],
         )
+
+    def test_client_visibility_flag_accepts_only_explicit_enabled_values(self):
+        self.assertTrue(main._car_show_in_client_bot({"Показывать в клиентботе": "Да"}))
+        self.assertTrue(main._car_show_in_client_bot({"Показывать в клиентботе": " YES "}))
+        self.assertTrue(main._car_show_in_client_bot({"Показывать в клиентботе": "true"}))
+        self.assertTrue(main._car_show_in_client_bot({"Показывать в клиентботе": "+"}))
+        self.assertFalse(main._car_show_in_client_bot({"Показывать в клиентботе": "Нет"}))
+        self.assertFalse(main._car_show_in_client_bot({"Показывать в клиентботе": ""}))
+        self.assertFalse(main._car_show_in_client_bot({}))
 
     def test_client_date_states_only_offer_calendar(self):
         calendar = main._client_calendar("start")

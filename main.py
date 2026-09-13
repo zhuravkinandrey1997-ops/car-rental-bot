@@ -3978,11 +3978,20 @@ def _client_fleet_card_caption(car: dict) -> str:
     )
 
 
-async def _load_client_active_cars() -> list[dict]:
-    """Load the public fleet without considering current rental occupancy.
+def _car_show_in_client_bot(car: dict) -> bool:
+    value = _value(
+        car,
+        "Показывать в клиентботе",
+        default="",
+    )
+    return value.strip().casefold() in {"да", "yes", "+", "true"}
 
-    The client catalog and the first booking step are a showroom: a car that
-    is currently rented must still be visible. Date availability is checked
+
+async def _load_client_active_cars() -> list[dict]:
+    """Load cars explicitly enabled for the client bot.
+
+    The client catalog and the first booking step are a showroom: a visible car
+    that is currently rented must still be shown. Date availability is checked
     later in ``_finish_client_booking_dates`` after the client chooses dates.
     """
     cars = await asyncio.to_thread(get_all_cars)
@@ -3997,6 +4006,7 @@ async def _load_client_active_cars() -> list[dict]:
             or ""
         ).strip().casefold()
         not in excluded_statuses
+        and _car_show_in_client_bot(car)
     ]
 
 
