@@ -225,31 +225,31 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
                     "ID": "1",
                     "Марка и Модель": "Urus",
                     "Статус": "В аренде",
-                    "Показывать в клиентботе": "Да",
+                    "Витрина": "да",
                 },
                 {
                     "ID": "2",
                     "Марка и Модель": "Maybach",
                     "Статус": "Активен",
-                    "Показывать в клиентботе": "yes",
+                    "Витрина": "ДА",
                 },
                 {
                     "ID": "3",
                     "Марка и Модель": "Списанный авто",
                     "Статус": "Списан",
-                    "Показывать в клиентботе": "Да",
+                    "Витрина": "true",
                 },
                 {
                     "ID": "4",
                     "Марка и Модель": "Ремонтный авто",
                     "Статус": "В ремонте",
-                    "Показывать в клиентботе": "Да",
+                    "Витрина": "1",
                 },
                 {
                     "ID": "5",
                     "Марка и Модель": "Hidden",
                     "Статус": "Активен",
-                    "Показывать в клиентботе": "Нет",
+                    "Витрина": "нет",
                 },
                 {
                     "ID": "6",
@@ -266,12 +266,13 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_client_visibility_flag_accepts_only_explicit_enabled_values(self):
-        self.assertTrue(main._car_show_in_client_bot({"Показывать в клиентботе": "Да"}))
-        self.assertTrue(main._car_show_in_client_bot({"Показывать в клиентботе": " YES "}))
-        self.assertTrue(main._car_show_in_client_bot({"Показывать в клиентботе": "true"}))
-        self.assertTrue(main._car_show_in_client_bot({"Показывать в клиентботе": "+"}))
-        self.assertFalse(main._car_show_in_client_bot({"Показывать в клиентботе": "Нет"}))
-        self.assertFalse(main._car_show_in_client_bot({"Показывать в клиентботе": ""}))
+        self.assertTrue(main._car_show_in_client_bot({"Витрина": "да"}))
+        self.assertTrue(main._car_show_in_client_bot({"Витрина": " YES "}))
+        self.assertTrue(main._car_show_in_client_bot({"Витрина": "true"}))
+        self.assertTrue(main._car_show_in_client_bot({"Витрина": "1"}))
+        self.assertTrue(main._car_show_in_client_bot({"витрина": "ДА"}))
+        self.assertFalse(main._car_show_in_client_bot({"Витрина": "нет"}))
+        self.assertFalse(main._car_show_in_client_bot({"Витрина": ""}))
         self.assertFalse(main._car_show_in_client_bot({}))
 
     def test_client_date_states_only_offer_calendar(self):

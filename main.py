@@ -3980,12 +3980,10 @@ def _client_fleet_card_caption(car: dict) -> str:
 
 
 def _car_show_in_client_bot(car: dict) -> bool:
-    value = _value(
-        car,
-        "Показывать в клиентботе",
-        default="",
-    )
-    return value.strip().casefold() in {"да", "yes", "+", "true"}
+    raw_value = str(
+        car.get("Витрина") or car.get("витрина") or ""
+    ).strip().casefold()
+    return raw_value in {"да", "yes", "true", "1"}
 
 
 async def _load_client_active_cars() -> list[dict]:
