@@ -3568,6 +3568,36 @@ def ensure_sheets_ready() -> None:
         raise SheetsStartupError(SHEETS_STARTUP_STATUS)
     logger.info("Google Sheets ready; bot startup may continue")
 
+
+def _run_sheets_startup() -> bool:
+    """Run the Sheets bootstrap and publish its safe readiness status."""
+    global SHEETS_READY, SHEETS_STARTUP_STATUS
+
+    try:
+        _bootstrap_sheets()
+    except Exception as error:
+        SHEETS_READY = False
+        SHEETS_STARTUP_STATUS = _startup_failure_status(
+            error,
+            SHEETS_STARTUP_ATTEMPTS,
+        )
+        logger.error(
+            "Google Sheets startup failed: reason=%s; attempts=%s; hint=%s",
+            SHEETS_STARTUP_STATUS.reason,
+            SHEETS_STARTUP_STATUS.attempts,
+            SHEETS_STARTUP_STATUS.hint,
+        )
+    else:
+        SHEETS_READY = True
+        SHEETS_STARTUP_STATUS = SheetsStartupStatus(
+            ready=True,
+            reason="ready",
+            attempts=SHEETS_STARTUP_ATTEMPTS,
+            hint="Google Sheets готова к работе.",
+        )
+    return SHEETS_READY
+
+
 def _cached_worksheet(*titles: str):
     """Resolve a worksheet without issuing another metadata request."""
     for title in titles:
@@ -3577,25 +3607,4 @@ def _cached_worksheet(*titles: str):
     raise gspread.exceptions.WorksheetNotFound(titles[0])
 
 
-try:
-    _bootstrap_sheets()
-except Exception as error:
-    SHEETS_READY = False
-    SHEETS_STARTUP_STATUS = _startup_failure_status(
-        error,
-        SHEETS_STARTUP_ATTEMPTS,
-    )
-    logger.error(
-        "Google Sheets startup failed: reason=%s; attempts=%s; hint=%s",
-        SHEETS_STARTUP_STATUS.reason,
-        SHEETS_STARTUP_STATUS.attempts,
-        SHEETS_STARTUP_STATUS.hint,
-    )
-else:
-    SHEETS_READY = True
-    SHEETS_STARTUP_STATUS = SheetsStartupStatus(
-        ready=True,
-        reason="ready",
-        attempts=1,
-        hint="Google Sheets готова к работе.",
-    )
+_run_sheets_startup()

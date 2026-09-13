@@ -227,6 +227,75 @@ class SheetsStartupTest(unittest.TestCase):
         self.assertIs(sheets_client.sh, spreadsheet)
         self.assertIs(sheets_client.ws_managers, sheets_client._worksheet_cache["Менеджеры"])
 
+    def test_full_bootstrap_recovers_from_quota_and_marks_sheets_ready(self):
+        self._assert_full_bootstrap_recovers_from_transient_failure(
+            _QuotaError(),
+        )
+
+    def test_full_bootstrap_recovers_from_network_failure_and_marks_sheets_ready(
+        self,
+    ):
+        self._assert_full_bootstrap_recovers_from_transient_failure(
+            ConnectionError("temporary network failure"),
+        )
+
+    def _assert_full_bootstrap_recovers_from_transient_failure(self, failure):
+        spreadsheet = _Spreadsheet(
+            _startup_worksheets(
+                "Автомобили",
+                "Бронирования",
+                "Возвраты_Касса",
+                "Менеджеры",
+                "Acceptance_Acts",
+                "Затраты",
+                "Сводная_по_месяцам",
+                "Прибыль_по_авто",
+                "Состояние_уведомлений",
+            )
+        )
+        sheets_client_client = _SheetsClient(
+            spreadsheet,
+            failures=[failure],
+        )
+        initial_status = sheets_client.SheetsStartupStatus(
+            ready=False,
+            reason="not_started",
+            attempts=0,
+            hint="Инициализация Google Sheets ещё не завершена.",
+        )
+        with (
+            _patch_startup_worksheets(),
+            patch.object(sheets_client, "SHEETS_READY", False),
+            patch.object(sheets_client, "SHEETS_STARTUP_STATUS", initial_status),
+            patch.object(sheets_client, "SERVICE_ACCOUNT_JSON", None),
+            patch.object(sheets_client, "SPREADSHEET_NAME", "a" * 40),
+            patch.object(
+                sheets_client.gspread,
+                "service_account",
+                return_value=sheets_client_client,
+            ),
+            patch.object(sheets_client.time, "sleep") as sleep,
+        ):
+            self.assertTrue(sheets_client._run_sheets_startup())
+
+            self.assertTrue(sheets_client.SHEETS_READY)
+            self.assertEqual(
+                sheets_client.SHEETS_STARTUP_STATUS.reason,
+                "ready",
+            )
+            self.assertEqual(
+                sheets_client.SHEETS_STARTUP_STATUS.attempts,
+                1,
+            )
+
+        self.assertEqual(sheets_client_client.open_calls, 2)
+        sleep.assert_called_once_with(3)
+        self.assertIs(sheets_client.sh, spreadsheet)
+        self.assertIs(
+            sheets_client.ws_managers,
+            sheets_client._worksheet_cache["Менеджеры"],
+        )
+
     def test_startup_retries_transient_quota_failure_in_process(self):
         with (
             patch.object(
@@ -344,6 +413,30 @@ class SheetsStartupTest(unittest.TestCase):
                 asyncio.run(main.run_bot())
 
         bot.assert_not_called()
+
+    def test_run_bot_does_not_start_polling_before_sheets_are_ready(self):
+        status = sheets_client.SheetsStartupStatus(
+            ready=False,
+            reason="network",
+            attempts=2,
+            hint="Проверьте сетевой доступ к Google Sheets.",
+        )
+        with (
+            patch.object(main, "TOKEN", "fleet-token"),
+            patch.object(main, "CLIENT_BOT_TOKEN", "client-token"),
+            patch.object(
+                main,
+                "ensure_sheets_ready",
+                side_effect=sheets_client.SheetsStartupError(status),
+            ),
+            patch.object(main, "run_fleet_bot") as run_fleet_bot,
+            patch.object(main, "run_client_bot") as run_client_bot,
+        ):
+            with self.assertRaises(sheets_client.SheetsStartupError):
+                asyncio.run(main.run_bot())
+
+        run_fleet_bot.assert_not_called()
+        run_client_bot.assert_not_called()
 
 
 if __name__ == "__main__":
