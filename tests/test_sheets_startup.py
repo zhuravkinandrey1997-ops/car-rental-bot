@@ -129,7 +129,8 @@ class _MetadataHTTPClient(HTTPClient):
 class _GspreadMetadataSpreadsheet(sheets_client.gspread.Spreadsheet):
     """Build gspread Worksheet objects from a Sheets API-like response."""
 
-    def __init__(self, titles):
+    def __init__(self, titles, *, hidden_titles=()):
+        hidden_titles = set(hidden_titles)
         self._metadata = {
             "spreadsheetId": "spreadsheet-id",
             "properties": {
@@ -143,6 +144,7 @@ class _GspreadMetadataSpreadsheet(sheets_client.gspread.Spreadsheet):
                         "title": title,
                         "index": index,
                         "sheetType": "GRID",
+                        "hidden": title in hidden_titles,
                         "gridProperties": {
                             "rowCount": 1000,
                             "columnCount": 26,
@@ -363,6 +365,51 @@ class SheetsStartupTest(unittest.TestCase):
         self.assertNotIn(
             "Google Sheets worksheet structure is invalid",
             "\n".join(logs.output),
+        )
+
+    def test_bootstrap_counts_hidden_required_and_optional_sheets_from_metadata(self):
+        spreadsheet = _GspreadMetadataSpreadsheet(
+            (
+                *sheets_client.REQUIRED_WORKSHEET_TITLES,
+                "Acceptance_Acts",
+                "Затраты",
+                "Сводная_по_месяцам",
+                "Прибыль_по_авто",
+                "Состояние_уведомлений",
+            ),
+            hidden_titles={"Автомобили", "Затраты"},
+        )
+        spreadsheet.metadata_reads = 0
+
+        with (
+            _patch_startup_worksheets(),
+            patch.object(sheets_client, "sh", spreadsheet),
+            patch.object(sheets_client, "_ensure_sheet_width"),
+            patch.object(sheets_client, "_ensure_headers", return_value=[]),
+            patch.object(
+                sheets_client,
+                "_sheets_read",
+                return_value=sheets_client.ACCEPTANCE_ACT_HEADERS,
+            ),
+        ):
+            sheets_client._initialize_worksheets()
+
+        self.assertEqual(spreadsheet.metadata_reads, 1)
+        self.assertEqual(sheets_client.ws_cars.title, "Автомобили")
+        self.assertEqual(sheets_client.ws_expenses.title, "Затраты")
+        self.assertTrue(
+            next(
+                worksheet
+                for worksheet in spreadsheet.worksheets()
+                if worksheet.title == "Автомобили"
+            ).isSheetHidden
+        )
+        self.assertTrue(
+            next(
+                worksheet
+                for worksheet in spreadsheet.worksheets()
+                if worksheet.title == "Затраты"
+            ).isSheetHidden
         )
 
     def test_conflict_listing_uses_one_read_only_metadata_snapshot(self):
@@ -751,6 +798,46 @@ class SheetsStartupTest(unittest.TestCase):
         self.assertEqual(client.open_calls, 1)
         self.assertEqual(spreadsheet.metadata_reads, 1)
         self.assertEqual(spreadsheet.write_attempts, 0)
+
+    def test_read_only_diagnostic_counts_hidden_required_and_optional_sheets(self):
+        spreadsheet = _GspreadMetadataSpreadsheet(
+            (*sheets_client.REQUIRED_WORKSHEET_TITLES, "Затраты"),
+            hidden_titles={"Автомобили", "Затраты"},
+        )
+        spreadsheet.metadata_reads = 0
+        client = _ReadOnlySheetsClient(spreadsheet)
+
+        with (
+            patch.object(sheets_client, "SERVICE_ACCOUNT_JSON", None),
+            patch.object(sheets_client, "SERVICE_ACCOUNT_FILE", "credentials.json"),
+            patch.object(sheets_client, "SPREADSHEET_NAME", "rental-fleet"),
+            patch.object(
+                sheets_client.gspread,
+                "service_account",
+                return_value=client,
+            ),
+        ):
+            status = sheets_client.diagnose_sheets_access()
+
+        self.assertTrue(status.ready)
+        self.assertEqual(status.reason, "ready")
+        self.assertEqual(status.attempts, 1)
+        self.assertEqual(client.open_calls, 1)
+        self.assertEqual(spreadsheet.metadata_reads, 1)
+        self.assertEqual(
+            {
+                worksheet.title
+                for worksheet in spreadsheet.worksheets(exclude_hidden=False)
+            },
+            {*sheets_client.REQUIRED_WORKSHEET_TITLES, "Затраты"},
+        )
+        self.assertEqual(
+            [
+                worksheet.title
+                for worksheet in spreadsheet.worksheets(exclude_hidden=True)
+            ],
+            ["Бронирования", "Возвраты_Касса", "Менеджеры"],
+        )
 
     def test_read_only_diagnostic_classifies_missing_required_sheet(self):
         spreadsheet = _ReadOnlySpreadsheet(("Автомобили", "Менеджеры"))

@@ -15,6 +15,7 @@
 - [Google Sheets write quota](google-sheets-write-quota.md) — batch return headers and row updates to avoid HTTP 429 per-minute write limits.
 - [Google Sheets startup](google-sheets-startup.md) — share one worksheet metadata snapshot and recover temporary startup quota failures in-process.
 - [Google Sheets startup throttling](google-sheets-startup-throttling.md) — avoid repeated workflow restarts while gspread metadata reads are under the per-minute quota.
+- [Hidden worksheet visibility](hidden-worksheet-visibility.md) — gspread worksheets() includes hidden sheets unless exclude_hidden=True; bootstrap and diagnostics rely on that default.
 - [Google Sheets safe reader](google-sheets-safe-reader.md) — read legacy sheets with blank or duplicate headers through normalized get_all_values rows.
 - [Runtime Sheets recovery](runtime-sheets-retry.md) — retry reads and absolute updates; verify append/delete state before repeating ambiguous writes.
 - [Worksheet conflict recovery](worksheet-conflict-recovery.md) — preserve the selected sheet and archive the other under explicit confirmation; never delete or merge silently.
