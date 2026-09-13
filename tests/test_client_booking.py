@@ -48,6 +48,23 @@ class ClientBookingTest(unittest.TestCase):
         self.assertIn("25 000 RUB/сутки", context)
         self.assertIn("Актуальный список активных автомобилей", context)
 
+    def test_ai_system_prompt_contains_current_rental_rules(self):
+        prompt = main.CLIENT_AI_SYSTEM_PROMPT
+        for rule in (
+            "Санкт-Петербург и Ленинградская область",
+            "только по предварительному согласованию",
+            "возраст от 21 года",
+            "стаж вождения от 2 лет",
+            "паспорт РФ",
+            "водительское удостоверение",
+            "Страховой депозит обязателен",
+            "проверки штрафов",
+            "Лимит суточного пробега уточняй у менеджера",
+            "только Сбербанк, +79110326262",
+            "листа\n«Автомобили» Google Таблицы",
+        ):
+            self.assertIn(rule, prompt)
+
     def test_public_booking_helpers_calculate_days_and_prepayment(self):
         self.assertEqual(main._client_booking_days("2026-09-15", "2026-09-17"), 3)
         self.assertEqual(main._client_prepayment(100_000), 30_000)
