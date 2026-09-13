@@ -70,8 +70,10 @@ from sheets_client import (
     get_partner_cars,
     get_partner_expenses,
     get_manager_access,
+    diagnose_sheets_access,
     ensure_sheets_ready,
     SheetsStartupError,
+    SheetsStartupStatus,
     is_manager_authorized,
     is_partner_authorized,
     issue_booking,
@@ -3677,6 +3679,67 @@ async def ensure_manager(message: Message) -> bool:
         )
         return False
     return True
+
+
+def _format_sheets_diagnostic(status: SheetsStartupStatus) -> str:
+    """Format only the bounded diagnostic fields safe for an operator."""
+    reason_labels = {
+        "ready": "готово",
+        "quota": "квота Google Sheets",
+        "network": "сетевой доступ",
+        "structure": "структура таблицы",
+        "configuration": "настройки подключения",
+    }
+    hint_by_reason = {
+        "ready": "Доступ к Google Sheets и обязательным листам подтверждён.",
+        "quota": (
+            "Проверьте квоту Google Sheets и не перезапускайте workflow "
+            "до восстановления лимита."
+        ),
+        "network": (
+            "Проверьте сетевой доступ к Google Sheets и повторите проверку "
+            "после восстановления соединения."
+        ),
+        "structure": (
+            "Проверьте обязательные листы таблицы: Автомобили, "
+            "Бронирования, Возвраты_Касса и Менеджеры."
+        ),
+        "configuration": (
+            "Проверьте имя таблицы, доступ сервисного аккаунта и настройки "
+            "подключения Google Sheets."
+        ),
+    }
+    reason = status.reason if status.reason in reason_labels else "configuration"
+    try:
+        attempts = max(0, int(status.attempts))
+    except (TypeError, ValueError):
+        attempts = 0
+    return (
+        "🔎 Диагностика Google Sheets\n"
+        f"Категория: {reason_labels[reason]}\n"
+        f"Попытки: {attempts}\n"
+        f"Подсказка: {hint_by_reason[reason]}"
+    )
+
+
+async def sheets_status_handler(message: Message) -> None:
+    """Run an operator-only, read-only Google Sheets access check."""
+    user = message.from_user
+    if user is None or user.id not in ADMIN_IDS:
+        await message.answer("Команда доступна только оператору.")
+        return
+
+    try:
+        status = await asyncio.to_thread(diagnose_sheets_access)
+    except Exception:
+        # Do not log or return the unexpected external error text.
+        status = SheetsStartupStatus(
+            ready=False,
+            reason="configuration",
+            attempts=1,
+            hint="Проверьте настройки подключения Google Sheets.",
+        )
+    await message.answer(_format_sheets_diagnostic(status))
 
 
 async def cancel_flow(message: Message, state: FSMContext) -> None:
@@ -9679,6 +9742,7 @@ def create_dispatcher(client_bot: Bot | None = None) -> Dispatcher:
     )
     dispatcher.message.register(start_handler, CommandStart())
     dispatcher.message.register(show_menu, Command("menu"))
+    dispatcher.message.register(sheets_status_handler, Command("sheets_status"))
     dispatcher.message.register(cancel_flow, Command("cancel"))
     dispatcher.message.register(cancel_flow, F.text.casefold() == "отмена")
 

@@ -80,6 +80,53 @@ class _SheetsClient:
         return self.spreadsheet
 
 
+class _ReadOnlySpreadsheet:
+    def __init__(self, titles):
+        self._worksheets = [SimpleNamespace(title=title) for title in titles]
+        self.metadata_reads = 0
+        self.write_attempts = 0
+
+    def worksheets(self):
+        self.metadata_reads += 1
+        return list(self._worksheets)
+
+    def add_worksheet(self, *args, **kwargs):
+        del args, kwargs
+        self.write_attempts += 1
+        raise AssertionError("diagnostics must not create worksheets")
+
+
+class _ReadOnlySheetsClient:
+    def __init__(self, spreadsheet, *, failures=None):
+        self.spreadsheet = spreadsheet
+        self.failures = list(failures or [])
+        self.open_calls = 0
+
+    def open(self, spreadsheet_name):
+        del spreadsheet_name
+        return self._open()
+
+    def open_by_key(self, spreadsheet_key):
+        del spreadsheet_key
+        return self._open()
+
+    def _open(self):
+        self.open_calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return self.spreadsheet
+
+
+class _DiagnosticMessage:
+    def __init__(self, user_id):
+        self.from_user = SimpleNamespace(id=user_id)
+        self.responses = []
+
+    async def answer(self, text, **kwargs):
+        del kwargs
+        self.responses.append(text)
+
+
 def _startup_worksheets(*titles):
     return [_Worksheet(title) for title in titles]
 
@@ -374,6 +421,100 @@ class SheetsStartupTest(unittest.TestCase):
 
         self.assertEqual(status.reason, "structure")
         self.assertIn("обязательные листы", status.hint)
+
+    def test_read_only_diagnostic_reports_ready_without_writes(self):
+        spreadsheet = _ReadOnlySpreadsheet(
+            sheets_client.REQUIRED_WORKSHEET_TITLES,
+        )
+        client = _ReadOnlySheetsClient(spreadsheet)
+        with (
+            patch.object(sheets_client, "SERVICE_ACCOUNT_JSON", None),
+            patch.object(sheets_client, "SERVICE_ACCOUNT_FILE", "credentials.json"),
+            patch.object(sheets_client, "SPREADSHEET_NAME", "rental-fleet"),
+            patch.object(
+                sheets_client.gspread,
+                "service_account",
+                return_value=client,
+            ),
+        ):
+            status = sheets_client.diagnose_sheets_access()
+
+        self.assertTrue(status.ready)
+        self.assertEqual(status.reason, "ready")
+        self.assertEqual(status.attempts, 1)
+        self.assertEqual(client.open_calls, 1)
+        self.assertEqual(spreadsheet.metadata_reads, 1)
+        self.assertEqual(spreadsheet.write_attempts, 0)
+
+    def test_read_only_diagnostic_classifies_missing_required_sheet(self):
+        spreadsheet = _ReadOnlySpreadsheet(("Автомобили", "Менеджеры"))
+        client = _ReadOnlySheetsClient(spreadsheet)
+        with (
+            patch.object(sheets_client, "SERVICE_ACCOUNT_JSON", None),
+            patch.object(sheets_client, "SERVICE_ACCOUNT_FILE", "credentials.json"),
+            patch.object(
+                sheets_client.gspread,
+                "service_account",
+                return_value=client,
+            ),
+        ):
+            status = sheets_client.diagnose_sheets_access()
+
+        self.assertFalse(status.ready)
+        self.assertEqual(status.reason, "structure")
+        self.assertEqual(status.attempts, 1)
+        self.assertEqual(client.open_calls, 1)
+        self.assertEqual(spreadsheet.write_attempts, 0)
+
+    def test_read_only_diagnostic_retries_quota_without_exposing_error(self):
+        spreadsheet = _ReadOnlySpreadsheet(sheets_client.REQUIRED_WORKSHEET_TITLES)
+        quota_error = _QuotaError()
+        quota_error.secret = "do-not-show"
+        client = _ReadOnlySheetsClient(spreadsheet, failures=[quota_error])
+        with (
+            patch.object(sheets_client, "SERVICE_ACCOUNT_JSON", None),
+            patch.object(sheets_client, "SERVICE_ACCOUNT_FILE", "credentials.json"),
+            patch.object(sheets_client, "SPREADSHEET_NAME", "rental-fleet"),
+            patch.object(
+                sheets_client.gspread,
+                "service_account",
+                return_value=client,
+            ),
+            patch.object(sheets_client.time, "sleep"),
+        ):
+            status = sheets_client.diagnose_sheets_access()
+
+        self.assertTrue(status.ready)
+        self.assertEqual(status.attempts, 2)
+        self.assertEqual(client.open_calls, 2)
+        self.assertNotIn("do-not-show", status.hint)
+
+    def test_operator_command_rejects_non_operator_without_sheet_access(self):
+        message = _DiagnosticMessage(123)
+        with patch.object(main, "diagnose_sheets_access") as diagnostic:
+            asyncio.run(main.sheets_status_handler(message))
+
+        diagnostic.assert_not_called()
+        self.assertEqual(message.responses, ["Команда доступна только оператору."])
+
+    def test_operator_command_returns_safe_category_and_attempts(self):
+        message = _DiagnosticMessage(next(iter(main.ADMIN_IDS)))
+        status = sheets_client.SheetsStartupStatus(
+            ready=False,
+            reason="quota",
+            attempts=4,
+            hint="external secret and raw error must not be displayed",
+        )
+        with patch.object(main, "diagnose_sheets_access", return_value=status):
+            asyncio.run(main.sheets_status_handler(message))
+
+        self.assertEqual(len(message.responses), 1)
+        response = message.responses[0]
+        self.assertIn("Категория: квота Google Sheets", response)
+        self.assertIn("Попытки: 4", response)
+        self.assertIn("Проверьте квоту Google Sheets", response)
+        self.assertNotIn("external secret", response)
+        self.assertNotIn("raw error", response)
 
     def test_ensure_sheets_ready_raises_safe_diagnostic(self):
         status = sheets_client.SheetsStartupStatus(

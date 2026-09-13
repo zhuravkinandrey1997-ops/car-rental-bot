@@ -147,7 +147,12 @@ class SheetsStartupError(RuntimeError):
         )
 
 
+class SheetsStructureError(RuntimeError):
+    """Internal marker for a missing required worksheet during diagnostics."""
+
+
 SHEETS_STARTUP_HINTS = {
+    "ready": "Доступ к Google Sheets и обязательным листам подтверждён.",
     "quota": (
         "Проверьте квоту Google Sheets и не перезапускайте workflow "
         "до восстановления лимита."
@@ -165,6 +170,13 @@ SHEETS_STARTUP_HINTS = {
         "подключения Google Sheets."
     ),
 }
+
+REQUIRED_WORKSHEET_TITLES = (
+    "Автомобили",
+    "Бронирования",
+    "Возвраты_Касса",
+    "Менеджеры",
+)
 
 
 def _is_transient_spreadsheet_error(error: Exception) -> bool:
@@ -3507,6 +3519,8 @@ def _startup_failure_reason(error: Exception) -> str:
         return "quota"
     if _is_transient_spreadsheet_error(error):
         return "network"
+    if isinstance(error, SheetsStructureError):
+        return "structure"
     if isinstance(error, gspread.exceptions.WorksheetNotFound):
         return "structure"
     return "configuration"
@@ -3523,6 +3537,64 @@ def _startup_failure_status(
         reason=reason,
         attempts=max(1, attempts),
         hint=SHEETS_STARTUP_HINTS[reason],
+    )
+
+
+def _create_sheets_client():
+    """Create a Google Sheets client without opening or changing a sheet."""
+    if SERVICE_ACCOUNT_JSON:
+        return gspread.service_account_from_dict(json.loads(SERVICE_ACCOUNT_JSON))
+    return gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
+
+
+def _diagnose_sheets_access_once() -> None:
+    """Check spreadsheet access and required worksheet titles without writes."""
+    gc_client = _create_sheets_client()
+    if len(SPREADSHEET_NAME) > 30 and " " not in SPREADSHEET_NAME:
+        spreadsheet = gc_client.open_by_key(SPREADSHEET_NAME)
+    else:
+        spreadsheet = gc_client.open(SPREADSHEET_NAME)
+
+    worksheet_titles = {worksheet.title for worksheet in spreadsheet.worksheets()}
+    if any(title not in worksheet_titles for title in REQUIRED_WORKSHEET_TITLES):
+        raise SheetsStructureError()
+
+
+def diagnose_sheets_access(max_retries: int = 5) -> SheetsStartupStatus:
+    """Return a safe, read-only diagnosis for an operator."""
+    if max_retries < 1:
+        raise ValueError("max_retries must be at least 1")
+
+    attempts = 0
+    for attempt in range(max_retries):
+        attempts = attempt + 1
+        try:
+            _diagnose_sheets_access_once()
+        except Exception as error:
+            reason = _startup_failure_reason(error)
+            is_last_attempt = attempt == max_retries - 1
+            if is_last_attempt or not _is_transient_spreadsheet_error(error):
+                return SheetsStartupStatus(
+                    ready=False,
+                    reason=reason,
+                    attempts=attempts,
+                    hint=SHEETS_STARTUP_HINTS[reason],
+                )
+            time.sleep(3)
+        else:
+            return SheetsStartupStatus(
+                ready=True,
+                reason="ready",
+                attempts=attempts,
+                hint=SHEETS_STARTUP_HINTS["ready"],
+            )
+
+    # The loop always returns, but keep a safe result if its bounds change.
+    return SheetsStartupStatus(
+        ready=False,
+        reason="configuration",
+        attempts=attempts,
+        hint=SHEETS_STARTUP_HINTS["configuration"],
     )
 
 
