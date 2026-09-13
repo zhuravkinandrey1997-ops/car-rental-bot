@@ -7,6 +7,7 @@ import threading
 import time
 import traceback
 import uuid
+from dataclasses import dataclass
 import gspread
 from dotenv import load_dotenv
 
@@ -125,6 +126,47 @@ TARGET_OPERATIONAL_COLUMNS = 35
 COLUMN_EXPANSION_STEP = 5
 
 
+@dataclass(frozen=True)
+class SheetsStartupStatus:
+    """Safe diagnostic state for the Google Sheets bootstrap."""
+
+    ready: bool
+    reason: str
+    attempts: int
+    hint: str
+
+
+class SheetsStartupError(RuntimeError):
+    """Safe, user-facing error raised when Sheets is not ready."""
+
+    def __init__(self, status: SheetsStartupStatus):
+        self.status = status
+        super().__init__(
+            "Google Sheets is not ready: "
+            f"{status.reason}; attempts={status.attempts}. {status.hint}"
+        )
+
+
+SHEETS_STARTUP_HINTS = {
+    "quota": (
+        "Проверьте квоту Google Sheets и не перезапускайте workflow "
+        "до восстановления лимита."
+    ),
+    "network": (
+        "Проверьте сетевой доступ к Google Sheets и повторите запуск "
+        "после восстановления соединения."
+    ),
+    "structure": (
+        "Проверьте обязательные листы таблицы: Автомобили, "
+        "Возвраты_Касса и Менеджеры."
+    ),
+    "configuration": (
+        "Проверьте имя таблицы, доступ сервисного аккаунта и настройки "
+        "подключения Google Sheets."
+    ),
+}
+
+
 def _is_transient_spreadsheet_error(error: Exception) -> bool:
     """Return whether a Google Sheets open failure is safe to retry."""
     response = getattr(error, "response", None)
@@ -155,12 +197,18 @@ def _retry_transient_operation(
     operation,
     operation_name: str,
     max_retries: int = 5,
+    attempt_counter: list[int] | None = None,
 ):
     """Run one Sheets operation with bounded in-process retries."""
+    global SHEETS_STARTUP_ATTEMPTS
+
     if max_retries < 1:
         raise ValueError("max_retries must be at least 1")
 
     for attempt in range(max_retries):
+        if attempt_counter is not None:
+            attempt_counter[0] = attempt + 1
+            SHEETS_STARTUP_ATTEMPTS = attempt + 1
         try:
             return operation()
         except Exception as error:
@@ -169,47 +217,39 @@ def _retry_transient_operation(
                 raise
             logger.warning(
                 "Temporary Google Sheets failure during %s "
-                "(attempt %s/%s): %s; retrying in 3 seconds",
+                "(reason=%s; attempt %s/%s); retrying in 3 seconds",
                 operation_name,
+                _startup_failure_reason(error),
                 attempt + 1,
                 max_retries,
-                error,
             )
             time.sleep(3)
 def get_spreadsheet_with_retry(
     gc_client,
     spreadsheet_key: str,
     max_retries: int = 5,
+    attempt_counter: list[int] | None = None,
 ):
     """Open a spreadsheet while tolerating short Google API outages."""
     return _retry_transient_operation(
         lambda: gc_client.open_by_key(spreadsheet_key),
         "opening spreadsheet",
         max_retries,
+        attempt_counter,
     )
 
 
-if SERVICE_ACCOUNT_JSON:
-    gc = gspread.service_account_from_dict(json.loads(SERVICE_ACCOUNT_JSON))
-else:
-    gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
-
-# Google Sheets IDs are not spreadsheet titles. Keep support for both so the
-# default name and an explicitly supplied spreadsheet ID work as expected.
-if len(SPREADSHEET_NAME) > 30 and " " not in SPREADSHEET_NAME:
-    sh = get_spreadsheet_with_retry(gc, SPREADSHEET_NAME)
-else:
-    # Keep title-based projects on the same in-process retry path as
-    # ID-based projects. A transient quota response must not make the
-    # workflow restart before the bots have even been created.
-    sh = _retry_transient_operation(
-        lambda: gc.open(SPREADSHEET_NAME),
-        "opening spreadsheet",
-    )
-
-
+gc = None
+sh = None
 _worksheet_cache: dict[str, object] = {}
 SHEETS_READY = False
+SHEETS_STARTUP_ATTEMPTS = 0
+SHEETS_STARTUP_STATUS = SheetsStartupStatus(
+    ready=False,
+    reason="not_started",
+    attempts=0,
+    hint="Инициализация Google Sheets ещё не завершена.",
+)
 
 
 def migrate_sheet_titles(spreadsheet) -> list[tuple[str, str]]:
@@ -3435,18 +3475,97 @@ def save_actual_return(
                 booking_id,
             )
 
-def _initialize_worksheets_with_retry(max_retries: int = 5) -> None:
+def _initialize_worksheets_with_retry(
+    max_retries: int = 5,
+    attempt_counter: list[int] | None = None,
+) -> None:
     """Keep a temporary startup quota response inside this process."""
     _retry_transient_operation(
         _initialize_worksheets,
         "startup",
         max_retries,
+        attempt_counter,
     )
+
+
+def _startup_failure_reason(error: Exception) -> str:
+    """Classify a startup failure without exposing its raw error text."""
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(response, dict):
+        status_code = response.get("status_code", response.get("status"))
+    try:
+        status_code = int(status_code)
+    except (TypeError, ValueError):
+        status_code = None
+
+    error_text = str(error).casefold()
+    if status_code == 429 or any(
+        marker in error_text
+        for marker in ("quota", "rate limit", "too many requests")
+    ):
+        return "quota"
+    if _is_transient_spreadsheet_error(error):
+        return "network"
+    if isinstance(error, gspread.exceptions.WorksheetNotFound):
+        return "structure"
+    return "configuration"
+
+
+def _startup_failure_status(
+    error: Exception,
+    attempts: int,
+) -> SheetsStartupStatus:
+    """Build a safe startup status suitable for logs and Telegram-free errors."""
+    reason = _startup_failure_reason(error)
+    return SheetsStartupStatus(
+        ready=False,
+        reason=reason,
+        attempts=max(1, attempts),
+        hint=SHEETS_STARTUP_HINTS[reason],
+    )
+
+
+def _bootstrap_sheets() -> None:
+    """Create the Sheets client and initialize all required worksheets."""
+    global gc, sh, SHEETS_STARTUP_ATTEMPTS
+
+    attempt_counter = [0]
+    attempt_counter[0] = 1
+    SHEETS_STARTUP_ATTEMPTS = 1
+    if SERVICE_ACCOUNT_JSON:
+        gc = gspread.service_account_from_dict(json.loads(SERVICE_ACCOUNT_JSON))
+    else:
+        gc = gspread.service_account(filename=SERVICE_ACCOUNT_FILE)
+
+    # Google Sheets IDs are not spreadsheet titles. Keep support for both so
+    # the default name and an explicitly supplied spreadsheet ID work as
+    # expected.
+    if len(SPREADSHEET_NAME) > 30 and " " not in SPREADSHEET_NAME:
+        sh = get_spreadsheet_with_retry(
+            gc,
+            SPREADSHEET_NAME,
+            attempt_counter=attempt_counter,
+        )
+        SHEETS_STARTUP_ATTEMPTS = attempt_counter[0]
+    else:
+        # Keep title-based projects on the same in-process retry path as
+        # ID-based projects. A transient quota response must not make the
+        # workflow restart before the bots have even been created.
+        sh = _retry_transient_operation(
+            lambda: gc.open(SPREADSHEET_NAME),
+            "opening spreadsheet",
+            attempt_counter=attempt_counter,
+        )
+        SHEETS_STARTUP_ATTEMPTS = attempt_counter[0]
+    _initialize_worksheets_with_retry(attempt_counter=attempt_counter)
+    SHEETS_STARTUP_ATTEMPTS = attempt_counter[0]
+
 
 def ensure_sheets_ready() -> None:
     """Log readiness after startup recovery before polling begins."""
     if not SHEETS_READY:
-        raise RuntimeError("Google Sheets startup has not completed.")
+        raise SheetsStartupError(SHEETS_STARTUP_STATUS)
     logger.info("Google Sheets ready; bot startup may continue")
 
 def _cached_worksheet(*titles: str):
@@ -3458,5 +3577,25 @@ def _cached_worksheet(*titles: str):
     raise gspread.exceptions.WorksheetNotFound(titles[0])
 
 
-_initialize_worksheets_with_retry()
-SHEETS_READY = True
+try:
+    _bootstrap_sheets()
+except Exception as error:
+    SHEETS_READY = False
+    SHEETS_STARTUP_STATUS = _startup_failure_status(
+        error,
+        SHEETS_STARTUP_ATTEMPTS,
+    )
+    logger.error(
+        "Google Sheets startup failed: reason=%s; attempts=%s; hint=%s",
+        SHEETS_STARTUP_STATUS.reason,
+        SHEETS_STARTUP_STATUS.attempts,
+        SHEETS_STARTUP_STATUS.hint,
+    )
+else:
+    SHEETS_READY = True
+    SHEETS_STARTUP_STATUS = SheetsStartupStatus(
+        ready=True,
+        reason="ready",
+        attempts=1,
+        hint="Google Sheets готова к работе.",
+    )

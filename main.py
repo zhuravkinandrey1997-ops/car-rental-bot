@@ -71,6 +71,7 @@ from sheets_client import (
     get_partner_expenses,
     get_manager_access,
     ensure_sheets_ready,
+    SheetsStartupError,
     is_manager_authorized,
     is_partner_authorized,
     issue_booking,
@@ -9820,6 +9821,9 @@ async def run_bot() -> None:
 def main() -> None:
     try:
         asyncio.run(run_bot())
+    except SheetsStartupError as error:
+        logger.error("Bot startup aborted: %s", error)
+        raise SystemExit(1) from None
     except KeyboardInterrupt:
         logger.info("Bot stopped")
 
