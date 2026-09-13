@@ -57,12 +57,19 @@ class _BookingState:
     def __init__(self, data=None):
         self.data = data or {}
         self.cleared = False
+        self.current_state = main.ClientBookingState.confirmation.state
 
     async def get_state(self):
-        return main.ClientBookingState.confirmation.state
+        return self.current_state
 
     async def get_data(self):
         return dict(self.data)
+
+    async def update_data(self, **values):
+        self.data.update(values)
+
+    async def set_state(self, state):
+        self.current_state = state.state
 
     async def clear(self):
         self.cleared = True
@@ -573,7 +580,7 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             for row in main.client_booking_confirmation_keyboard().inline_keyboard
             for button in row
         ]
-        self.assertEqual(labels, ["✅ Подтвердить заявку", "❌ Отменить / В меню"])
+        self.assertEqual(labels, ["✅ Подтвердить заявку", "❌ Отменить бронирование"])
 
     def test_address_delivery_is_visible_in_summary_and_manager_notification(self):
         data = {
@@ -691,45 +698,7 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             ]],
         )
 
-    async def test_confirm_error_prints_traceback_and_keeps_state(self):
-        callback = SimpleNamespace(
-            message=SimpleNamespace(),
-            from_user=SimpleNamespace(id=123456),
-            answer=AsyncMock(),
-        )
-        state = _BookingState(
-            {
-                "car_id": "7",
-                "car_name": "Porsche Panamera",
-                "start_date": "2026-09-15",
-                "end_date": "2026-09-17",
-                "client_name": "Иван Иванов",
-                "phone": "+375291112233",
-                "rent_price": 100_000,
-            }
-        )
-        with (
-            patch.object(
-                main,
-                "add_public_booking",
-                side_effect=RuntimeError("sheets failed"),
-            ),
-            patch.object(main.traceback, "print_exc") as print_exc,
-        ):
-            await main.client_booking_confirm_callback(
-                callback,
-                state,
-                bot=SimpleNamespace(),
-            )
-
-        print_exc.assert_called_once_with()
-        callback.answer.assert_awaited_once_with(
-            "Не удалось сохранить заявку.",
-            show_alert=True,
-        )
-        self.assertFalse(state.cleared)
-
-    async def test_confirm_success_notifies_manager_and_shows_success_text(self):
+    async def test_confirm_only_offers_deposit_without_saving_booking(self):
         callback_message = SimpleNamespace(
             edit_reply_markup=AsyncMock(),
             answer=AsyncMock(),
@@ -748,7 +717,75 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
                 "client_name": "Иван Иванов",
                 "phone": "+375291112233",
                 "rent_price": 100_000,
-                "delivery_price": 3_000,
+            }
+        )
+        with patch.object(main, "add_public_booking") as add_booking:
+            await main.client_booking_confirm_callback(
+                callback,
+                state,
+                bot=SimpleNamespace(),
+            )
+
+        add_booking.assert_not_called()
+        self.assertIn(
+            "Для фиксации бронирования за вами необходимо внести задаток",
+            callback_message.answer.await_args.args[0],
+        )
+        labels = [
+            button.text
+            for row in callback_message.answer.await_args.kwargs[
+                "reply_markup"
+            ].inline_keyboard
+            for button in row
+        ]
+        self.assertEqual(
+            labels,
+            [
+                "💳 Внести задаток 3 000 RUB",
+                "💬 Уточнить детали с менеджером",
+                "❌ Отменить бронирование",
+            ],
+        )
+        self.assertFalse(state.cleared)
+
+    async def test_deposit_choice_moves_to_receipt_state_and_shows_requisites(self):
+        callback_message = SimpleNamespace(
+            edit_reply_markup=AsyncMock(),
+            answer=AsyncMock(),
+        )
+        callback = SimpleNamespace(
+            message=callback_message,
+            from_user=SimpleNamespace(id=123456),
+            answer=AsyncMock(),
+        )
+        state = _BookingState({"car_name": "Porsche Panamera"})
+
+        await main.client_booking_deposit_callback(callback, state)
+
+        self.assertEqual(
+            state.current_state,
+            main.ClientBookingState.receipt.state,
+        )
+        self.assertIn("Сумма к оплате: 3 000 RUB", callback_message.answer.await_args.args[0])
+        self.assertIn("Лунева К.Д.", callback_message.answer.await_args.args[0])
+
+    async def test_manager_choice_notifies_without_saving_booking(self):
+        callback_message = SimpleNamespace(
+            edit_reply_markup=AsyncMock(),
+            answer=AsyncMock(),
+        )
+        callback = SimpleNamespace(
+            message=callback_message,
+            from_user=SimpleNamespace(id=123456),
+            answer=AsyncMock(),
+        )
+        state = _BookingState(
+            {
+                "car_name": "Porsche Panamera",
+                "start_date": "2026-09-15",
+                "end_date": "2026-09-17",
+                "client_name": "Иван Иванов",
+                "phone": "+375291112233",
                 "total_price": 103_000,
                 "delivery_method": "Доставка по адресу",
                 "delivery_address": "Невский проспект, дом 1",
@@ -756,27 +793,84 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         )
         manager_bot = SimpleNamespace(send_message=AsyncMock())
         with (
-            patch.object(main, "add_public_booking", return_value=501),
             patch.object(main, "_admin_notification_ids", return_value=[987654]),
+            patch.object(main, "add_public_booking") as add_booking,
         ):
-            await main.client_booking_confirm_callback(
+            await main.client_booking_manager_callback(
                 callback,
                 state,
                 bot=SimpleNamespace(),
                 admin_bot=manager_bot,
             )
 
+        add_booking.assert_not_called()
         manager_bot.send_message.assert_awaited_once()
         manager_text = manager_bot.send_message.await_args.kwargs["text"]
+        self.assertIn("БЕЗ ОПЛАТЫ / ждёт звонка", manager_text)
         self.assertIn("Porsche Panamera", manager_text)
-        self.assertIn("100 000 RUB", manager_text)
-        self.assertIn("103 000 RUB", manager_text)
         self.assertIn("Невский проспект, дом 1", manager_text)
-        callback_message.answer.assert_awaited_once()
+        self.assertIn("<code>123456</code>", manager_text)
         self.assertEqual(
             callback_message.answer.await_args.args[0],
-            "✅ Ваша заявка успешно принята! Наш менеджер свяжется с вами "
-            "в течение 10-15 минут для подтверждения бронирования.",
+            "Спасибо за обращение! Менеджер Leon Rental свяжется с вами "
+            "в течение 10-15 минут для уточнения деталей и подтверждения бронирования.",
+        )
+        self.assertTrue(state.cleared)
+
+    async def test_receipt_creates_confirmed_booking_and_notifies_managers(self):
+        message = SimpleNamespace(
+            document=SimpleNamespace(file_id="receipt.pdf"),
+            photo=[],
+            from_user=SimpleNamespace(id=123456),
+            chat=SimpleNamespace(id=555),
+            message_id=42,
+            answer=AsyncMock(),
+        )
+        state = _BookingState(
+            {
+                "car_id": "7",
+                "car_name": "Porsche Panamera",
+                "start_date": "2026-09-15",
+                "end_date": "2026-09-17",
+                "client_name": "Иван Иванов",
+                "phone": "+375291112233",
+                "rent_price": 100_000,
+                "total_price": 103_000,
+                "prepayment": 3_000,
+                "delivery_method": "Доставка по адресу",
+                "delivery_address": "Невский проспект, дом 1",
+            }
+        )
+        client_bot = SimpleNamespace(
+            forward_message=AsyncMock(),
+            send_message=AsyncMock(),
+        )
+        manager_bot = SimpleNamespace(send_message=AsyncMock())
+        with (
+            patch.object(main, "add_public_booking", return_value=701) as add_booking,
+            patch.object(main, "_admin_notification_ids", return_value=[987654]),
+        ):
+            await main.client_booking_receipt(
+                message,
+                state,
+                client_bot,
+                admin_bot=manager_bot,
+            )
+
+        kwargs = add_booking.call_args.kwargs
+        self.assertEqual(kwargs["prepayment"], 3_000)
+        self.assertEqual(kwargs["status"], "Подтверждена")
+        self.assertEqual(kwargs["receipt_payment_method"], "Перевод (СБП)")
+        client_bot.forward_message.assert_awaited_once_with(
+            chat_id=987654,
+            from_chat_id=555,
+            message_id=42,
+        )
+        manager_bot.send_message.assert_awaited_once()
+        self.assertIn("Статус: Подтверждена", manager_bot.send_message.await_args.kwargs["text"])
+        self.assertIn(
+            "✅ Чек получен! Бронирование успешно подтверждено",
+            message.answer.await_args.args[0],
         )
         self.assertTrue(state.cleared)
 

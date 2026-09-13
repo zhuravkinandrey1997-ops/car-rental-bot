@@ -117,6 +117,7 @@ HEAVY_LUX_PARTNER_SOURCE = "heavy_lux_cr"
 LEON_RENTAL_SOURCE = "Леон Рентал"
 CLIENT_BOOKING_SOURCE = "Сайт"
 CLIENT_DELIVERY_FEE = 3000
+CLIENT_BOOKING_DEPOSIT = 3000
 CLIENT_PREPAYMENT_RATE = 0.30
 CLIENT_PAYMENT_BANK = "Сбербанк"
 CLIENT_PAYMENT_PHONE = "+79110326262"
@@ -4072,6 +4073,74 @@ def _client_payment_instruction(prepayment: int) -> str:
     )
 
 
+def client_booking_deposit_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"💳 Внести задаток {_format_number(CLIENT_BOOKING_DEPOSIT)} RUB",
+                    callback_data="client_booking:deposit",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💬 Уточнить детали с менеджером",
+                    callback_data="client_booking:manager",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отменить бронирование",
+                    callback_data="client_booking:cancel",
+                )
+            ],
+        ]
+    )
+
+
+def client_booking_receipt_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Отменить бронирование",
+                    callback_data="client_booking:cancel",
+                )
+            ]
+        ]
+    )
+
+
+def _client_booking_deposit_choice_text() -> str:
+    return (
+        f"Для фиксации бронирования за вами необходимо внести задаток "
+        f"в размере {_format_number(CLIENT_BOOKING_DEPOSIT)} RUB.\n\n"
+        "Либо вы можете связаться с менеджером для уточнения любых вопросов "
+        "перед оплатой."
+    )
+
+
+def _client_booking_manager_request_text(
+    data: dict,
+    client_telegram_id: int,
+) -> str:
+    delivery_method = data.get("delivery_method") or "—"
+    delivery_address = data.get("delivery_address") or "—"
+    delivery_text = f"{delivery_method} {delivery_address}".strip()
+    return (
+        "⚠️ <b>Новая заявка на бронирование "
+        "(БЕЗ ОПЛАТЫ / ждёт звонка)</b>\n\n"
+        f"• Авто: {html.escape(str(data.get('car_name', '—')))}\n"
+        f"• Даты: {html.escape(format_date_ru(data.get('start_date', '')))} — "
+        f"{html.escape(format_date_ru(data.get('end_date', '')))}\n"
+        f"• Сумма: {_format_number(data.get('total_price', 0))} RUB\n"
+        f"• Получение: {html.escape(delivery_text)}\n"
+        f"• Клиент: {html.escape(str(data.get('client_name', '—')))}\n"
+        f"• Контакт: {html.escape(str(data.get('phone', '—')))}\n"
+        f"• Telegram ID: <code>{client_telegram_id}</code>"
+    )
+
+
 def _client_calendar(stage: str, start_date: datetime.date | None = None) -> SimpleCalendar:
     calendar = SimpleCalendar(
         cancel_btn="❌ Отменить / В меню",
@@ -4749,7 +4818,7 @@ def client_booking_confirmation_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="❌ Отменить / В меню",
+                    text="❌ Отменить бронирование",
                     callback_data="client_booking:cancel",
                 )
             ],
@@ -4831,7 +4900,8 @@ def _client_booking_admin_text(
         f"Итоговая сумма: {_format_number(data.get('total_price', 0))} RUB\n"
         f"Способ получения: {delivery_method}\n"
         f"{address_lines}"
-        "Статус: Новая заявка"
+        f"Задаток: {_format_number(data.get('prepayment', 0))} RUB\n"
+        f"Статус: {data.get('booking_status', 'Новая заявка')}"
     )
 
 
@@ -4851,67 +4921,92 @@ async def client_booking_confirm_callback(
     if not callback.from_user:
         await callback.answer("Не удалось определить клиента.", show_alert=True)
         return
-    try:
-        booking_id = await asyncio.to_thread(
-            add_public_booking,
-            car_id=data["car_id"],
-            car_name=data["car_name"],
-            start_date=data["start_date"],
-            end_date=data["end_date"],
-            client_name=data["client_name"],
-            phone=data["phone"],
-            client_telegram_id=callback.from_user.id,
-            price=int(data["rent_price"]),
-            prepayment=0,
-            plate=data.get("plate") or data.get("car_plate", ""),
-            delivery_address=data.get("delivery_address", "Офис Leon Rental"),
-            delivery_price=int(data.get("delivery_price", 0)),
-            status="Новая заявка",
-            source="Сайт",
-        )
-    except ValueError:
-        await state.clear()
-        await callback.answer("Автомобиль уже занят на эти даты.", show_alert=True)
-        await callback.message.answer(
-            "Автомобиль уже заняли на выбранные даты. "
-            "Откройте автопарк и выберите другой вариант.",
-            reply_markup=client_welcome_keyboard(),
-        )
-        return
-    except Exception as error:
-        traceback.print_exc()
-        logger.exception("Could not save confirmed client booking")
-        await callback.answer("Не удалось сохранить заявку.", show_alert=True)
-        return
+    await state.update_data(
+        client_telegram_id=callback.from_user.id,
+        prepayment=CLIENT_BOOKING_DEPOSIT,
+        prepayment_pay_type="Перевод (СБП)",
+    )
+    await callback.answer()
+    with suppress(Exception):
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        _client_booking_deposit_choice_text(),
+        reply_markup=client_booking_deposit_keyboard(),
+    )
 
+
+async def client_booking_deposit_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    if (
+        not callback.message
+        or await state.get_state() != ClientBookingState.confirmation.state
+    ):
+        await callback.answer(
+            "Заявка уже обработана или устарела.",
+            show_alert=True,
+        )
+        return
+    await state.update_data(
+        prepayment=CLIENT_BOOKING_DEPOSIT,
+        prepayment_pay_type="Перевод (СБП)",
+    )
+    await state.set_state(ClientBookingState.receipt)
+    await callback.answer()
+    with suppress(Exception):
+        await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        _client_payment_instruction(CLIENT_BOOKING_DEPOSIT),
+        reply_markup=client_booking_receipt_keyboard(),
+    )
+
+
+async def client_booking_manager_callback(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    admin_bot: Bot | None = None,
+) -> None:
+    if (
+        not callback.message
+        or await state.get_state() != ClientBookingState.confirmation.state
+    ):
+        await callback.answer(
+            "Заявка уже обработана или устарела.",
+            show_alert=True,
+        )
+        return
+    data = await state.get_data()
+    if not callback.from_user:
+        await callback.answer("Не удалось определить клиента.", show_alert=True)
+        return
     notification_bot = admin_bot or bot
-    admin_text = _client_booking_admin_text(booking_id, data)
-    delivered_to_admin = False
+    manager_text = _client_booking_manager_request_text(
+        data,
+        callback.from_user.id,
+    )
     for admin_id in _admin_notification_ids():
         try:
             await notification_bot.send_message(
                 chat_id=admin_id,
-                text=admin_text,
-                reply_markup=client_admin_booking_keyboard(booking_id),
+                text=manager_text,
+                parse_mode="HTML",
             )
-            delivered_to_admin = True
         except Exception:
             logger.exception(
-                "Could not notify manager %s about client booking %s",
+                "Could not notify manager %s about unpaid client booking",
                 admin_id,
-                booking_id,
             )
     await state.clear()
-    await callback.answer("Заявка отправлена менеджеру")
+    await callback.answer("Менеджер получил запрос")
     with suppress(Exception):
         await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        "✅ Ваша заявка успешно принята! Наш менеджер свяжется с вами "
-        "в течение 10-15 минут для подтверждения бронирования.",
+        "Спасибо за обращение! Менеджер Leon Rental свяжется с вами "
+        "в течение 10-15 минут для уточнения деталей и подтверждения бронирования.",
         reply_markup=client_welcome_keyboard(),
     )
-    if not delivered_to_admin:
-        logger.warning("Client booking %s was saved without manager delivery", booking_id)
 
 
 async def client_ai_booking_callback(
@@ -5034,9 +5129,16 @@ async def client_booking_receipt(
             phone=data["phone"],
             client_telegram_id=message.from_user.id,
             price=int(data["rent_price"]),
-            prepayment=int(data["prepayment"]),
+            prepayment=int(data.get("prepayment", CLIENT_BOOKING_DEPOSIT)),
+            plate=data.get("plate") or data.get("car_plate", ""),
             delivery_address=data.get("delivery_address", "Самовывоз"),
             delivery_price=int(data.get("delivery_price", 0)),
+            receipt_payment_method=data.get(
+                "prepayment_pay_type",
+                "Перевод (СБП)",
+            ),
+            status="Подтверждена",
+            source="Сайт",
         )
     except ValueError:
         logger.info("Client booking became unavailable before receipt save")
@@ -5054,7 +5156,10 @@ async def client_booking_receipt(
         )
         return
 
-    admin_text = _client_booking_admin_text(booking_id, data)
+    admin_text = _client_booking_admin_text(
+        booking_id,
+        {**data, "booking_status": "Подтверждена"},
+    )
     delivered_to_admin = False
     notification_bot = admin_bot or bot
     for admin_id in _admin_notification_ids():
@@ -5078,8 +5183,9 @@ async def client_booking_receipt(
             )
     await state.clear()
     await message.answer(
-        "Спасибо! Чек получен. Наш менеджер проверит оплату и подтвердит "
-        "бронь в течение 10 минут."
+        "✅ Чек получен! Бронирование успешно подтверждено, даты зафиксированы "
+        "за вами. Наш менеджер свяжется с вами перед выдачей авто.",
+        reply_markup=client_welcome_keyboard(),
     )
 
 
@@ -10321,6 +10427,14 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
         F.data == "client_booking:confirm",
     )
     dispatcher.callback_query.register(
+        client_booking_deposit_callback,
+        F.data == "client_booking:deposit",
+    )
+    dispatcher.callback_query.register(
+        client_booking_manager_callback,
+        F.data == "client_booking:manager",
+    )
+    dispatcher.callback_query.register(
         client_booking_cancel_callback,
         F.data == "client_booking:cancel",
     )
@@ -10387,6 +10501,10 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
     dispatcher.message.register(
         client_booking_phone,
         ClientBookingState.phone,
+    )
+    dispatcher.message.register(
+        client_receipt_handler,
+        ClientBookingState.receipt,
     )
     dispatcher.message.register(client_ai_message)
     dispatcher.errors.register(error_handler)
