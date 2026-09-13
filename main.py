@@ -71,6 +71,7 @@ from sheets_client import (
     get_partner_cars,
     get_partner_expenses,
     get_manager_access,
+    ensure_sheets_ready,
     is_manager_authorized,
     is_partner_authorized,
     issue_booking,
@@ -4380,13 +4381,8 @@ async def client_rules_handler(message: Message, state: FSMContext) -> None:
 async def client_manager_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "👤 Связь с менеджером\n\n"
-        "Напишите нам в Telegram или позвоните — поможем выбрать автомобиль, "
-        "проверить даты и оформить аренду.",
-        reply_markup=client_manager_keyboard(),
-    )
-    await message.answer(
-        "Выберите раздел в нижнем меню, чтобы продолжить.",
+        "Наш менеджер поможет подобрать автомобиль и оформить аренду.\n"
+        "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
         reply_markup=client_welcome_keyboard(),
     )
 
@@ -9796,6 +9792,7 @@ async def run_bot() -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured.")
     if not CLIENT_BOT_TOKEN:
         raise RuntimeError("CLIENT_BOT_TOKEN is not configured.")
+    ensure_sheets_ready()
     fleet_bot = Bot(token=TOKEN)
     client_bot = Bot(token=CLIENT_BOT_TOKEN)
     try:

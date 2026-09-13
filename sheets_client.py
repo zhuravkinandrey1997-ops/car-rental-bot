@@ -151,30 +151,42 @@ def _is_transient_spreadsheet_error(error: Exception) -> bool:
         or any(code in error_text for code in ("500", "502", "503"))
     )
 
+def _retry_transient_operation(
+    operation,
+    operation_name: str,
+    max_retries: int = 5,
+):
+    """Run one Sheets operation with bounded in-process retries."""
+    if max_retries < 1:
+        raise ValueError("max_retries must be at least 1")
 
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except Exception as error:
+            is_last_attempt = attempt == max_retries - 1
+            if is_last_attempt or not _is_transient_spreadsheet_error(error):
+                raise
+            logger.warning(
+                "Temporary Google Sheets failure during %s "
+                "(attempt %s/%s): %s; retrying in 3 seconds",
+                operation_name,
+                attempt + 1,
+                max_retries,
+                error,
+            )
+            time.sleep(3)
 def get_spreadsheet_with_retry(
     gc_client,
     spreadsheet_key: str,
     max_retries: int = 5,
 ):
     """Open a spreadsheet while tolerating short Google API outages."""
-    if max_retries < 1:
-        raise ValueError("max_retries must be at least 1")
-
-    for attempt in range(max_retries):
-        try:
-            return gc_client.open_by_key(spreadsheet_key)
-        except Exception as error:
-            is_last_attempt = attempt == max_retries - 1
-            if is_last_attempt or not _is_transient_spreadsheet_error(error):
-                raise
-            retry_number = attempt + 1
-            print(
-                "Временный сбой Google API "
-                f"({error}), повторная попытка "
-                f"{retry_number}/{max_retries} через 3 сек..."
-            )
-            time.sleep(3)
+    return _retry_transient_operation(
+        lambda: gc_client.open_by_key(spreadsheet_key),
+        "opening spreadsheet",
+        max_retries,
+    )
 
 
 if SERVICE_ACCOUNT_JSON:
@@ -187,13 +199,30 @@ else:
 if len(SPREADSHEET_NAME) > 30 and " " not in SPREADSHEET_NAME:
     sh = get_spreadsheet_with_retry(gc, SPREADSHEET_NAME)
 else:
-    sh = gc.open(SPREADSHEET_NAME)
+    # Keep title-based projects on the same in-process retry path as
+    # ID-based projects. A transient quota response must not make the
+    # workflow restart before the bots have even been created.
+    sh = _retry_transient_operation(
+        lambda: gc.open(SPREADSHEET_NAME),
+        "opening spreadsheet",
+    )
+
+
+_worksheet_cache: dict[str, object] = {}
+SHEETS_READY = False
+
 
 def migrate_sheet_titles(spreadsheet) -> list[tuple[str, str]]:
     """Rename legacy worksheet titles to their Russian equivalents."""
     worksheets = {
         worksheet.title: worksheet for worksheet in spreadsheet.worksheets()
     }
+    return _migrate_sheet_titles_from_cache(worksheets)
+
+def _migrate_sheet_titles_from_cache(
+    worksheets: dict[str, object],
+) -> list[tuple[str, str]]:
+    """Rename legacy titles using one already-loaded metadata response."""
     renamed: list[tuple[str, str]] = []
     for old_title, new_title in SHEET_TITLE_MAP.items():
         source = worksheets.get(old_title)
@@ -217,11 +246,6 @@ def migrate_sheet_titles(spreadsheet) -> list[tuple[str, str]]:
     else:
         logger.info("Worksheet title migration is already complete")
     return renamed
-
-
-migrate_sheet_titles(sh)
-
-
 def _column_letter(column_number: int) -> str:
     """Convert a one-based column number to an A1 column label."""
     result = ""
@@ -256,20 +280,13 @@ def _ensure_all_sheet_widths(spreadsheet) -> None:
         _ensure_column_capacity(worksheet, MIN_OPERATIONAL_COLUMNS)
 
 
-# Each operational worksheet is expanded immediately after it is resolved
-# below. Avoid an eager all-worksheets metadata read during startup because it
-# can exhaust the Google Sheets per-minute read quota before the bot starts.
-ws_cars = sh.worksheet("Автомобили")
-_ensure_sheet_width(ws_cars)
-
-
 def _get_bookings_sheet():
     """Find the bookings worksheet under either supported title."""
     try:
-        worksheet = sh.worksheet("Бронирования")
+        worksheet = _cached_worksheet("Бронирования")
     except gspread.exceptions.WorksheetNotFound:
         try:
-            worksheet = sh.worksheet("Bookings")
+            worksheet = _cached_worksheet("Bookings")
         except gspread.exceptions.WorksheetNotFound:
             worksheet = sh.add_worksheet(
                 title="Бронирования",
@@ -280,38 +297,9 @@ def _get_bookings_sheet():
                 BOOKING_HEADERS,
                 value_input_option="USER_ENTERED",
             )
+            _worksheet_cache["Бронирования"] = worksheet
     _ensure_sheet_width(worksheet)
     return worksheet
-
-
-ws_bookings = _get_bookings_sheet()
-ws_returns = sh.worksheet("Возвраты_Касса")
-ws_managers = sh.worksheet("Менеджеры")
-try:
-    ws_acceptance_acts = sh.worksheet("Acceptance_Acts")
-except gspread.exceptions.WorksheetNotFound:
-    ws_acceptance_acts = sh.add_worksheet(
-        title="Acceptance_Acts",
-        rows=1000,
-        cols=30,
-    )
-_ensure_sheet_width(ws_acceptance_acts)
-acceptance_sheet_headers = ws_acceptance_acts.row_values(1)
-missing_acceptance_headers = [
-    header
-    for header in ACCEPTANCE_ACT_HEADERS
-    if header not in acceptance_sheet_headers
-]
-if missing_acceptance_headers:
-    acceptance_sheet_headers.extend(missing_acceptance_headers)
-    _ensure_column_capacity(ws_acceptance_acts, len(acceptance_sheet_headers))
-    ws_acceptance_acts.update(
-        [acceptance_sheet_headers],
-        range_name=(
-            f"A1:{_column_letter(len(acceptance_sheet_headers))}1"
-        ),
-        value_input_option="USER_ENTERED",
-    )
 
 
 def get_manager_access(tg_id: int) -> dict | None:
@@ -957,32 +945,76 @@ def _update_row_values(
 
 def _get_or_create_sheet(title: str, headers: list[str]):
     try:
-        worksheet = sh.worksheet(title)
+        worksheet = _cached_worksheet(title)
     except gspread.exceptions.WorksheetNotFound:
         worksheet = sh.add_worksheet(
             title=title,
             rows=1000,
             cols=max(30, len(headers)),
         )
+        _worksheet_cache[title] = worksheet
     _ensure_headers(worksheet, headers)
     return worksheet
 
+def _initialize_worksheets() -> None:
+    """Resolve all startup worksheets from one metadata snapshot."""
+    global _worksheet_cache, ws_cars, ws_bookings, ws_returns, ws_managers
+    global ws_acceptance_acts, ws_expenses, ws_monthly_summary
+    global ws_car_profit_summary, ws_notification_state
 
-ws_expenses = _get_or_create_sheet("Затраты", EXPENSE_HEADERS)
-ws_monthly_summary = _get_or_create_sheet(
-    "Сводная_по_месяцам",
-    MONTHLY_SUMMARY_HEADERS,
-)
-ws_car_profit_summary = _get_or_create_sheet(
-    "Прибыль_по_авто",
-    CAR_PROFIT_SUMMARY_HEADERS,
-)
-ws_notification_state = _get_or_create_sheet(
-    "Состояние_уведомлений",
-    NOTIFICATION_STATE_HEADERS,
-)
+    _worksheet_cache = {
+        worksheet.title: worksheet for worksheet in sh.worksheets()
+    }
+    _migrate_sheet_titles_from_cache(_worksheet_cache)
 
+    ws_cars = _cached_worksheet("Автомобили")
+    _ensure_sheet_width(ws_cars)
+    ws_bookings = _get_bookings_sheet()
+    ws_returns = _cached_worksheet("Возвраты_Касса")
+    ws_managers = _cached_worksheet("Менеджеры")
+    try:
+        ws_acceptance_acts = _cached_worksheet("Acceptance_Acts")
+    except gspread.exceptions.WorksheetNotFound:
+        ws_acceptance_acts = sh.add_worksheet(
+            title="Acceptance_Acts",
+            rows=1000,
+            cols=30,
+        )
+        _worksheet_cache["Acceptance_Acts"] = ws_acceptance_acts
+    _ensure_sheet_width(ws_acceptance_acts)
+    acceptance_sheet_headers = ws_acceptance_acts.row_values(1)
+    missing_acceptance_headers = [
+        header
+        for header in ACCEPTANCE_ACT_HEADERS
+        if header not in acceptance_sheet_headers
+    ]
+    if missing_acceptance_headers:
+        acceptance_sheet_headers.extend(missing_acceptance_headers)
+        _ensure_column_capacity(
+            ws_acceptance_acts,
+            len(acceptance_sheet_headers),
+        )
+        ws_acceptance_acts.update(
+            [acceptance_sheet_headers],
+            range_name=(
+                f"A1:{_column_letter(len(acceptance_sheet_headers))}1"
+            ),
+            value_input_option="USER_ENTERED",
+        )
 
+    ws_expenses = _get_or_create_sheet("Затраты", EXPENSE_HEADERS)
+    ws_monthly_summary = _get_or_create_sheet(
+        "Сводная_по_месяцам",
+        MONTHLY_SUMMARY_HEADERS,
+    )
+    ws_car_profit_summary = _get_or_create_sheet(
+        "Прибыль_по_авто",
+        CAR_PROFIT_SUMMARY_HEADERS,
+    )
+    ws_notification_state = _get_or_create_sheet(
+        "Состояние_уведомлений",
+        NOTIFICATION_STATE_HEADERS,
+    )
 def _notification_state_datetime(
     value: object,
     *,
@@ -3402,3 +3434,29 @@ def save_actual_return(
                 "Booking %s was completed but row coloring failed",
                 booking_id,
             )
+
+def _initialize_worksheets_with_retry(max_retries: int = 5) -> None:
+    """Keep a temporary startup quota response inside this process."""
+    _retry_transient_operation(
+        _initialize_worksheets,
+        "startup",
+        max_retries,
+    )
+
+def ensure_sheets_ready() -> None:
+    """Log readiness after startup recovery before polling begins."""
+    if not SHEETS_READY:
+        raise RuntimeError("Google Sheets startup has not completed.")
+    logger.info("Google Sheets ready; bot startup may continue")
+
+def _cached_worksheet(*titles: str):
+    """Resolve a worksheet without issuing another metadata request."""
+    for title in titles:
+        worksheet = _worksheet_cache.get(title)
+        if worksheet is not None:
+            return worksheet
+    raise gspread.exceptions.WorksheetNotFound(titles[0])
+
+
+_initialize_worksheets_with_retry()
+SHEETS_READY = True
