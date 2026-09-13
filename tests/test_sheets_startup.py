@@ -2,7 +2,7 @@ import asyncio
 from copy import deepcopy
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import main
 import sheets_client
@@ -923,6 +923,156 @@ class SheetsStartupTest(unittest.TestCase):
         self.assertCountEqual(events[1:], ["fleet_polling", "client_polling"])
         fleet_bot.session.close.assert_awaited_once_with()
         client_bot.session.close.assert_awaited_once_with()
+
+    def test_run_bot_restarts_both_polling_processes_without_reusing_tasks(self):
+        bots = [
+            SimpleNamespace(session=SimpleNamespace(close=AsyncMock())),
+            SimpleNamespace(session=SimpleNamespace(close=AsyncMock())),
+            SimpleNamespace(session=SimpleNamespace(close=AsyncMock())),
+            SimpleNamespace(session=SimpleNamespace(close=AsyncMock())),
+        ]
+        events = []
+
+        async def start_fleet_polling(bot, admin_bot):
+            events.append(("fleet_started", bot, admin_bot))
+            await asyncio.sleep(0)
+            events.append(("fleet_stopped", bot))
+
+        async def start_client_polling(bot, admin_bot):
+            events.append(("client_started", bot, admin_bot))
+            await asyncio.sleep(0)
+            events.append(("client_stopped", bot))
+
+        with (
+            patch.object(main, "TOKEN", "fleet-token"),
+            patch.object(main, "CLIENT_BOT_TOKEN", "client-token"),
+            patch.object(main, "ensure_sheets_ready") as ready,
+            patch.object(main, "Bot", side_effect=bots),
+            patch.object(
+                main,
+                "run_fleet_bot",
+                side_effect=start_fleet_polling,
+            ) as run_fleet_bot,
+            patch.object(
+                main,
+                "run_client_bot",
+                side_effect=start_client_polling,
+            ) as run_client_bot,
+        ):
+            asyncio.run(main.run_bot())
+            asyncio.run(main.run_bot())
+
+        self.assertEqual(ready.call_count, 2)
+        self.assertEqual(run_fleet_bot.await_count, 2)
+        self.assertEqual(run_client_bot.await_count, 2)
+        self.assertEqual(
+            run_fleet_bot.await_args_list,
+            [
+                call(bots[0], bots[1]),
+                call(bots[2], bots[3]),
+            ],
+        )
+        self.assertEqual(
+            run_client_bot.await_args_list,
+            [
+                call(bots[1], bots[0]),
+                call(bots[3], bots[2]),
+            ],
+        )
+        self.assertEqual(
+            events,
+            [
+                ("fleet_started", bots[0], bots[1]),
+                ("client_started", bots[1], bots[0]),
+                ("fleet_stopped", bots[0]),
+                ("client_stopped", bots[1]),
+                ("fleet_started", bots[2], bots[3]),
+                ("client_started", bots[3], bots[2]),
+                ("fleet_stopped", bots[2]),
+                ("client_stopped", bots[3]),
+            ],
+        )
+        for bot in bots:
+            bot.session.close.assert_awaited_once_with()
+
+    def test_run_fleet_bot_restarts_scheduler_and_catchup_without_leaks(self):
+        fleet_bots = [
+            SimpleNamespace(
+                delete_webhook=AsyncMock(),
+                session=SimpleNamespace(close=AsyncMock()),
+            ),
+            SimpleNamespace(
+                delete_webhook=AsyncMock(),
+                session=SimpleNamespace(close=AsyncMock()),
+            ),
+        ]
+        schedulers = []
+        catchup_started = []
+        catchup_cancelled = []
+        polling_bots = []
+
+        def make_scheduler(bot):
+            scheduler = SimpleNamespace(
+                bot=bot,
+                running=True,
+                start=Mock(),
+                shutdown=Mock(),
+            )
+            schedulers.append(scheduler)
+            return scheduler
+
+        class _Dispatcher:
+            async def start_polling(self, bot):
+                polling_bots.append(bot)
+                await asyncio.sleep(0)
+
+        async def catchup(bot):
+            catchup_started.append(bot)
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                catchup_cancelled.append(bot)
+                raise
+
+        with (
+            patch.object(main, "TOKEN", "fleet-token"),
+            patch.object(
+                main,
+                "create_notification_scheduler",
+                side_effect=make_scheduler,
+            ) as create_scheduler,
+            patch.object(
+                main,
+                "create_dispatcher",
+                side_effect=[_Dispatcher(), _Dispatcher()],
+            ) as create_dispatcher,
+            patch.object(
+                main,
+                "send_missed_tomorrow_notifications",
+                side_effect=catchup,
+            ),
+            patch.object(main, "colorize_existing_booking_rows", return_value=0),
+        ):
+            asyncio.run(main.run_fleet_bot(fleet_bots[0], object()))
+            asyncio.run(main.run_fleet_bot(fleet_bots[1], object()))
+
+        self.assertEqual(create_scheduler.call_count, 2)
+        self.assertEqual(create_dispatcher.call_count, 2)
+        self.assertEqual(
+            [scheduler.bot for scheduler in schedulers],
+            fleet_bots,
+        )
+        for scheduler in schedulers:
+            scheduler.start.assert_called_once_with()
+            scheduler.shutdown.assert_called_once_with(wait=False)
+        self.assertEqual(catchup_started, fleet_bots)
+        self.assertEqual(catchup_cancelled, fleet_bots)
+        self.assertEqual(polling_bots, fleet_bots)
+        for bot in fleet_bots:
+            bot.delete_webhook.assert_awaited_once_with(
+                drop_pending_updates=True,
+            )
+            bot.session.close.assert_awaited_once_with()
 
     def test_run_bot_propagates_polling_error_without_reordering_startup(self):
         events = []
