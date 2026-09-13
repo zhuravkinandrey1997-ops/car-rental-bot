@@ -10,6 +10,7 @@ A manager-only Telegram bot for car rental bookings, active rentals, and vehicle
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required secret: `TELEGRAM_BOT_TOKEN`
+- Required secret: `CLIENT_BOT_TOKEN` for the separate online-booking bot
 - Google credential: `service_account.json` or protected `GOOGLE_SERVICE_ACCOUNT_JSON`
 - Optional env: `SPREADSHEET_NAME`, `SERVICE_ACCOUNT_FILE`, `LOG_LEVEL`
 

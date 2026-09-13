@@ -22,6 +22,14 @@ class _BookingsSheet:
 
 
 class ClientBookingTest(unittest.TestCase):
+    def test_client_welcome_keyboard_has_single_booking_entrypoint(self):
+        buttons = [
+            button.text
+            for row in main.client_welcome_keyboard().keyboard
+            for button in row
+        ]
+        self.assertEqual(buttons, ["🏎 Выбрать автомобиль"])
+
     def test_public_booking_helpers_calculate_days_and_prepayment(self):
         self.assertEqual(main._client_booking_days("2026-09-15", "2026-09-17"), 3)
         self.assertEqual(main._client_prepayment(100_000), 30_000)
@@ -45,9 +53,9 @@ class ClientBookingTest(unittest.TestCase):
         self.assertEqual(
             labels,
             [
-                "🏢 Заберу в офисе (Бесплатно)",
-                "✈️ Аэропорт (+ 3 000 RUB)",
-                "📍 Доставка по адресу (+ 3 000 RUB)",
+                "🏢 Заберу сам в офисе (Бесплатно)",
+                "✈️ Аэропорт Пулково (+ 3 000 RUB)",
+                "📍 Доставка по адресу в СПб (+ 3 000 RUB)",
             ],
         )
 

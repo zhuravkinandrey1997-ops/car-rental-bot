@@ -91,6 +91,7 @@ logging.basicConfig(
 logger = logging.getLogger("car-rental-bot")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CLIENT_BOT_TOKEN = os.getenv("CLIENT_BOT_TOKEN")
 NOTIFY_MANAGERS = [661842368, 952125424, 1574781782]
 PARTNER_ID = 226694751
 PARTNER_CAR_KEYWORD = "Dodge"
@@ -940,24 +941,33 @@ def client_booking_car_keyboard(cars: list[dict]) -> ReplyKeyboardMarkup:
     return builder.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
 
+def client_welcome_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🏎 Выбрать автомобиль")],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def client_delivery_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="🏢 Заберу в офисе (Бесплатно)",
+                    text="🏢 Заберу сам в офисе (Бесплатно)",
                     callback_data="client_delivery:office",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="✈️ Аэропорт (+ 3 000 RUB)",
+                    text="✈️ Аэропорт Пулково (+ 3 000 RUB)",
                     callback_data="client_delivery:airport",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="📍 Доставка по адресу (+ 3 000 RUB)",
+                    text="📍 Доставка по адресу в СПб (+ 3 000 RUB)",
                     callback_data="client_delivery:address",
                 )
             ],
@@ -3784,6 +3794,7 @@ async def client_booking_receipt(
     message: Message,
     state: FSMContext,
     bot: Bot,
+    admin_bot: Bot | None = None,
 ) -> None:
     if message.document is None and not message.photo:
         await message.answer(
@@ -3827,6 +3838,7 @@ async def client_booking_receipt(
 
     admin_text = _client_booking_admin_text(booking_id, data)
     delivered_to_admin = False
+    notification_bot = admin_bot or bot
     for admin_id in _admin_notification_ids():
         try:
             await bot.forward_message(
@@ -3834,7 +3846,7 @@ async def client_booking_receipt(
                 from_chat_id=message.chat.id,
                 message_id=message.message_id,
             )
-            await bot.send_message(
+            await notification_bot.send_message(
                 chat_id=admin_id,
                 text=admin_text,
                 reply_markup=client_admin_booking_keyboard(booking_id),
@@ -3848,20 +3860,15 @@ async def client_booking_receipt(
             )
     await state.clear()
     await message.answer(
-        f"Заявка #{booking_id} принята.\n"
-        "Менеджер проверит чек и подтвердит бронирование. "
-        "После подтверждения вы получите уведомление здесь."
-        + (
-            ""
-            if delivered_to_admin
-            else "\nЗаявка сохранена, но уведомление менеджерам будет повторено позже."
-        )
+        "Спасибо! Чек получен. Наш менеджер проверит оплату и подтвердит "
+        "бронь в течение 10 минут."
     )
 
 
 async def client_booking_admin_callback(
     callback: CallbackQuery,
     bot: Bot,
+    client_bot: Bot | None = None,
 ) -> None:
     if not callback.data or not callback.message:
         await callback.answer()
@@ -3900,6 +3907,7 @@ async def client_booking_admin_callback(
 
     client_id = _booking_manager_id(updated_booking or booking)
     if client_id:
+        notification_bot = client_bot or bot
         client_message = (
             "🎉 Ваша бронь успешно подтверждена! Ждём вас."
             if status == "Подтверждена"
@@ -3907,7 +3915,10 @@ async def client_booking_admin_callback(
             "Свяжитесь с менеджером для уточнения деталей."
         )
         try:
-            await bot.send_message(chat_id=client_id, text=client_message)
+            await notification_bot.send_message(
+                chat_id=client_id,
+                text=client_message,
+            )
         except Exception:
             logger.exception(
                 "Could not notify client %s about booking %s",
@@ -3935,7 +3946,29 @@ async def start_handler(message: Message, state: FSMContext) -> None:
     if access is not None:
         await show_menu(message, state)
         return
-    await start_client_booking(message, state)
+    await message.answer(
+        "Этот бот предназначен для команды Leon Rental. "
+        "Для онлайн-бронирования используйте @LeonRentalSpb_bot."
+    )
+
+
+async def client_start_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "Добро пожаловать в Leon Rental! 🚗\n"
+        "Здесь вы можете выбрать премиальный автомобиль, рассчитать стоимость "
+        "и забронировать поездку онлайн.",
+        reply_markup=client_welcome_keyboard(),
+    )
+
+
+async def client_cancel_flow(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "Бронирование отменено. Нажмите «🏎 Выбрать автомобиль», "
+        "чтобы начать заново.",
+        reply_markup=client_welcome_keyboard(),
+    )
 
 
 async def partner_bookings(message: Message) -> None:
@@ -8706,7 +8739,7 @@ async def error_handler(event: object) -> None:
     logger.exception("Unhandled bot event: %s", event)
 
 
-def create_dispatcher() -> Dispatcher:
+def create_dispatcher(client_bot: Bot | None = None) -> Dispatcher:
     dispatcher = Dispatcher()
     dispatcher.callback_query.register(calendar_callback, F.data.startswith("calendar:"))
     dispatcher.callback_query.register(payment_method_callback, F.data.startswith("payment:"))
@@ -8809,12 +8842,18 @@ def create_dispatcher() -> Dispatcher:
         cancellation_deposit_callback,
         F.data.startswith("cancel_deposit:"),
     )
+    async def admin_booking_callback_handler(
+        callback: CallbackQuery,
+        bot: Bot,
+    ) -> None:
+        await client_booking_admin_callback(
+            callback,
+            bot,
+            client_bot=client_bot,
+        )
+
     dispatcher.callback_query.register(
-        client_delivery_callback,
-        F.data.startswith("client_delivery:"),
-    )
-    dispatcher.callback_query.register(
-        client_booking_admin_callback,
+        admin_booking_callback_handler,
         F.data.startswith("client_booking:"),
     )
     dispatcher.message.register(start_handler, CommandStart())
@@ -8851,14 +8890,6 @@ def create_dispatcher() -> Dispatcher:
 
     dispatcher.message.register(availability_start_date, AvailabilityForm.start_date)
     dispatcher.message.register(availability_end_date, AvailabilityForm.end_date)
-    dispatcher.message.register(
-        client_booking_start_date,
-        ClientBookingState.start_date,
-    )
-    dispatcher.message.register(
-        client_booking_end_date,
-        ClientBookingState.end_date,
-    )
 
     dispatcher.message.register(booking_start_date, BookingForm.start_date)
     dispatcher.message.register(booking_end_date, BookingForm.end_date)
@@ -8893,23 +8924,6 @@ def create_dispatcher() -> Dispatcher:
 
     dispatcher.message.register(cancellation_car, CancellationForm.car)
     dispatcher.message.register(cancellation_reason, CancellationForm.reason)
-    dispatcher.message.register(client_booking_car, ClientBookingState.car)
-    dispatcher.message.register(
-        client_delivery_address,
-        ClientBookingState.delivery_address,
-    )
-    dispatcher.message.register(
-        client_booking_name,
-        ClientBookingState.client_name,
-    )
-    dispatcher.message.register(
-        client_booking_phone,
-        ClientBookingState.phone,
-    )
-    dispatcher.message.register(
-        client_booking_receipt,
-        ClientBookingState.receipt,
-    )
 
     dispatcher.message.register(booking_source_selection, BookingForm.source)
     dispatcher.message.register(return_source_selection, ReturnForm.source)
@@ -8969,11 +8983,71 @@ def create_dispatcher() -> Dispatcher:
     return dispatcher
 
 
-async def run_bot() -> None:
+def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
+    dispatcher = Dispatcher()
+
+    async def client_receipt_handler(
+        message: Message,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        await client_booking_receipt(
+            message,
+            state,
+            bot,
+            admin_bot=admin_bot,
+        )
+
+    dispatcher.callback_query.register(
+        calendar_callback,
+        F.data.startswith("calendar:"),
+    )
+    dispatcher.callback_query.register(
+        client_delivery_callback,
+        F.data.startswith("client_delivery:"),
+    )
+    dispatcher.message.register(client_start_handler, CommandStart())
+    dispatcher.message.register(
+        start_client_booking,
+        F.text == "🏎 Выбрать автомобиль",
+    )
+    dispatcher.message.register(
+        client_cancel_flow,
+        F.text.casefold() == "отмена",
+    )
+    dispatcher.message.register(
+        client_booking_start_date,
+        ClientBookingState.start_date,
+    )
+    dispatcher.message.register(
+        client_booking_end_date,
+        ClientBookingState.end_date,
+    )
+    dispatcher.message.register(client_booking_car, ClientBookingState.car)
+    dispatcher.message.register(
+        client_delivery_address,
+        ClientBookingState.delivery_address,
+    )
+    dispatcher.message.register(
+        client_booking_name,
+        ClientBookingState.client_name,
+    )
+    dispatcher.message.register(
+        client_booking_phone,
+        ClientBookingState.phone,
+    )
+    dispatcher.message.register(
+        client_receipt_handler,
+        ClientBookingState.receipt,
+    )
+    dispatcher.errors.register(error_handler)
+    return dispatcher
+
+
+async def run_fleet_bot(bot: Bot, client_bot: Bot) -> None:
     if not TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured.")
-    bot = Bot(token=TOKEN)
-    dispatcher = create_dispatcher()
+    dispatcher = create_dispatcher(client_bot=client_bot)
     scheduler = create_notification_scheduler(bot)
     catchup_task: asyncio.Task | None = None
     try:
@@ -9025,6 +9099,40 @@ async def run_bot() -> None:
                 await catchup_task
         with suppress(Exception):
             await bot.session.close()
+
+
+async def run_client_bot(bot: Bot, admin_bot: Bot) -> None:
+    if not CLIENT_BOT_TOKEN:
+        raise RuntimeError("CLIENT_BOT_TOKEN is not configured.")
+    dispatcher = create_client_dispatcher(admin_bot=admin_bot)
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Client booking bot started")
+        await dispatcher.start_polling(bot)
+    except TelegramAPIError:
+        logger.exception("Client bot Telegram API error")
+        raise
+    finally:
+        with suppress(Exception):
+            await bot.session.close()
+
+
+async def run_bot() -> None:
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured.")
+    if not CLIENT_BOT_TOKEN:
+        raise RuntimeError("CLIENT_BOT_TOKEN is not configured.")
+    fleet_bot = Bot(token=TOKEN)
+    client_bot = Bot(token=CLIENT_BOT_TOKEN)
+    try:
+        await asyncio.gather(
+            run_fleet_bot(fleet_bot, client_bot),
+            run_client_bot(client_bot, fleet_bot),
+        )
+    finally:
+        for bot in (fleet_bot, client_bot):
+            with suppress(Exception):
+                await bot.session.close()
 
 
 def main() -> None:
