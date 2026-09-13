@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+import json
 
 import main
 import sheets_client
@@ -64,6 +65,33 @@ class ClientBookingTest(unittest.TestCase):
             "листа\n«Автомобили» Google Таблицы",
         ):
             self.assertIn(rule, prompt)
+
+    def test_openai_client_uses_requested_model_and_system_prompt(self):
+        response = MagicMock()
+        response.read.return_value = json.dumps(
+            {
+                "choices": [
+                    {"message": {"content": "Здравствуйте! Подскажу условия аренды."}}
+                ]
+            }
+        ).encode("utf-8")
+        urlopen_result = MagicMock()
+        urlopen_result.__enter__.return_value = response
+
+        with (
+            patch.object(main, "OPENAI_API_KEY", "test-key"),
+            patch.object(main, "urlopen", return_value=urlopen_result) as urlopen,
+        ):
+            answer = main._openai_generate_content("Какие есть автомобили?")
+
+        self.assertIn("Здравствуйте", answer)
+        request = urlopen.call_args.args[0]
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["model"], "gpt-4o-mini")
+        self.assertEqual(body["messages"][0]["role"], "system")
+        self.assertEqual(body["messages"][0]["content"], main.CLIENT_AI_SYSTEM_PROMPT)
+        self.assertEqual(body["messages"][1]["content"], "Какие есть автомобили?")
+        self.assertEqual(request.get_header("Authorization"), "Bearer test-key")
 
     def test_public_booking_helpers_calculate_days_and_prepayment(self):
         self.assertEqual(main._client_booking_days("2026-09-15", "2026-09-17"), 3)

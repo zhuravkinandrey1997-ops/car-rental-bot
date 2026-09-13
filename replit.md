@@ -11,7 +11,7 @@ A manager-only Telegram bot for car rental bookings, active rentals, and vehicle
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required secret: `TELEGRAM_BOT_TOKEN`
 - Required secret: `CLIENT_BOT_TOKEN` for the separate online-booking bot
-- Required secret: `GEMINI_API_KEY` for the client-bot AI assistant
+- Required secret: `OPENAI_API_KEY` for the client-bot AI assistant (`gpt-4o-mini`)
 - Google credential: `service_account.json` or protected `GOOGLE_SERVICE_ACCOUNT_JSON`
 - Optional env: `SPREADSHEET_NAME`, `SERVICE_ACCOUNT_FILE`, `LOG_LEVEL`
 

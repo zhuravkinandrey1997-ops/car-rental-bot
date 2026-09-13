@@ -95,8 +95,8 @@ logger = logging.getLogger("car-rental-bot")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CLIENT_BOT_TOKEN = os.getenv("CLIENT_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.0-flash"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = "gpt-4o-mini"
 NOTIFY_MANAGERS = [661842368, 952125424, 1574781782]
 PARTNER_ID = 226694751
 PARTNER_CAR_KEYWORD = "Dodge"
@@ -3868,46 +3868,39 @@ def _client_ai_fleet_context(cars: list[dict]) -> str:
     )
 
 
-def _gemini_generate_content(prompt: str) -> str:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not configured.")
-    endpoint = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    )
+def _openai_generate_content(prompt: str) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+    endpoint = "https://api.openai.com/v1/chat/completions"
     body = {
-        "systemInstruction": {
-            "parts": [{"text": CLIENT_AI_SYSTEM_PROMPT}],
-        },
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt}],
-            }
+        "model": OPENAI_MODEL,
+        "messages": [
+            {"role": "system", "content": CLIENT_AI_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
         ],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": 8192,
-        },
+        "temperature": 0.2,
+        "max_tokens": 8192,
     }
     request = Request(
         endpoint,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
     try:
         with urlopen(request, timeout=30) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise RuntimeError("Gemini request failed.") from exc
+        raise RuntimeError("OpenAI request failed.") from exc
 
-    candidates = payload.get("candidates") or []
-    first_candidate = candidates[0] if candidates else {}
-    parts = first_candidate.get("content", {}).get("parts", [])
-    text = parts[0].get("text", "") if parts else ""
+    choices = payload.get("choices") or []
+    first_choice = choices[0] if choices else {}
+    text = first_choice.get("message", {}).get("content", "")
     if not isinstance(text, str) or not text.strip():
-        raise RuntimeError("Gemini returned an empty response.")
+        raise RuntimeError("OpenAI returned an empty response.")
     return text.strip()
 
 
@@ -3921,7 +3914,7 @@ async def client_ai_message(message: Message, state: FSMContext) -> None:
         cars = await asyncio.to_thread(get_active_cars)
         fleet_context = _client_ai_fleet_context(cars)
         answer = await asyncio.to_thread(
-            _gemini_generate_content,
+            _openai_generate_content,
             f"{fleet_context}\n\nВопрос клиента:\n{prompt}",
         )
     except Exception:
