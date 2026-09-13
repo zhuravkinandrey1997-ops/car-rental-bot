@@ -1,14 +1,21 @@
 import unittest
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+import gspread
+import requests
 
 import sheets_client
 
 
-class _QuotaError(Exception):
-    def __init__(self, status_code: int = 429):
-        super().__init__("temporary quota failure")
-        self.response = SimpleNamespace(status_code=status_code)
+def _api_error(status_code: int) -> gspread.exceptions.APIError:
+    response = requests.Response()
+    response.status_code = status_code
+    response._content = (
+        '{"error":{"code":%s,"message":"temporary Sheets failure",'
+        '"status":"UNAVAILABLE"}}' % status_code
+    ).encode()
+    response.url = "https://sheets.googleapis.com/v4/spreadsheets/test"
+    return gspread.exceptions.APIError(response)
 
 
 class _RuntimeWorksheet:
@@ -28,26 +35,45 @@ class _RuntimeWorksheet:
         del kwargs
         self.append_calls += 1
         if self.append_mode == "fail_before_write" and self.append_calls == 1:
-            raise _QuotaError()
+            raise _api_error(503)
         self.values.append(list(row))
         if self.append_mode == "fail_after_write" and self.append_calls == 1:
-            raise _QuotaError()
+            raise _api_error(503)
 
 
 class SheetsRuntimeRetryTest(unittest.TestCase):
-    def test_runtime_retry_retries_transient_failure_once(self):
-        operation = Mock(
-            side_effect=[_QuotaError(), "ready"],
-        )
-        with patch.object(sheets_client.time, "sleep") as sleep:
-            result = sheets_client._retry_runtime_operation(
-                operation,
-                "reading test data",
-            )
+    def test_runtime_retry_retries_all_transient_gspread_api_statuses(self):
+        for status_code in (408, 429, 500, 502, 503, 504):
+            with self.subTest(status_code=status_code):
+                operation = Mock(
+                    side_effect=[_api_error(status_code), "ready"],
+                )
+                with patch.object(sheets_client.time, "sleep") as sleep:
+                    result = sheets_client._retry_runtime_operation(
+                        operation,
+                        "reading test data",
+                    )
 
-        self.assertEqual(result, "ready")
-        self.assertEqual(operation.call_count, 2)
-        sleep.assert_called_once_with(1)
+                self.assertEqual(result, "ready")
+                self.assertEqual(operation.call_count, 2)
+                sleep.assert_called_once_with(1)
+
+    def test_runtime_retry_recovers_from_real_network_errors(self):
+        for failure in (
+            requests.exceptions.Timeout("request timed out"),
+            requests.exceptions.ConnectionError("connection reset"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                operation = Mock(side_effect=[failure, "ready"])
+                with patch.object(sheets_client.time, "sleep") as sleep:
+                    result = sheets_client._retry_runtime_operation(
+                        operation,
+                        "reading test data",
+                    )
+
+                self.assertEqual(result, "ready")
+                self.assertEqual(operation.call_count, 2)
+                sleep.assert_called_once_with(1)
 
     def test_runtime_retry_does_not_retry_permanent_failure(self):
         failure = ValueError("invalid data")
@@ -92,8 +118,24 @@ class SheetsRuntimeRetryTest(unittest.TestCase):
         self.assertEqual(len(worksheet.values), 2)
         sleep.assert_called_once_with(1)
 
+    def test_runtime_retry_stops_after_bounded_attempts(self):
+        failure = _api_error(503)
+        operation = Mock(side_effect=failure)
+        with patch.object(sheets_client.time, "sleep") as sleep:
+            with self.assertRaises(gspread.exceptions.APIError) as raised:
+                sheets_client._retry_runtime_operation(
+                    operation,
+                    "reading test data",
+                )
+
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(operation.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        sleep.assert_any_call(1)
+        sleep.assert_any_call(3)
+
     def test_runtime_failure_hint_does_not_expose_raw_error(self):
-        failure = _QuotaError()
+        failure = _api_error(429)
         failure.secret = "do-not-display"
 
         hint = sheets_client.sheets_operation_failure_hint(failure)
