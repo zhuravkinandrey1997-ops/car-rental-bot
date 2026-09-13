@@ -56,7 +56,6 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             [
                 "🏎 Автопарк и цены",
                 "📅 Забронировать онлайн",
-                "✈️ Подача в Пулково",
                 "📋 Условия и залог",
                 "👤 Связь с менеджером",
             ],
@@ -198,6 +197,33 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             "🔥 Скидка за срок аренды: экономия 4 500 RUB!",
         )
 
+    def test_client_delivery_step_uses_readable_html_blocks(self):
+        text = main._client_delivery_step_text(
+            {
+                "Марка и Модель": "Jaguar F-Type",
+                "Год": "2020",
+            },
+            "2026-09-15",
+            "2026-09-18",
+            3,
+            23_500,
+            70_500,
+            4_500,
+        )
+        self.assertIn("🏎 <b>Jaguar F-Type</b> (2020 г.)", text)
+        self.assertIn("📅 <b>Период аренды:</b>", text)
+        self.assertIn("• с 15.09.2026 по 18.09.2026 (3 сут.)", text)
+        self.assertIn("💰 <b>Финансовый расчет:</b>", text)
+        self.assertIn("• Суточный тариф: <b>23 500 ₽/сут</b>", text)
+        self.assertIn("• Общая сумма: <b>70 500 ₽</b>", text)
+        self.assertIn(
+            "🔥 <i>Скидка за срок аренды составила: 4 500 ₽</i>",
+            text,
+        )
+        self.assertTrue(text.endswith(
+            "📍 <b>Шаг 3 из 5.</b> Выберите способ получения автомобиля:"
+        ))
+
     def test_payment_instruction_contains_official_details_and_receipt_requirement(self):
         instruction = main._client_payment_instruction(30_900)
         self.assertIn("Банк: Сбербанк", instruction)
@@ -216,10 +242,10 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             labels,
             [
-                "✈️ Подача в Пулково (+ 3 000 RUB)",
-                "📍 Доставка по адресу (+ 3 000 RUB)",
+                "✈️ Подача в Пулково (+3 000 ₽)",
+                "📍 Доставка по адресу (+3 000 ₽)",
                 "🏢 Забрать в офисе (Бесплатно)",
-                "❌ Отменить / В меню",
+                "❌ Отменить бронирование",
             ],
         )
 

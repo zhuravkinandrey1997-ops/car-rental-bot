@@ -4342,6 +4342,39 @@ def _client_period_pricing_text(
     return text
 
 
+def _client_delivery_step_text(
+    car: dict,
+    start_date: str,
+    end_date: str,
+    days: int,
+    daily_rate: int,
+    rent_price: int,
+    savings: int,
+) -> str:
+    year = _car_year(car)
+    car_title = html.escape(_car_name(car))
+    year_text = f" ({html.escape(year)} г.)" if year else ""
+    savings_line = (
+        f"\n🔥 <i>Скидка за срок аренды составила: "
+        f"{_format_number(savings)} ₽</i>"
+        if savings > 0
+        else ""
+    )
+    return (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏎 <b>{car_title}</b>{year_text}\n\n"
+        "📅 <b>Период аренды:</b>\n"
+        f"• с {format_date_ru(start_date)} по {format_date_ru(end_date)} "
+        f"({days} сут.)\n\n"
+        "💰 <b>Финансовый расчет:</b>\n"
+        f"• Суточный тариф: <b>{_format_number(daily_rate)} ₽/сут</b>\n"
+        f"• Общая сумма: <b>{_format_number(rent_price)} ₽</b>"
+        f"{savings_line}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📍 <b>Шаг 3 из 5.</b> Выберите способ получения автомобиля:"
+    )
+
+
 async def _finish_client_booking_dates(
     message: Message,
     state: FSMContext,
@@ -4427,10 +4460,16 @@ async def _finish_client_booking_dates(
         return
     await state.set_state(ClientBookingState.delivery)
     await message.answer(
-        f"{pricing_text}\n"
-        f"Автомобиль: {_car_name(car)}\n"
-        "\n"
-        "Шаг 3 из 5. Выберите способ получения:",
+        _client_delivery_step_text(
+            car,
+            start_date,
+            end_date,
+            days,
+            daily_rate,
+            rent_price,
+            savings,
+        ),
+        parse_mode="HTML",
         reply_markup=client_delivery_keyboard(),
     )
 
