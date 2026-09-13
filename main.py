@@ -989,10 +989,9 @@ def client_welcome_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📅 Забронировать онлайн"),
             ],
             [
-                KeyboardButton(text="✈️ Подача в Пулково"),
                 KeyboardButton(text="📋 Условия и залог"),
+                KeyboardButton(text="👤 Связь с менеджером"),
             ],
-            [KeyboardButton(text="👤 Связь с менеджером")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -1097,13 +1096,13 @@ def client_delivery_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✈️ Подача в Пулково (+ 3 000 RUB)",
+                    text="✈️ Подача в Пулково (+3 000 ₽)",
                     callback_data="client_delivery:airport",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="📍 Доставка по адресу (+ 3 000 RUB)",
+                    text="📍 Доставка по адресу (+3 000 ₽)",
                     callback_data="client_delivery:address",
                 )
             ],
@@ -1115,7 +1114,7 @@ def client_delivery_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="❌ Отменить / В меню",
+                    text="❌ Отменить бронирование",
                     callback_data="client_booking:cancel",
                 )
             ],
