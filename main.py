@@ -8,15 +8,12 @@ import csv
 import datetime
 import html
 import io
-import json
 import logging
 import math
 import os
 import re
 from contextlib import suppress
 from urllib.parse import quote, unquote
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, Dispatcher, F
@@ -95,8 +92,6 @@ logger = logging.getLogger("car-rental-bot")
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CLIENT_BOT_TOKEN = os.getenv("CLIENT_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = "gpt-4o-mini"
 NOTIFY_MANAGERS = [661842368, 952125424, 1574781782]
 PARTNER_ID = 226694751
 PARTNER_CAR_KEYWORD = "Dodge"
@@ -111,35 +106,32 @@ CLIENT_PAYMENT_BANK = "Сбербанк"
 CLIENT_PAYMENT_PHONE = "+79110326262"
 CLIENT_PAYMENT_RECIPIENT = "Лунева К.Д."
 SOURCE_SELECTION_PROMPT = "От чьего имени оформляется операция?"
-CLIENT_AI_SYSTEM_PROMPT = """Ты — премиальный консьерж автопроката Leon Rental
-в Санкт-Петербурге.
-
-Отвечай на русском языке вежливо, уверенно, делово и лаконично.
-Источник общих сведений: https://leon-rental.ru/ru/contacts
-
-Правила компании:
-- География: Санкт-Петербург и Ленинградская область; выезд в другие регионы
-  только по предварительному согласованию.
-- Режим работы: круглосуточно, 7 дней в неделю (24/7).
-- Подача и возврат: круглосуточная доставка по Санкт-Петербургу и в аэропорт
-  Пулково.
-- Требования к арендатору: возраст от 21 года, стаж вождения от 2 лет,
-  паспорт РФ и водительское удостоверение.
-- Страховой депозит обязателен для каждого автомобиля и возвращается после
-  проверки штрафов.
-- Лимит суточного пробега уточняй у менеджера; стандартный лимит действует с
-  доплатой за перепробег.
-- Телефон для связи: +7 (911) 215-56-62.
-- Реквизиты предоплаты: только Сбербанк, +79110326262.
-- Стоимость доставки: офис — бесплатно, аэропорт Пулково или адрес в СПб —
-  3 000 RUB.
-
-Автомобили и суточные цены бери только из актуального списка листа
-«Автомобили» Google Таблицы, переданного в контексте запроса. Не выдумывай
-автомобили, цены, наличие или другие условия. Если нужной информации нет в
-контексте, честно скажи, что её нужно уточнить у менеджера.
-Для онлайн-бронирования предложи клиенту воспользоваться кнопкой под ответом.
-"""
+CLIENT_FAQ_RULES = (
+    (
+        ("залог", "депозит", "возврат"),
+        "Страховой депозит обязателен для каждого автомобиля, зависит от выбранной модели и возвращается в полном объеме после проверки штрафов.",
+    ),
+    (
+        ("возраст", "стаж", "требования", "документы", "условия"),
+        "Требования к арендатору: возраст от 21 года, водительский стаж от 2 лет. Для оформления требуются паспорт РФ и водительское удостоверение.",
+    ),
+    (
+        ("пулково", "аэропорт", "доставка", "подача", "адрес"),
+        "Доставка автомобилей по Санкт-Петербургу и встреча в аэропорту Пулково осуществляются круглосуточно (24/7). Стоимость и время подачи согласовываются при оформлении.",
+    ),
+    (
+        ("авто", "машины", "наличие", "свободные", "прайс", "цены"),
+        "Актуальный автопарк и занятость синхронизируются в реальном времени. Нажмите кнопку ниже, чтобы открыть каталог и выбрать свободный автомобиль на ваши даты.",
+    ),
+    (
+        ("оплата", "реквизиты", "перевод", "сбер"),
+        "Официальные реквизиты для бронирования и депозита: Сбербанк +79110326262.",
+    ),
+)
+CLIENT_FAQ_FALLBACK = (
+    "С удовольствием проконсультируем вас индивидуально! Напишите нашему менеджеру "
+    "@leonRentalSPB или позвоните: +7 (911) 215-56-62."
+)
 
 MONTH_NAMES = (
     "Январь",
@@ -3848,60 +3840,12 @@ async def client_ai_booking_callback(
     await start_client_booking(callback.message, state)
 
 
-def _client_ai_fleet_context(cars: list[dict]) -> str:
-    if not cars:
-        return (
-            "Актуальный список активных автомобилей сейчас не получен. "
-            "Не перечисляй автомобили и не называй цены."
-        )
-    lines = []
-    for car in cars:
-        name = _car_name(car).strip()
-        rate = _car_daily_rate(car).strip()
-        if name:
-            lines.append(
-                f"- {name}: {rate or 'суточный тариф не указан'} RUB/сутки"
-            )
-    return (
-        "Актуальный список активных автомобилей из листа «Автомобили»:\n"
-        + ("\n".join(lines) if lines else "список пуст")
-    )
-
-
-def _openai_generate_content(prompt: str) -> str:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY is not configured.")
-    endpoint = "https://api.openai.com/v1/chat/completions"
-    body = {
-        "model": OPENAI_MODEL,
-        "messages": [
-            {"role": "system", "content": CLIENT_AI_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 8192,
-    }
-    request = Request(
-        endpoint,
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-        raise RuntimeError("OpenAI request failed.") from exc
-
-    choices = payload.get("choices") or []
-    first_choice = choices[0] if choices else {}
-    text = first_choice.get("message", {}).get("content", "")
-    if not isinstance(text, str) or not text.strip():
-        raise RuntimeError("OpenAI returned an empty response.")
-    return text.strip()
+def _client_local_faq_response(prompt: str) -> str:
+    normalized_prompt = prompt.casefold()
+    for keywords, response in CLIENT_FAQ_RULES:
+        if any(keyword in normalized_prompt for keyword in keywords):
+            return response
+    return CLIENT_FAQ_FALLBACK
 
 
 async def client_ai_message(message: Message, state: FSMContext) -> None:
@@ -3910,23 +3854,9 @@ async def client_ai_message(message: Message, state: FSMContext) -> None:
     prompt = (message.text or "").strip()
     if not prompt:
         return
-    try:
-        cars = await asyncio.to_thread(get_active_cars)
-        fleet_context = _client_ai_fleet_context(cars)
-        answer = await asyncio.to_thread(
-            _openai_generate_content,
-            f"{fleet_context}\n\nВопрос клиента:\n{prompt}",
-        )
-    except Exception:
-        logger.exception("Could not answer client AI message")
-        await message.answer(
-            "Сейчас не удалось получить ответ ассистента. "
-            "Позвоните нам: +7 (911) 215-56-62.",
-            reply_markup=client_ai_booking_keyboard(),
-        )
-        return
+    answer = _client_local_faq_response(prompt)
     await message.answer(
-        answer[:3900],
+        answer,
         reply_markup=client_ai_booking_keyboard(),
     )
 
