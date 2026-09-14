@@ -76,6 +76,21 @@ class _BookingState:
 
 
 class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_client_rules_uses_structured_html_and_persistent_menu(self):
+        message = _FakeMessage()
+        state = _FakeState()
+
+        await main.client_rules_handler(message, state)
+
+        self.assertEqual(state.clear_calls, 1)
+        text, kwargs = message.answers[-1]
+        self.assertIn("📋 <b>Условия аренды в Leon Rental</b>", text)
+        self.assertIn("Аренда доступна <b>с 18 лет</b>", text)
+        self.assertIn("250 км/сутки", text)
+        self.assertIn("«👤 Связь с менеджером»", text)
+        self.assertEqual(kwargs["parse_mode"], "HTML")
+        self.assertIs(kwargs["reply_markup"].__class__, main.ReplyKeyboardMarkup)
+
     def test_client_welcome_keyboard_has_persistent_public_menu(self):
         buttons = [
             button.text
