@@ -210,6 +210,10 @@ class ClientBookingState(StatesGroup):
     confirmation = State()
 
 
+class ManagerContactState(StatesGroup):
+    waiting_for_contact = State()
+
+
 class OccupancyForm(StatesGroup):
     car = State()
     calendar = State()
@@ -1160,6 +1164,22 @@ def client_contact_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📱 Отправить контакт", request_contact=True)],
             [KeyboardButton(text="Ввести Telegram username")],
             [KeyboardButton(text="❌ Отменить / В меню")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def manager_contact_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(
+                    text="📱 Отправить мой номер телефона",
+                    request_contact=True,
+                )
+            ],
+            [KeyboardButton(text="❌ Отмена")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
@@ -3108,6 +3128,45 @@ async def _notify_manager_contact_request(
         except Exception:
             logger.exception(
                 "Could not send manager contact request to chat %s",
+                chat_id,
+            )
+
+
+async def _notify_manager_contact_submission(
+    message: Message,
+    contact_data: str,
+    fleet_bot: Bot | None,
+) -> None:
+    if fleet_bot is None or message.from_user is None:
+        logger.warning(
+            "Manager contact submission could not be delivered: "
+            "fleet bot or client is missing"
+        )
+        return
+    user = message.from_user
+    username = getattr(user, "username", None)
+    username_text = f"@{username}" if username else "не указан"
+    full_name = getattr(user, "full_name", None) or "Не указано"
+    moscow_now = datetime.datetime.now(NOTIFICATION_TZ)
+    notification = (
+        "🔔 <b>ЗАПРОС СВЯЗИ С МЕНЕДЖЕРОМ!</b>\n\n"
+        "Клиент ждёт консультации:\n"
+        f"• <b>Имя:</b> {html.escape(str(full_name))}\n"
+        f"• <b>Контакт:</b> <code>{html.escape(contact_data)}</code>\n"
+        f"• <b>Telegram:</b> {html.escape(username_text)} "
+        f"(ID: <code>{user.id}</code>)\n"
+        f"• <b>Время:</b> {moscow_now.strftime('%d.%m.%Y %H:%M')} МСК"
+    )
+    for chat_id in await _booking_notification_ids():
+        try:
+            await fleet_bot.send_message(
+                chat_id=chat_id,
+                text=notification,
+                parse_mode="HTML",
+            )
+        except Exception:
+            logger.exception(
+                "Could not send manager contact submission to chat %s",
                 chat_id,
             )
 
@@ -5138,14 +5197,15 @@ async def client_manager_handler(
     state: FSMContext,
     bot: Bot | None = None,
 ) -> None:
-    await state.clear()
-    await asyncio.gather(
-        message.answer(
-            "Наш менеджер поможет подобрать автомобиль и оформить аренду.\n"
-            "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
-            reply_markup=client_welcome_keyboard(),
-        ),
-        _notify_manager_contact_request(message, bot),
+    await state.set_state(ManagerContactState.waiting_for_contact)
+    await message.answer(
+        "📞 <b>Связь с менеджером Leon Rental</b>\n\n"
+        "Пожалуйста, введите ваш <b>номер телефона</b> или "
+        "<b>Telegram-username</b> (например, @username), чтобы менеджер "
+        "мог с вами связаться:\n\n"
+        "<i>Вы также можете отправить номер одной кнопкой ниже:</i>",
+        parse_mode="HTML",
+        reply_markup=manager_contact_keyboard(),
     )
 
 
@@ -5419,15 +5479,67 @@ async def client_manager_handler(
     state: FSMContext,
     bot: Bot | None = None,
 ) -> None:
-    await state.clear()
-    await asyncio.gather(
-        message.answer(
-            "Наш менеджер поможет подобрать автомобиль и оформить аренду.\n"
-            "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
-            reply_markup=client_welcome_keyboard(),
-        ),
-        _notify_manager_contact_request(message, bot),
+    await state.set_state(ManagerContactState.waiting_for_contact)
+    await message.answer(
+        "📞 <b>Связь с менеджером Leon Rental</b>\n\n"
+        "Пожалуйста, введите ваш <b>номер телефона</b> или "
+        "<b>Telegram-username</b> (например, @username), чтобы менеджер "
+        "мог с вами связаться:\n\n"
+        "<i>Вы также можете отправить номер одной кнопкой ниже:</i>",
+        parse_mode="HTML",
+        reply_markup=manager_contact_keyboard(),
     )
+
+
+async def client_manager_contact_input(
+    message: Message,
+    state: FSMContext,
+    fleet_bot: Bot | None,
+) -> None:
+    text = (message.text or "").strip()
+    if text.casefold() in {"отмена", "❌ отмена", "❌ отменить / в меню"}:
+        await state.clear()
+        await message.answer(
+            "Вы вернулись в главное меню.",
+            reply_markup=client_welcome_keyboard(),
+        )
+        return
+
+    contact_data = (
+        message.contact.phone_number
+        if message.contact is not None
+        else text
+    )
+    contact_data = (contact_data or "").strip()
+    if len(contact_data) < 3:
+        await message.answer(
+            "Введите номер телефона или Telegram-username, "
+            "либо нажмите «📱 Отправить мой номер телефона».",
+            reply_markup=manager_contact_keyboard(),
+        )
+        return
+
+    user = message.from_user
+    if user is None:
+        await message.answer(
+            "Не удалось определить Telegram-пользователя. Попробуйте ещё раз."
+        )
+        return
+    try:
+        await message.answer(
+            "✅ <b>Запрос отправлен!</b>\n"
+            "Дежурный менеджер Leon Rental уже получил ваши контакты и "
+            "свяжется с вами в течение 10-15 минут.",
+            parse_mode="HTML",
+            reply_markup=client_welcome_keyboard(),
+        )
+        await _notify_manager_contact_submission(
+            message,
+            contact_data,
+            fleet_bot,
+        )
+    finally:
+        await state.clear()
 
 
 async def client_cancel_flow(message: Message, state: FSMContext) -> None:
@@ -10539,6 +10651,16 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
             admin_bot=admin_bot,
         )
 
+    async def client_manager_contact_handler(
+        message: Message,
+        state: FSMContext,
+    ) -> None:
+        await client_manager_contact_input(
+            message,
+            state,
+            fleet_bot=admin_bot,
+        )
+
     dispatcher.callback_query.register(
         calendar_callback,
         F.data.startswith("calendar:"),
@@ -10608,7 +10730,12 @@ def create_client_dispatcher(admin_bot: Bot) -> Dispatcher:
     )
     dispatcher.message.register(
         client_manager_handler,
-        F.text == "👤 Связь с менеджером",
+        F.text.contains("Связь с менеджером") | (F.text == "👤 Связь с менеджером"),
+    )
+    dispatcher.message.register(
+        client_manager_contact_handler,
+        ManagerContactState.waiting_for_contact,
+        F.contact | F.text,
     )
     dispatcher.message.register(
         client_cancel_flow,
