@@ -26,9 +26,13 @@ class _BookingsSheet:
 class _FakeState:
     def __init__(self):
         self.clear_calls = 0
+        self.current_state = None
 
     async def clear(self):
         self.clear_calls += 1
+
+    async def set_state(self, state):
+        self.current_state = state.state
 
 
 class _FakeMessage:
@@ -45,6 +49,8 @@ class _FakeMessage:
     def __init__(self):
         self.answers = []
         self.photos = []
+        self.contact = None
+        self.text = None
 
     async def answer(self, text, **kwargs):
         self.answers.append((text, kwargs))
@@ -140,50 +146,91 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_manager_contact_sends_client_message_and_html_notification(self):
+    async def test_manager_contact_starts_contact_fsm_with_html_prompt(self):
         message = _FakeMessage()
         state = _FakeState()
-        bot = SimpleNamespace(send_message=AsyncMock())
+        await main.client_manager_handler(message, state)
+
+        self.assertEqual(
+            state.current_state,
+            main.ManagerContactState.waiting_for_contact.state,
+        )
+        text, kwargs = message.answers[-1]
+        self.assertIn("📞 <b>Связь с менеджером Leon Rental</b>", text)
+        self.assertIn("<b>номер телефона</b>", text)
+        self.assertEqual(kwargs["parse_mode"], "HTML")
+        buttons = [
+            button
+            for row in kwargs["reply_markup"].keyboard
+            for button in row
+        ]
+        self.assertEqual(
+            [button.text for button in buttons],
+            ["📱 Отправить мой номер телефона", "❌ Отмена"],
+        )
+        self.assertTrue(buttons[0].request_contact)
+
+    async def test_manager_contact_submission_notifies_fleet_and_returns_menu(self):
+        message = _FakeMessage()
+        state = _FakeState()
+        message.contact = SimpleNamespace(phone_number="+79112223344")
+        fleet_bot = SimpleNamespace(send_message=AsyncMock())
 
         with patch.object(
             main,
-            "_manager_contact_notification_ids",
+            "_booking_notification_ids",
             new=AsyncMock(return_value=[987654]),
         ):
-            await main.client_manager_handler(message, state, bot)
+            await main.client_manager_contact_input(
+                message,
+                state,
+                fleet_bot,
+            )
 
         self.assertEqual(state.clear_calls, 1)
-        self.assertEqual(
-            message.answers[-1][0],
-            "Наш менеджер поможет подобрать автомобиль и оформить аренду.\n"
-            "Напишите @leonRentalSPB или позвоните: +7 (911) 215-56-62.",
-        )
-        bot.send_message.assert_awaited_once()
-        notification = bot.send_message.await_args.kwargs
+        self.assertIn("✅ <b>Запрос отправлен!</b>", message.answers[-1][0])
+        self.assertEqual(message.answers[-1][1]["parse_mode"], "HTML")
+        self.assertTrue(message.answers[-1][1]["reply_markup"].is_persistent)
+        fleet_bot.send_message.assert_awaited_once()
+        notification = fleet_bot.send_message.await_args.kwargs
         self.assertEqual(notification["chat_id"], 987654)
         self.assertEqual(notification["parse_mode"], "HTML")
-        self.assertIn("🔔 <b>Запрос связи с менеджером!</b>", notification["text"])
-        self.assertIn("• Имя: Иван Иванов", notification["text"])
-        self.assertIn("• Username: @ivan", notification["text"])
-        self.assertIn("• ID клиента: <code>123456</code>", notification["text"])
-        self.assertRegex(notification["text"], r"• Время: \d{2}\.\d{2}\.\d{4} \d{2}:\d{2} МСК")
+        self.assertIn(
+            "🔔 <b>ЗАПРОС СВЯЗИ С МЕНЕДЖЕРОМ!</b>",
+            notification["text"],
+        )
+        self.assertIn("• <b>Имя:</b> Иван Иванов", notification["text"])
+        self.assertIn(
+            "• <b>Контакт:</b> <code>+79112223344</code>",
+            notification["text"],
+        )
+        self.assertIn(
+            "• <b>Telegram:</b> @ivan (ID: <code>123456</code>)",
+            notification["text"],
+        )
+        self.assertRegex(
+            notification["text"],
+            r"• <b>Время:</b> \d{2}\.\d{2}\.\d{4} \d{2}:\d{2} МСК",
+        )
 
-    async def test_manager_contact_survives_manager_send_error(self):
+    async def test_manager_contact_submission_survives_manager_send_error(self):
         message = _FakeMessage()
         state = _FakeState()
-        bot = SimpleNamespace(
+        message.text = "@ivan"
+        fleet_bot = SimpleNamespace(
             send_message=AsyncMock(side_effect=RuntimeError("blocked by Telegram"))
         )
 
         with patch.object(
             main,
-            "_manager_contact_notification_ids",
+            "_booking_notification_ids",
             new=AsyncMock(return_value=[987654]),
         ):
-            await main.client_manager_handler(message, state, bot)
+            await main.client_manager_contact_input(message, state, fleet_bot)
 
         self.assertEqual(len(message.answers), 1)
-        self.assertIn("Наш менеджер поможет подобрать автомобиль", message.answers[0][0])
+        self.assertIn("✅ <b>Запрос отправлен!</b>", message.answers[0][0])
+        self.assertEqual(state.clear_calls, 1)
 
     def test_ai_booking_keyboard_has_booking_callback(self):
         button = main.client_ai_booking_keyboard().inline_keyboard[0][0]
@@ -268,6 +315,8 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         await main.client_start_handler(message, state)
         await main.client_cancel_flow(message, state)
         await main.client_manager_handler(message, state)
+        message.text = "❌ Отмена"
+        await main.client_manager_contact_input(message, state, None)
         self.assertEqual(state.clear_calls, 3)
 
     async def test_menu_clears_fsm_before_access_check(self):
