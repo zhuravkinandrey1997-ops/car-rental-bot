@@ -10817,12 +10817,13 @@ async def run_fleet_bot(bot: Bot, client_bot: Bot) -> None:
         logger.exception("Telegram API error")
         raise
     finally:
-        if scheduler.running:
-            with suppress(Exception):
+        with suppress(Exception):
+            if scheduler.running:
                 scheduler.shutdown(wait=False)
-        if catchup_task and not catchup_task.done():
-            catchup_task.cancel()
-            with suppress(asyncio.CancelledError):
+        if catchup_task:
+            if not catchup_task.done():
+                catchup_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
                 await catchup_task
         with suppress(Exception):
             await bot.session.close()

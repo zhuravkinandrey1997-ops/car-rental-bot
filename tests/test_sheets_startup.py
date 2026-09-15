@@ -1213,6 +1213,112 @@ class SheetsStartupTest(unittest.TestCase):
             )
             bot.session.close.assert_awaited_once_with()
 
+    def test_run_fleet_bot_preserves_polling_error_when_cleanup_fails(self):
+        fleet_bot = SimpleNamespace(
+            delete_webhook=AsyncMock(),
+            session=SimpleNamespace(close=AsyncMock()),
+        )
+        scheduler = SimpleNamespace(
+            running=True,
+            start=Mock(),
+            shutdown=Mock(side_effect=RuntimeError("scheduler cleanup failed")),
+        )
+        catchup_started = asyncio.Event()
+        catchup_cancelled = asyncio.Event()
+        polling_error = RuntimeError("fleet polling failed")
+
+        async def catchup(bot):
+            self.assertIs(bot, fleet_bot)
+            catchup_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                catchup_cancelled.set()
+                raise RuntimeError("catch-up cleanup failed")
+
+        class _Dispatcher:
+            async def start_polling(self, bot):
+                assert bot is fleet_bot
+                await catchup_started.wait()
+                raise polling_error
+
+        with (
+            patch.object(main, "TOKEN", "fleet-token"),
+            patch.object(main, "create_notification_scheduler", return_value=scheduler),
+            patch.object(main, "create_dispatcher", return_value=_Dispatcher()),
+            patch.object(main, "send_missed_tomorrow_notifications", side_effect=catchup),
+            patch.object(main, "colorize_existing_booking_rows", return_value=0),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fleet polling failed") as raised:
+                asyncio.run(main.run_fleet_bot(fleet_bot, object()))
+
+        self.assertIs(raised.exception, polling_error)
+        scheduler.start.assert_called_once_with()
+        scheduler.shutdown.assert_called_once_with(wait=False)
+        self.assertTrue(catchup_cancelled.is_set())
+        fleet_bot.delete_webhook.assert_awaited_once_with(
+            drop_pending_updates=True,
+        )
+        fleet_bot.session.close.assert_awaited_once_with()
+
+    def test_run_fleet_bot_cancels_and_awaits_catchup_on_polling_cancellation(self):
+        fleet_bot = SimpleNamespace(
+            delete_webhook=AsyncMock(),
+            session=SimpleNamespace(close=AsyncMock()),
+        )
+        scheduler = SimpleNamespace(
+            running=True,
+            start=Mock(),
+            shutdown=Mock(),
+        )
+        catchup_started = asyncio.Event()
+        catchup_finished = asyncio.Event()
+        catchup_cancelled = asyncio.Event()
+
+        async def catchup(bot):
+            self.assertIs(bot, fleet_bot)
+            catchup_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                catchup_cancelled.set()
+                raise
+            finally:
+                catchup_finished.set()
+
+        class _Dispatcher:
+            async def start_polling(self, bot):
+                assert bot is fleet_bot
+                await catchup_started.wait()
+                await asyncio.Future()
+
+        async def cancel_polling():
+            polling_task = asyncio.create_task(
+                main.run_fleet_bot(fleet_bot, object())
+            )
+            await catchup_started.wait()
+            polling_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await polling_task
+
+        with (
+            patch.object(main, "TOKEN", "fleet-token"),
+            patch.object(main, "create_notification_scheduler", return_value=scheduler),
+            patch.object(main, "create_dispatcher", return_value=_Dispatcher()),
+            patch.object(main, "send_missed_tomorrow_notifications", side_effect=catchup),
+            patch.object(main, "colorize_existing_booking_rows", return_value=0),
+        ):
+            asyncio.run(cancel_polling())
+
+        scheduler.start.assert_called_once_with()
+        scheduler.shutdown.assert_called_once_with(wait=False)
+        self.assertTrue(catchup_cancelled.is_set())
+        self.assertTrue(catchup_finished.is_set())
+        fleet_bot.delete_webhook.assert_awaited_once_with(
+            drop_pending_updates=True,
+        )
+        fleet_bot.session.close.assert_awaited_once_with()
+
     def test_run_bot_propagates_polling_error_without_reordering_startup(self):
         events = []
         fleet_bot = SimpleNamespace(session=SimpleNamespace(close=AsyncMock()))
