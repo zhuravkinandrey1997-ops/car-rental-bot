@@ -1300,6 +1300,62 @@ class SheetsStartupTest(unittest.TestCase):
         fleet_bot.session.close.assert_awaited_once_with()
         client_bot.session.close.assert_awaited_once_with()
 
+    def test_run_bot_cancels_both_polling_processes_on_external_cancellation(self):
+        polling_started = asyncio.Event()
+        started_polling_count = 0
+        cancellation_events = []
+        fleet_bot = SimpleNamespace(session=SimpleNamespace(close=AsyncMock()))
+        client_bot = SimpleNamespace(session=SimpleNamespace(close=AsyncMock()))
+
+        async def wait_for_cancellation(bot, admin_bot):
+            nonlocal started_polling_count
+            expected_bots = {
+                id(fleet_bot): (client_bot, "fleet"),
+                id(client_bot): (fleet_bot, "client"),
+            }
+            expected_admin_bot, polling_name = expected_bots[id(bot)]
+            self.assertIs(admin_bot, expected_admin_bot)
+            started_polling_count += 1
+            if started_polling_count == 2:
+                polling_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancellation_events.append(polling_name)
+                raise
+
+        async def cancel_run_bot():
+            run_task = asyncio.create_task(main.run_bot())
+            await polling_started.wait()
+            run_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await run_task
+
+            self.assertCountEqual(cancellation_events, ["fleet", "client"])
+            fleet_bot.session.close.assert_awaited_once_with()
+            client_bot.session.close.assert_awaited_once_with()
+
+        with (
+            patch.object(main, "TOKEN", "fleet-token"),
+            patch.object(main, "CLIENT_BOT_TOKEN", "client-token"),
+            patch.object(main, "ensure_sheets_ready"),
+            patch.object(main, "Bot", side_effect=[fleet_bot, client_bot]),
+            patch.object(
+                main,
+                "run_fleet_bot",
+                side_effect=wait_for_cancellation,
+            ) as run_fleet_bot,
+            patch.object(
+                main,
+                "run_client_bot",
+                side_effect=wait_for_cancellation,
+            ) as run_client_bot,
+        ):
+            asyncio.run(cancel_run_bot())
+
+        run_fleet_bot.assert_awaited_once_with(fleet_bot, client_bot)
+        run_client_bot.assert_awaited_once_with(client_bot, fleet_bot)
+
 
 if __name__ == "__main__":
     unittest.main()
