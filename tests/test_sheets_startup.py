@@ -1,4 +1,5 @@
 import asyncio
+from collections import Counter
 from copy import deepcopy
 import unittest
 from types import SimpleNamespace
@@ -208,6 +209,193 @@ def _patch_startup_worksheets():
 
 
 class SheetsStartupTest(unittest.TestCase):
+    def test_sequential_dispatcher_starts_register_each_handler_once(self):
+        fleet_dispatchers = [
+            main.create_dispatcher(client_bot=object()),
+            main.create_dispatcher(client_bot=object()),
+        ]
+        client_dispatchers = [
+            main.create_client_dispatcher(admin_bot=object()),
+            main.create_client_dispatcher(admin_bot=object()),
+        ]
+
+        expected_fleet_callbacks = [
+            "calendar_callback",
+            "payment_method_callback",
+            "cleanliness_callback",
+            "booking_delivery_callback",
+            "issuance_date_callback",
+            "direct_issuance_car_confirmation",
+            "direct_deposit_callback",
+            "time_mileage_penalty_callback",
+            "rental_total_callback",
+            "confirm_return_save_callback",
+            "cancel_return_callback",
+            "overdue_return_callback",
+            "overdue_extend_callback",
+            "handover_car_callback",
+            "expense_category_callback",
+            "expense_cancel_select_callback",
+            "financial_month_callback",
+            "financial_report_type_callback",
+            "financial_car_toggle_callback",
+            "financial_car_calculate_callback",
+            "expense_history_month_callback",
+            "expense_history_filter_callback",
+            "expense_history_car_callback",
+            "expense_history_export_callback",
+            "cancellation_booking_callback",
+            "cancellation_confirmation_callback",
+            "cancellation_deposit_callback",
+            "admin_booking_callback_handler",
+        ]
+        expected_fleet_messages = [
+            "start_handler",
+            "show_menu",
+            "sheets_status_handler",
+            "cancel_flow",
+            "cancel_flow",
+            "partner_bookings",
+            "partner_status",
+            "partner_expenses",
+            "start_availability",
+            "start_booking",
+            "start_booking",
+            "start_issuance",
+            "list_active_rentals",
+            "start_return",
+            "start_return",
+            "start_occupancy",
+            "start_occupancy",
+            "start_cancellation",
+            "start_expense",
+            "start_expense_cancellation",
+            "start_financial_report",
+            "start_expense_history",
+            "availability_start_date",
+            "availability_end_date",
+            "booking_start_date",
+            "booking_end_date",
+            "issuance_mode_selection",
+            "issue_time",
+            "direct_end_date",
+            "issuance_booking",
+            "booking_car",
+            "booking_client_name",
+            "booking_phone",
+            "booking_delivery_address",
+            "booking_delivery_price",
+            "booking_price",
+            "booking_prepayment",
+            "booking_start_mileage",
+            "booking_deposit",
+            "booking_confirmation",
+            "occupancy_car",
+            "cancellation_car",
+            "cancellation_reason",
+            "booking_source_selection",
+            "return_source_selection",
+            "return_booking",
+            "overdue_extension_input",
+            "return_end_mileage",
+            "return_fuel_level",
+            "return_wash_fee",
+            "return_extra_fee",
+            "return_manual_penalty",
+            "rental_total_override_input",
+            "return_rental_paid",
+            "return_rental_pay_type",
+            "return_total_paid",
+            "return_pay_type",
+            "return_notes",
+            "return_confirmation",
+            "expense_amount",
+            "expense_vehicle",
+            "expense_note",
+            "expense_confirmation",
+            "expense_cancel_confirmation",
+            "unknown_message",
+            "unknown_message",
+            "unknown_message",
+            "unknown_message",
+        ]
+        expected_client_callbacks = [
+            "calendar_callback",
+            "client_calendar_callback",
+            "client_delivery_callback",
+            "client_booking_car_callback",
+            "client_booking_confirm_callback",
+            "client_booking_deposit_callback",
+            "client_manager_booking_handler",
+            "client_booking_cancel_callback",
+            "client_pulkovo_booking_callback",
+            "client_ai_booking_callback",
+            "client_ai_booking_callback",
+        ]
+        expected_client_messages = [
+            "client_start_handler",
+            "client_start_handler",
+            "start_client_booking",
+            "start_client_booking",
+            "client_pulkovo_handler",
+            "client_rules_handler",
+            "client_manager_handler",
+            "client_fleet_handler",
+            "start_client_booking",
+            "client_pulkovo_handler",
+            "client_rules_handler",
+            "client_manager_handler",
+            "client_manager_contact_handler",
+            "client_cancel_flow",
+            "client_cancel_flow",
+            "client_booking_date_text",
+            "client_booking_date_text",
+            "client_booking_name",
+            "client_delivery_address",
+            "client_booking_phone",
+            "client_receipt_handler",
+            "client_ai_message",
+        ]
+
+        def callback_names(handlers):
+            return [
+                getattr(handler.callback, "__name__", type(handler.callback).__name__)
+                for handler in handlers
+            ]
+
+        for dispatcher in fleet_dispatchers:
+            self.assertEqual(
+                callback_names(dispatcher.callback_query.handlers),
+                expected_fleet_callbacks,
+            )
+            self.assertEqual(
+                callback_names(dispatcher.message.handlers),
+                expected_fleet_messages,
+            )
+            self.assertEqual(len(dispatcher.errors.handlers), 1)
+
+        for dispatcher in client_dispatchers:
+            self.assertEqual(
+                callback_names(dispatcher.callback_query.handlers),
+                expected_client_callbacks,
+            )
+            self.assertEqual(
+                callback_names(dispatcher.message.handlers),
+                expected_client_messages,
+            )
+            self.assertEqual(len(dispatcher.errors.handlers), 1)
+
+        self.assertIsNot(fleet_dispatchers[0], fleet_dispatchers[1])
+        self.assertIsNot(client_dispatchers[0], client_dispatchers[1])
+        self.assertEqual(
+            Counter(callback_names(fleet_dispatchers[0].message.handlers)),
+            Counter(callback_names(fleet_dispatchers[1].message.handlers)),
+        )
+        self.assertEqual(
+            Counter(callback_names(client_dispatchers[0].message.handlers)),
+            Counter(callback_names(client_dispatchers[1].message.handlers)),
+        )
+
     def test_cached_worksheet_does_not_refresh_metadata(self):
         spreadsheet = _Spreadsheet(_startup_worksheets("Автомобили", "Менеджеры"))
         cache = {
