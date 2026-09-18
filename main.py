@@ -44,6 +44,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 
+from keep_alive import keep_alive, stop_keep_alive
 from sheets_client import (
     add_expense,
     add_new_booking,
@@ -10850,25 +10851,29 @@ async def run_bot() -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured.")
     if not CLIENT_BOT_TOKEN:
         raise RuntimeError("CLIENT_BOT_TOKEN is not configured.")
-    ensure_sheets_ready()
-    fleet_bot = Bot(token=TOKEN)
-    client_bot = Bot(token=CLIENT_BOT_TOKEN)
-    polling_tasks = (
-        asyncio.create_task(run_fleet_bot(fleet_bot, client_bot)),
-        asyncio.create_task(run_client_bot(client_bot, fleet_bot)),
-    )
+    keep_alive_handle = keep_alive()
     try:
-        await asyncio.gather(*polling_tasks)
-    except BaseException:
-        for polling_task in polling_tasks:
-            if not polling_task.done():
-                polling_task.cancel()
-        await asyncio.gather(*polling_tasks, return_exceptions=True)
-        raise
+        ensure_sheets_ready()
+        fleet_bot = Bot(token=TOKEN)
+        client_bot = Bot(token=CLIENT_BOT_TOKEN)
+        polling_tasks = (
+            asyncio.create_task(run_fleet_bot(fleet_bot, client_bot)),
+            asyncio.create_task(run_client_bot(client_bot, fleet_bot)),
+        )
+        try:
+            await asyncio.gather(*polling_tasks)
+        except BaseException:
+            for polling_task in polling_tasks:
+                if not polling_task.done():
+                    polling_task.cancel()
+            await asyncio.gather(*polling_tasks, return_exceptions=True)
+            raise
+        finally:
+            for bot in (fleet_bot, client_bot):
+                with suppress(Exception):
+                    await bot.session.close()
     finally:
-        for bot in (fleet_bot, client_bot):
-            with suppress(Exception):
-                await bot.session.close()
+        stop_keep_alive(keep_alive_handle)
 
 
 def main() -> None:
