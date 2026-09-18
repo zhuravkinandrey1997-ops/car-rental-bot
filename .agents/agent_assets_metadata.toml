@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "ji20JoRDARKbaSLQasqGW"
+uri = "file://exports/leon-rental-project-safe.zip"
+type = "unspecified"
+title = "Leon Rental project archive"
+description = "Безопасный архив исходников, тестов, скриптов, assets и конфигурационных шаблонов. Credential-файлы намеренно исключены; внутри есть CONFIGURATION_NOT_INCLUDED.md и requirements.txt."
+logical_id = "16708222-6f42-425c-a79b-728f47a9ac01"
+content_hash = "sha256:f697f1eff2c4fa95a43287d118b6b720829f7c598c6384613f4a0f177b812437"
+size = 7673334
+mtime_ms = 1789717955231
+storage_uri = "gcs://replit-rams-assets-reed/rams/assets/repl:b9cac1e2-f9b6-4fc5-88ee-ba63c17bec80/16708222-6f42-425c-a79b-728f47a9ac01/3841d478-40d2-4de5-9298-e6b3e9ef3b53"
+storage_version_token = "1789717960391646"
+content_type = "application/octet-stream"
