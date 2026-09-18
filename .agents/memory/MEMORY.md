@@ -21,3 +21,4 @@
 - [Worksheet conflict recovery](worksheet-conflict-recovery.md) — preserve the selected sheet and archive the other under explicit confirmation; never delete or merge silently.
 - [Heavy Lux partner boundary](heavy-lux-partner-mode.md) — partner_heavy_lux uses heavy_lux_cr and sees only operational data and FSM steps.
 - [Tiered rental pricing](tiered-rental-pricing.md) — client booking days use date difference with a same-day minimum and select the matching tariff column.
+- [Keep-alive port ownership](keep-alive-port-conflict.md) — the Telegram health server owns port 8080; the separate API workflow must stay stopped to avoid a bind conflict.

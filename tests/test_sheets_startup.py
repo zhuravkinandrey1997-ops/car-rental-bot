@@ -209,6 +209,24 @@ def _patch_startup_worksheets():
 
 
 class SheetsStartupTest(unittest.TestCase):
+    def setUp(self):
+        self.keep_alive_handle = object()
+        self.keep_alive_patcher = patch.object(
+            main,
+            "keep_alive",
+            return_value=self.keep_alive_handle,
+        )
+        self.stop_keep_alive_patcher = patch.object(
+            main,
+            "stop_keep_alive",
+        )
+        self.keep_alive_mock = self.keep_alive_patcher.start()
+        self.stop_keep_alive_mock = self.stop_keep_alive_patcher.start()
+
+    def tearDown(self):
+        self.stop_keep_alive_patcher.stop()
+        self.keep_alive_patcher.stop()
+
     def test_sequential_dispatcher_starts_register_each_handler_once(self):
         fleet_dispatchers = [
             main.create_dispatcher(client_bot=object()),
