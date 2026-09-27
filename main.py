@@ -4364,9 +4364,6 @@ def _client_fleet_card_text(car: dict) -> str:
     if engine:
         lines.append(f"• Двигатель: {engine}")
     lines.append(f"• Стоимость: {daily_rate}")
-    tariff_details = _client_car_tariff_details(car)
-    if tariff_details:
-        lines.extend(["• Тарифы:", *tariff_details])
     lines.extend(
         [
             f"• Страховой залог: {deposit_text}",
@@ -4393,10 +4390,6 @@ def _client_fleet_card_caption(car: dict) -> str:
     if engine:
         lines.append(f"• <b>Двигатель:</b> {html.escape(engine)}")
     lines.append(f"• <b>Стоимость:</b> {daily_rate}")
-    tariff_details = _client_car_tariff_details(car)
-    if tariff_details:
-        lines.append("• <b>Тарифы:</b>")
-        lines.extend(html.escape(line) for line in tariff_details)
     lines.extend(
         [
             f"• <b>Страховой залог:</b> {deposit_text}",

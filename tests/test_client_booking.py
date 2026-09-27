@@ -369,20 +369,22 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
             "🔥 Скидка за срок аренды: экономия 4 500 RUB!",
         )
 
-    def test_custom_car_tariffs_use_exact_requested_day_boundaries(self):
+    def test_ford_tariffs_use_shared_sheet_day_boundaries(self):
         car = {
             "Цена / сутки (RUB)": "20000",
-            "Тариф 1-3 дня": "20000",
-            "Тариф 4-7 дней": "18000",
-            "Тариф 8-15 дней": "16000",
-            "Тариф от 16 дней": "14000",
+            "Тариф 1 день": "20000",
+            "Тариф 2-3 дня": "20000",
+            "Тариф 4-6 дней": "18000",
+            "Тариф 7-15 дней": "16000",
+            "Тариф 16-30 дней": "14000",
         }
 
         for days, expected_rate in (
             (1, 20_000),
             (3, 20_000),
             (4, 18_000),
-            (7, 18_000),
+            (6, 18_000),
+            (7, 16_000),
             (8, 16_000),
             (15, 16_000),
             (16, 14_000),
@@ -468,20 +470,21 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Страховой залог: 50 000 RUB", card)
         self.assertIn("Суточный пробег: 300 км", card)
 
-    def test_client_car_card_shows_engine_age_and_custom_tariff_bands(self):
+    def test_client_car_card_shows_engine_and_age_with_shared_tariffs(self):
         car = {
             "Марка и Модель": "Ford Mustang",
             "Год": "2020",
             "Класс": "Маслкар / Спорт",
             "Двигатель": "5.0 бензин (V8)",
             "Цена / сутки (RUB)": "20000",
+            "Тариф 1 день": "20000",
+            "Тариф 2-3 дня": "20000",
+            "Тариф 4-6 дней": "18000",
+            "Тариф 7-15 дней": "16000",
+            "Тариф 16-30 дней": "14000",
             "Залог": "30000",
             "Суточный пробег": "250",
             "Возраст от (лет)": "21",
-            "Тариф 1-3 дня": "20000",
-            "Тариф 4-7 дней": "18000",
-            "Тариф 8-15 дней": "16000",
-            "Тариф от 16 дней": "14000",
         }
 
         card = main._client_fleet_card_text(car)
@@ -489,14 +492,16 @@ class ClientBookingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Ford Mustang (2020 г.)", card)
         self.assertIn("Двигатель: 5.0 бензин (V8)", card)
-        self.assertIn("1–3 суток: 20 000 RUB/сутки", card)
-        self.assertIn("4–7 суток: 18 000 RUB/сутки", card)
-        self.assertIn("8–15 суток: 16 000 RUB/сутки", card)
-        self.assertIn("от 16 суток: 14 000 RUB/сутки", card)
+        self.assertIn("Стоимость: от 14 000 до 20 000 RUB/сутки", card)
         self.assertIn("Страховой залог: 30 000 RUB", card)
         self.assertIn("Суточный пробег: 250 км", card)
         self.assertIn("Возрастное ограничение: с 21 года", card)
+        self.assertNotIn("Тарифы:", card)
         self.assertIn("<b>Двигатель:</b> 5.0 бензин (V8)", caption)
+        self.assertIn(
+            "<b>Стоимость:</b> от 14 000 до 20 000 RUB/сутки",
+            caption,
+        )
         self.assertIn("<b>Возрастное ограничение:</b> с 21 года", caption)
 
     def test_client_car_characteristics_use_exact_sheet_columns_and_defaults(self):
