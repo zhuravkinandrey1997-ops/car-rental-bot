@@ -2030,6 +2030,19 @@ _CAR_TARIFF_HEADERS = (
     "Тариф 7-15 дней",
     "Тариф 16-30 дней",
 )
+_CAR_CUSTOM_TARIFF_HEADERS = (
+    "Тариф 1-3 дня",
+    "Тариф 4-7 дней",
+    "Тариф 8-15 дней",
+    "Тариф от 16 дней",
+)
+
+
+def _car_custom_tariff_rates(car: dict) -> list[int] | None:
+    raw_rates = [safe_int(car.get(header)) for header in _CAR_CUSTOM_TARIFF_HEADERS]
+    if not all(rate > 0 for rate in raw_rates):
+        return None
+    return raw_rates
 
 
 def _car_tariff_rates(car: dict) -> list[int]:
@@ -2042,6 +2055,16 @@ def _car_tariff_rates(car: dict) -> list[int]:
 
 def _car_rate_for_days(car: dict, days: int) -> int:
     normalized_days = max(1, int(days))
+    custom_rates = _car_custom_tariff_rates(car)
+    if custom_rates:
+        if normalized_days <= 3:
+            return custom_rates[0]
+        if normalized_days <= 7:
+            return custom_rates[1]
+        if normalized_days <= 15:
+            return custom_rates[2]
+        return custom_rates[3]
+
     rates = _car_tariff_rates(car)
     if normalized_days == 1:
         return rates[0]
@@ -2055,11 +2078,34 @@ def _car_rate_for_days(car: dict, days: int) -> int:
 
 
 def _client_fleet_price_range_text(car: dict) -> str:
-    rates = _car_tariff_rates(car)
+    rates = _car_custom_tariff_rates(car)
+    if rates:
+        minimum_rate = min(rates)
+        maximum_rate = max(rates)
+    else:
+        legacy_rates = _car_tariff_rates(car)
+        minimum_rate = legacy_rates[4]
+        maximum_rate = legacy_rates[0]
     return (
-        f"от {_format_number(rates[4])} "
-        f"до {_format_number(rates[0])} RUB/сутки"
+        f"от {_format_number(minimum_rate)} "
+        f"до {_format_number(maximum_rate)} RUB/сутки"
     )
+
+
+def _client_car_tariff_details(car: dict) -> list[str]:
+    rates = _car_custom_tariff_rates(car)
+    if not rates:
+        return []
+    labels = (
+        "1–3 суток",
+        "4–7 суток",
+        "8–15 суток",
+        "от 16 суток",
+    )
+    return [
+        f"  • {label}: {_format_number(rate)} RUB/сутки"
+        for label, rate in zip(labels, rates)
+    ]
 
 
 def _car_base_deposit(car: dict) -> int | None:
@@ -2143,6 +2189,35 @@ def _car_year(car: dict) -> str:
         "Model Year",
         default="",
     ).strip()
+
+
+def _car_engine(car: dict) -> str:
+    return _value(
+        car,
+        "Двигатель",
+        "Тип двигателя",
+        "Engine",
+        default="",
+    ).strip()
+
+
+def _car_age_requirement(car: dict) -> str:
+    raw_age = _value(
+        car,
+        "Возраст от (лет)",
+        "Минимальный возраст (лет)",
+        "Минимальный возраст",
+        "Возрастное ограничение",
+        default="",
+    ).strip()
+    if not raw_age:
+        return ""
+
+    age = safe_int(raw_age)
+    if age <= 0:
+        return f"с {raw_age}"
+    suffix = "года" if age % 10 == 1 and age % 100 != 11 else "лет"
+    return f"с {age} {suffix}"
 
 
 def _car_asset_stems(car: dict) -> list[str]:
@@ -4326,13 +4401,28 @@ def _client_fleet_card_text(car: dict) -> str:
     deposit_text = _client_car_deposit_text(car)
     mileage_text = _client_car_mileage_text(car)
     year = _car_year(car) or "—"
-    return (
-        f"🏎 {_car_name(car)} ({year} г.)\n\n"
-        f"• Класс: {_car_class(car)}\n"
-        f"• Стоимость: {daily_rate}\n"
-        f"• Страховой залог: {deposit_text}\n"
-        f"• Суточный пробег: {mileage_text}"
+    lines = [
+        f"🏎 {_car_name(car)} ({year} г.)",
+        "",
+        f"• Класс: {_car_class(car)}",
+    ]
+    engine = _car_engine(car)
+    if engine:
+        lines.append(f"• Двигатель: {engine}")
+    lines.append(f"• Стоимость: {daily_rate}")
+    tariff_details = _client_car_tariff_details(car)
+    if tariff_details:
+        lines.extend(["• Тарифы:", *tariff_details])
+    lines.extend(
+        [
+            f"• Страховой залог: {deposit_text}",
+            f"• Суточный пробег: {mileage_text}",
+        ]
     )
+    age_requirement = _car_age_requirement(car)
+    if age_requirement:
+        lines.append(f"• Возрастное ограничение: {age_requirement}")
+    return "\n".join(lines)
 
 
 def _client_fleet_card_caption(car: dict) -> str:
@@ -4340,13 +4430,32 @@ def _client_fleet_card_caption(car: dict) -> str:
     deposit_text = html.escape(_client_car_deposit_text(car))
     mileage_text = html.escape(_client_car_mileage_text(car))
     year = html.escape(_car_year(car) or "—")
-    return (
-        f"🏎 <b>{html.escape(_car_name(car))}</b> ({year} г.)\n\n"
-        f"• <b>Класс:</b> {html.escape(_car_class(car))}\n"
-        f"• <b>Стоимость:</b> {daily_rate}\n"
-        f"• <b>Страховой залог:</b> {deposit_text}\n"
-        f"• <b>Суточный пробег:</b> {mileage_text}"
+    lines = [
+        f"🏎 <b>{html.escape(_car_name(car))}</b> ({year} г.)",
+        "",
+        f"• <b>Класс:</b> {html.escape(_car_class(car))}",
+    ]
+    engine = _car_engine(car)
+    if engine:
+        lines.append(f"• <b>Двигатель:</b> {html.escape(engine)}")
+    lines.append(f"• <b>Стоимость:</b> {daily_rate}")
+    tariff_details = _client_car_tariff_details(car)
+    if tariff_details:
+        lines.append("• <b>Тарифы:</b>")
+        lines.extend(html.escape(line) for line in tariff_details)
+    lines.extend(
+        [
+            f"• <b>Страховой залог:</b> {deposit_text}",
+            f"• <b>Суточный пробег:</b> {mileage_text}",
+        ]
     )
+    age_requirement = _car_age_requirement(car)
+    if age_requirement:
+        lines.append(
+            f"• <b>Возрастное ограничение:</b> "
+            f"{html.escape(age_requirement)}"
+        )
+    return "\n".join(lines)
 
 
 def _car_show_in_client_bot(car: dict) -> bool:
