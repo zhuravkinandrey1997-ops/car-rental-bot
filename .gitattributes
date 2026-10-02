@@ -1,1 +1,2 @@
 bot_files.zip filter=lfs diff=lfs merge=lfs -text
+bot_files_sanitized.zip filter=lfs diff=lfs merge=lfs -text
